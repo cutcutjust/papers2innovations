@@ -1,0 +1,19 @@
+{
+  "name": "papers2innovations",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/desktop",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @p2i/desktop",
+    "build": "npm run build --workspace @p2i/contracts && npm run build --workspace @p2i/desktop",
+    "typecheck": "npm run typecheck --workspace @p2i/contracts && npm run typecheck --workspace @p2i/desktop",
+    "test": "npm run test --workspace @p2i/desktop"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
+

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Papers2Innovations local regression manifest",
+  "type": "object",
+  "required": ["schemaVersion", "generatedAt", "source", "papers"],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "source": { "const": "zotero-local" },
+    "papers": {
+      "type": "array",
+      "minItems": 30,
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "required": ["sha256", "category", "pageCount", "sizeBytes"],
+        "properties": {
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "category": { "enum": ["finft", "multimodal", "icassp", "unfiled"] },
+          "pageCount": { "type": "integer", "minimum": 1 },
+          "sizeBytes": { "type": "integer", "minimum": 1 },
+          "annotation": {
+            "type": "object",
+            "properties": {
+              "title": { "type": "string" },
+              "sectionOrder": { "type": "array", "items": { "type": "string" } },
+              "figureCount": { "type": "integer", "minimum": 0 },
+              "tableCount": { "type": "integer", "minimum": 0 },
+              "majorStructure": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

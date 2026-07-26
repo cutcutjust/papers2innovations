@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "p2i-paper-engine"
+version = "0.1.0"
+description = "Local-first ingestion engine for Papers2Innovations"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.10,<3",
+  "pypdf>=5.1,<6",
+  "Pillow>=10.4,<11",
+  "PyMuPDF>=1.25,<2"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3,<9"]
+docling = ["docling>=2.25,<3"]
+
+[project.scripts]
+p2i-engine = "p2i_engine.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["p2i_engine"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

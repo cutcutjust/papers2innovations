@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://papers2innovations.ai/schemas/agent-profile.schema.json",
+  "title": "AgentProfile",
+  "type": "object",
+  "required": ["id", "name", "enabled", "providerId", "modelId", "credentialId", "maxContextTokens", "maxOutputTokens", "contextSafetyRatio", "temperature", "timeoutSeconds", "maxRetries", "allowedTools", "networkPolicy", "writePolicy", "systemPromptId", "promptVersion"],
+  "properties": {
+    "id": { "type": "string" },
+    "name": { "type": "string", "minLength": 1 },
+    "enabled": { "type": "boolean" },
+    "providerId": { "type": "string" },
+    "modelId": { "type": "string" },
+    "credentialId": { "type": "string" },
+    "maxContextTokens": { "type": "integer", "minimum": 1 },
+    "maxOutputTokens": { "type": "integer", "minimum": 1 },
+    "contextSafetyRatio": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+    "temperature": { "type": "number", "minimum": 0 },
+    "reasoningEffort": { "type": "string" },
+    "timeoutSeconds": { "type": "integer", "minimum": 1 },
+    "maxRetries": { "type": "integer", "minimum": 0 },
+    "allowedTools": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "networkPolicy": { "enum": ["none", "academic", "full"] },
+    "writePolicy": { "enum": ["read-only", "confirm-write", "trusted-write"] },
+    "systemPromptId": { "type": "string" },
+    "promptVersion": { "type": "string" }
+  },
+  "additionalProperties": false
+}
+

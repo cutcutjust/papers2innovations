@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://papers2innovations.ai/schemas/paper-document.schema.json",
+  "title": "PaperDocument",
+  "type": "object",
+  "required": ["schema_version", "paper_id", "source_sha256", "title", "page_count", "sections", "figures", "tables", "parser", "generated_at"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "paper_id": { "type": "string", "format": "uuid" },
+    "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "title": { "type": "string", "minLength": 1 },
+    "authors": { "type": "array", "items": { "type": "string" } },
+    "abstract": { "type": ["string", "null"] },
+    "language": { "type": ["string", "null"] },
+    "page_count": { "type": "integer", "minimum": 0 },
+    "sections": { "type": "array", "items": { "$ref": "#/$defs/section" } },
+    "figures": { "type": "array", "items": { "$ref": "#/$defs/figure" } },
+    "tables": { "type": "array", "items": { "type": "object" } },
+    "parser": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": { "name": { "type": "string" }, "version": { "type": "string" } },
+      "additionalProperties": false
+    },
+    "generated_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "section": {
+      "type": "object",
+      "required": ["id", "title", "level", "order", "markdown", "anchors"],
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "level": { "type": "integer", "minimum": 1 },
+        "order": { "type": "integer", "minimum": 0 },
+        "page_start": { "type": ["integer", "null"], "minimum": 1 },
+        "page_end": { "type": ["integer", "null"], "minimum": 1 },
+        "markdown": { "type": "string" },
+        "anchors": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "figure": {
+      "type": "object",
+      "required": ["id", "relative_path", "mime_type"],
+      "properties": {
+        "id": { "type": "string" },
+        "caption": { "type": ["string", "null"] },
+        "relative_path": { "type": "string" },
+        "page": { "type": ["integer", "null"], "minimum": 1 },
+        "bbox": { "type": ["object", "null"] },
+        "mime_type": { "type": "string" }
+      }
+    }
+  },
+  "additionalProperties": false
+}
+

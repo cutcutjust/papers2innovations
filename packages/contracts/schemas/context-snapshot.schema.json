@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://papers2innovations.ai/schemas/context-snapshot.schema.json",
+  "title": "ContextSnapshot",
+  "type": "object",
+  "required": ["id", "agentProfileId", "modelId", "items", "tokenBreakdown", "promptVersion", "toolVersions", "retrievalQueries", "externalResults", "createdAt"],
+  "properties": {
+    "id": { "type": "string" },
+    "agentProfileId": { "type": "string" },
+    "modelId": { "type": "string" },
+    "reasoningEffort": { "type": "string" },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["paperId", "mode", "sectionIds", "figureIds", "estimatedTokens"],
+        "properties": {
+          "paperId": { "type": "string" },
+          "mode": { "enum": ["full", "structured", "retrieval", "sections"] },
+          "sectionIds": { "type": "array", "items": { "type": "string" } },
+          "figureIds": { "type": "array", "items": { "type": "string" } },
+          "estimatedTokens": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "tokenBreakdown": {
+      "type": "object",
+      "required": ["systemPrompt", "tools", "conversation", "papers", "figures", "outputReserve", "safetyBuffer"],
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+    "promptVersion": { "type": "string" },
+    "toolVersions": { "type": "object", "additionalProperties": { "type": "string" } },
+    "retrievalQueries": { "type": "array", "items": { "type": "string" } },
+    "externalResults": { "type": "array", "items": { "type": "object" } },
+    "createdAt": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false
+}
+
