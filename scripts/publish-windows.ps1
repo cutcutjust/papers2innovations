@@ -2,7 +2,7 @@ param(
   [Parameter(Mandatory = $false)]
   [string]$Version = "",
   [Parameter(Mandatory = $false)]
-  [string]$ReleaseRepo = "cutcutjust/papers2innovations-releases",
+  [string]$ReleaseRepo = "cutcutjust/papers2innovations",
   [Parameter(Mandatory = $false)]
   [string]$SigningKeyPath = "$env:LOCALAPPDATA/P2I/updater/papers2innovations.key",
   [Parameter(Mandatory = $false)]
@@ -63,7 +63,7 @@ $FileName = Split-Path -Leaf $Installer
 $DownloadUrl = "https://github.com/$ReleaseRepo/releases/download/$Tag/$FileName"
 $Manifest = [ordered]@{
   version = $Version
-  notes = "Adds Windows uninstall entry points and removes the extra console window on app launch."
+  notes = "Publishes source and signed Windows releases from one public repository."
   pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
   platforms = [ordered]@{
     "windows-x86_64" = [ordered]@{
