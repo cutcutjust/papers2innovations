@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 from pypdf import PdfWriter
 
+from p2i_engine.library import Library
 from p2i_engine.zotero import ZoteroImporter, ZoteroLockedError
 
 
@@ -102,3 +104,46 @@ def test_copy_is_atomic_and_hash_verified(tmp_path: Path) -> None:
     assert target.is_file()
     assert target.parent.name == "FinFT"
     assert not list(target.parent.glob("*.part"))
+
+
+def test_import_reresolves_zotero_attachment_and_enqueues_parse(tmp_path: Path) -> None:
+    zotero_dir = tmp_path / "zotero"
+    make_zotero(zotero_dir)
+    library = Library(tmp_path / "library")
+    candidate = ZoteroImporter(zotero_dir).candidates()[0]
+    # The service must ignore mutable path, hash, and metadata sent by the UI.
+    requested = {
+        **candidate,
+        "selected": True,
+        "sourcePath": str(tmp_path / "outside.pdf"),
+        "sha256": "0" * 64,
+        "title": "Untrusted title",
+    }
+
+    result = library.import_zotero([requested], zotero_dir)
+
+    target = library.papers_dir / "Zotero" / "FinFT" / "paper.pdf"
+    assert result["selected"] == 1
+    assert result["copied"] == 1
+    assert result["enqueued"] == 1
+    assert target.is_file()
+    with library.db.connect() as connection:
+        job = connection.execute("SELECT status FROM jobs").fetchone()
+        stage = connection.execute("SELECT stage, status FROM job_stages").fetchone()
+        source = connection.execute("SELECT metadata_json FROM paper_sources").fetchone()
+        parse_runs = connection.execute("SELECT COUNT(*) FROM parse_runs").fetchone()[0]
+    assert job["status"] == "DISCOVERED"
+    assert dict(stage) == {"stage": "hash", "status": "DISCOVERED"}
+    assert parse_runs == 0
+    assert json.loads(source["metadata_json"])["title"] == "Test paper"
+
+
+def test_import_rejects_unknown_attachment_before_copying(tmp_path: Path) -> None:
+    zotero_dir = tmp_path / "zotero"
+    make_zotero(zotero_dir)
+    library = Library(tmp_path / "library")
+
+    with pytest.raises(ValueError, match="unavailable"):
+        library.import_zotero([{"attachmentKey": "MISSING", "selected": True}], zotero_dir)
+
+    assert not list(library.papers_dir.rglob("*.pdf"))
