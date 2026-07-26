@@ -31,4 +31,5 @@ Papers2Innovations-Library/
 .p2i-release/
 /Papers2Innovations_*-setup.exe
 /install-*/
+/install/
 .DS_Store
