@@ -1,4 +1,4 @@
-import type { JobStage, LibraryPaper, ProgressNotification, ZoteroImportCandidate, ZoteroInspection } from "@p2i/contracts";
+import type { JobStage, LibraryPaper, ProgressNotification, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { demoMarkdown, demoPapers } from "../demo";
@@ -135,12 +135,19 @@ export async function previewZoteroImport(): Promise<ZoteroImportCandidate[]> {
   return rpc<ZoteroImportCandidate[]>("zotero.preview_import");
 }
 
-export async function importFromZotero(root: string, candidates: ZoteroImportCandidate[]): Promise<void> {
+export async function importFromZotero(root: string, dataDir: string, candidates: ZoteroImportCandidate[]): Promise<ZoteroImportResult> {
   if (!nativeRuntime) {
     await new Promise((resolve) => setTimeout(resolve, 800));
-    return;
+    return {
+      selected: candidates.filter((candidate) => candidate.selected).length,
+      copied: candidates.filter((candidate) => candidate.selected).length,
+      discovered: candidates.filter((candidate) => candidate.selected).length,
+      deduplicated: 0,
+      enqueued: candidates.filter((candidate) => candidate.selected).length,
+      jobIds: [],
+    };
   }
-  await rpc("zotero.import", { root, candidates });
+  return rpc<ZoteroImportResult>("zotero.import", { root, dataDir, candidates });
 }
 
 export interface OcrStatus {
