@@ -78,8 +78,14 @@ $ManifestPath = Join-Path $ReleaseRoot "latest.json"
 $Json = $Manifest | ConvertTo-Json -Depth 6
 [System.IO.File]::WriteAllText($ManifestPath, $Json, [System.Text.UTF8Encoding]::new($false))
 
-& $GhPath release view $Tag --repo $ReleaseRepo *> $null
-if ($LASTEXITCODE -eq 0) {
+$ReleaseExists = $false
+try {
+  & $GhPath release view $Tag --repo $ReleaseRepo *> $null
+  $ReleaseExists = $LASTEXITCODE -eq 0
+} catch {
+  $ReleaseExists = $false
+}
+if ($ReleaseExists) {
   & $GhPath release upload $Tag $Installer $Signature $ManifestPath --repo $ReleaseRepo --clobber
 } else {
   & $GhPath release create $Tag $Installer $Signature $ManifestPath --repo $ReleaseRepo `
