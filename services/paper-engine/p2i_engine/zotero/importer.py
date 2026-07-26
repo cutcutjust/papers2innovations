@@ -109,15 +109,23 @@ class ZoteroImporter:
         return result
 
     @staticmethod
-    def _attachment_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
-        return connection.execute(
+    def _attachment_rows(
+        connection: sqlite3.Connection, attachment_keys: set[str] | None = None
+    ) -> list[sqlite3.Row]:
+        query = (
             "SELECT a.itemID attachmentID, a.key attachmentKey, ia.parentItemID, ia.path, "
             "ia.storageModTime, p.key itemKey "
             "FROM itemAttachments ia JOIN items a ON a.itemID = ia.itemID "
             "JOIN items p ON p.itemID = ia.parentItemID "
             "LEFT JOIN deletedItems d ON d.itemID = a.itemID "
-            "WHERE d.itemID IS NULL AND lower(ia.contentType) = 'application/pdf' ORDER BY a.itemID"
-        ).fetchall()
+            "WHERE d.itemID IS NULL AND lower(ia.contentType) = 'application/pdf'"
+        )
+        parameters: tuple[str, ...] = ()
+        if attachment_keys:
+            placeholders = ",".join("?" for _ in attachment_keys)
+            query += f" AND a.key IN ({placeholders})"
+            parameters = tuple(sorted(attachment_keys))
+        return connection.execute(f"{query} ORDER BY a.itemID", parameters).fetchall()
 
     def _resolve_path(self, row: sqlite3.Row) -> Path:
         value = row["path"] or ""
@@ -170,13 +178,13 @@ class ZoteroImporter:
             return "icassp"
         return "unfiled"
 
-    def candidates(self) -> list[dict[str, Any]]:
+    def candidates(self, attachment_keys: set[str] | None = None) -> list[dict[str, Any]]:
         reason = self.lock_reason()
         if reason:
             raise ZoteroLockedError(reason)
         candidates: list[dict[str, Any]] = []
         with self._connect() as connection:
-            for row in self._attachment_rows(connection):
+            for row in self._attachment_rows(connection, attachment_keys):
                 path = self._resolve_path(row)
                 if not path.exists():
                     continue
