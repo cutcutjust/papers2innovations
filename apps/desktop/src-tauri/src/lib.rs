@@ -692,6 +692,32 @@ fn choose_library() -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+#[tauri::command]
+fn uninstall_app(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("Cannot locate the application: {error}"))?;
+        let uninstaller = executable
+            .parent()
+            .ok_or("Cannot locate the installation directory")?
+            .join("uninstall.exe");
+        if !uninstaller.is_file() {
+            return Err("The uninstaller is unavailable. Reinstall the app to repair it.".into());
+        }
+        Command::new(&uninstaller)
+            .spawn()
+            .map_err(|error| format!("Cannot start the uninstaller: {error}"))?;
+        app.exit(0);
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        Err("Use your operating system's application manager to uninstall this app.".into())
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
@@ -730,7 +756,8 @@ pub fn run() {
             qwen_test_connection,
             ocr_status,
             stronghold_password,
-            watch_library
+            watch_library,
+            uninstall_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running Papers2Innovations");

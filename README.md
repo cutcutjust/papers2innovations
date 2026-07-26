@@ -44,6 +44,8 @@ Windows releases are signed for the Tauri updater and published with a static `l
 
 The updater signing private key stays outside the repository. The public binary distribution endpoint is configured in `tauri.conf.json`; the source repository can remain private.
 
+Windows installs register with Apps & features and include both a Start menu uninstall shortcut and an in-app uninstall action under Settings. The paper library is stored separately and is not removed with the desktop app.
+
 Qwen credentials must be entered through the native **OCR & security** settings view. The API key is encrypted in Stronghold, the Stronghold password is generated automatically and held by the operating system credential store, and neither value belongs in environment files or repository configuration.
 
 ## Validation

@@ -6,6 +6,7 @@ import {
   saveOcrCredential,
   testQwenConnection,
 } from "../lib/credentials";
+import { nativeRuntime, uninstallApplication } from "../lib/bridge";
 
 export function Settings() {
   const [configured, setConfigured] = useState(false);
@@ -68,6 +69,11 @@ export function Settings() {
     setStatus("Credential removed from Stronghold.");
   });
 
+  const uninstall = () => {
+    if (!window.confirm("Uninstall Papers2Innovations from this computer? Your paper library will be kept.")) return;
+    void run(uninstallApplication);
+  };
+
   return <main className="settings-page">
     <div className="page-title-block"><div className="page-icon"><ShieldCheck size={20} /></div><div><h1>OCR & security</h1><p>Configure full-page Qwen OCR through the Rust model gateway.</p></div></div>
     <section className="settings-section"><div className="settings-heading"><div><h2>Stronghold vault</h2><p>Automatically unlocked with a random key held by the operating system credential store.</p></div><ShieldCheck size={18} /></div><div className="vault-state"><span>{configured ? "Qwen credential stored" : "Vault ready"}</span><strong>{configured ? "Configured" : "Not configured"}</strong></div></section>
@@ -78,5 +84,6 @@ export function Settings() {
       {status && <div className="settings-status"><CheckCircle2 size={15} /> {status}</div>}
     </section>
     <section className="security-facts"><div><span>Python engine</span><strong>No API key access</strong></div><div><span>SQLite & logs</span><strong>Secret redacted</strong></div><div><span>Request concurrency</span><strong>2 pages</strong></div><div><span>Retry policy</span><strong>2 / 4 / 8 seconds</strong></div></section>
+    {nativeRuntime && <section className="settings-section app-management"><div className="settings-heading"><div><h2>Application</h2><p>Remove the desktop app while keeping the independent paper library.</p></div><Trash2 size={18} /></div><button className="danger-button" onClick={uninstall} disabled={busy}><Trash2 size={15} /> Uninstall Papers2Innovations</button></section>}
   </main>;
 }

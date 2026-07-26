@@ -171,6 +171,11 @@ export async function startLibraryWatcher(root: string): Promise<void> {
   await invoke("watch_library", { root });
 }
 
+export async function uninstallApplication(): Promise<void> {
+  if (!nativeRuntime) return;
+  await invoke("uninstall_app");
+}
+
 export function assetUrl(path: string | undefined): string | undefined {
   if (!path || !nativeRuntime) return undefined;
   return convertFileSrc(path);

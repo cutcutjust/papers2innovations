@@ -254,6 +254,8 @@ button.activity-row:hover { background: var(--surface-soft); }
 .secondary-button, .danger-button { display: flex; height: 35px; align-items: center; gap: 7px; padding: 0 12px; background: #fff; border: 1px solid var(--line-strong); border-radius: 5px; cursor: pointer; font-size: 9px; font-weight: 700; }
 .danger-button { color: var(--coral); border-color: #e7c2bb; }.secondary-button:disabled, .danger-button:disabled { opacity: .45; cursor: not-allowed; }
 .settings-status { display: flex; align-items: center; gap: 7px; margin-top: 12px; padding: 8px 10px; color: var(--green); background: var(--green-soft); border-radius: 4px; font-size: 9px; }
+.app-management { margin-top: 14px; }
+.app-management .settings-heading { margin-bottom: 10px; }
 .security-facts { display: grid; max-width: 900px; grid-template-columns: repeat(4, 1fr); margin: 0 auto; background: #222825; border-radius: 6px; }
 .security-facts div { display: grid; gap: 4px; padding: 12px; border-right: 1px solid #3b433f; }
 .security-facts div:last-child { border: 0; }.security-facts span { color: #8e9992; font-size: 8px; }.security-facts strong { color: #e5ebe7; font-size: 9px; }
