@@ -2,6 +2,8 @@
 
 Papers2Innovations is a local-first desktop workspace that turns a folder of PDF papers into a persistent, searchable Markdown library. This repository implements the first vertical slice from `papers2innovations plan v1.md`.
 
+Download the current Windows installer from [GitHub Releases](https://github.com/cutcutjust/papers2innovations/releases/latest).
+
 ## Development
 
 Prerequisites: Node.js 20+, Python 3.11+, Rust stable with `rustfmt` and `clippy`, and the Tauri 2 platform prerequisites.
@@ -42,7 +44,7 @@ Windows releases are signed for the Tauri updater and published with a static `l
 .\scripts\publish-windows.ps1
 ```
 
-The updater signing private key stays outside the repository. The public binary distribution endpoint is configured in `tauri.conf.json`; the source repository can remain private.
+The updater signing private key stays outside the repository. Source code, signed installers, signatures, and updater manifests are published together in this public repository.
 
 Windows installs register with Apps & features and include both a Start menu uninstall shortcut and an in-app uninstall action under Settings. The paper library is stored separately and is not removed with the desktop app.
 
