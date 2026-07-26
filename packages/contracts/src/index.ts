@@ -113,6 +113,15 @@ export interface ZoteroInspection {
   collections: Array<{ id: number; name: string; parentId?: number }>;
 }
 
+export interface ZoteroImportResult {
+  selected: number;
+  copied: number;
+  discovered: number;
+  deduplicated: number;
+  enqueued: number;
+  jobIds: string[];
+}
+
 export interface PaperSource {
   id: string;
   paperId: string;
