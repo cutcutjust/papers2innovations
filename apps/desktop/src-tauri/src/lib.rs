@@ -142,6 +142,8 @@ impl Engine {
         if let Ok(binary) = std::env::var("P2I_ENGINE_BIN") {
             let mut command = Command::new(binary);
             command.arg("rpc");
+            command.env("PYTHONIOENCODING", "utf-8");
+            command.env("PYTHONUTF8", "1");
             return (command, service_dir);
         }
         let executable_name = if cfg!(windows) {
@@ -157,6 +159,8 @@ impl Engine {
                 if binary.is_file() {
                     let mut command = Command::new(binary);
                     command.arg("rpc");
+                    command.env("PYTHONIOENCODING", "utf-8");
+                    command.env("PYTHONUTF8", "1");
                     return (command, service_dir);
                 }
             }
@@ -174,6 +178,7 @@ impl Engine {
         command.args(["-X", "utf8", "-m", "p2i_engine", "rpc"]);
         command.env("PYTHONPATH", &service_dir);
         command.env("PYTHONIOENCODING", "utf-8");
+        command.env("PYTHONUTF8", "1");
         (command, service_dir)
     }
 
@@ -424,9 +429,16 @@ impl Engine {
                 .and_then(|mut pending| pending.remove(&id));
             return Err(format!("failed to write to paper engine: {error}"));
         }
-        let response = receiver
-            .await
-            .map_err(|_| "paper engine stopped before replying")?;
+        let response = match tokio::time::timeout(Duration::from_secs(20), receiver).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => return Err("paper engine stopped before replying".into()),
+            Err(_) => {
+                if let Ok(mut pending) = self.0.pending.lock() {
+                    pending.remove(&id);
+                }
+                return Err("paper engine did not respond within 20 seconds".into());
+            }
+        };
         if let Some(error) = response.get("error") {
             return Err(error
                 .get("message")
@@ -682,6 +694,8 @@ fn choose_library() -> Option<String> {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_stronghold::Builder::new(|password| {
                 use argon2::{hash_raw, Config, Variant, Version};

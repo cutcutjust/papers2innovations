@@ -1,6 +1,9 @@
 param(
   [Parameter(Mandatory = $false)]
-  [string]$TargetTriple = ""
+  [string]$TargetTriple = "",
+  [Parameter(Mandatory = $false)]
+  [ValidateSet("core", "full")]
+  [string]$Flavor = "core"
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,6 +21,7 @@ $Python = if (Test-Path $WindowsVirtualenvPython) {
 }
 $DistRoot = Join-Path $RepoRoot "dist"
 $BuildRoot = Join-Path $RepoRoot "build"
+$MigrationsRoot = Join-Path $EngineRoot "migrations"
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
 
 if (-not $TargetTriple) {
@@ -26,14 +30,36 @@ if (-not $TargetTriple) {
   $TargetTriple = ($HostLine.Line -replace '^host:\s*', '').Trim()
 }
 
-& $Python -m pip install -e "${EngineRoot}[docling]" pyinstaller
-& $Python -m PyInstaller --noconfirm --clean --onefile --name p2i-paper-engine `
-  --collect-all docling --collect-all docling_core `
-  --distpath $DistRoot --workpath $BuildRoot --specpath $RepoRoot `
-  --paths $EngineRoot (Join-Path $PSScriptRoot "sidecar_entry.py")
+$EnginePackage = if ($Flavor -eq "full") { "${EngineRoot}[docling]" } else { $EngineRoot }
+& $Python -m pip install -e $EnginePackage pyinstaller
+
+$PyInstallerArgs = @(
+  "--noconfirm", "--clean", "--onefile",
+  "--name", "p2i-paper-engine",
+  "--distpath", $DistRoot,
+  "--workpath", $BuildRoot,
+  "--specpath", $RepoRoot,
+  "--paths", $EngineRoot,
+  "--add-data", "$MigrationsRoot$([IO.Path]::PathSeparator)migrations"
+)
+if ($Flavor -eq "full") {
+  $PyInstallerArgs += @("--collect-all", "docling", "--collect-all", "docling_core")
+} else {
+  $OptionalModules = @(
+    "accelerate", "cv2", "docling", "docling_core", "docling_ibm_models",
+    "docling_parse", "huggingface_hub", "numpy", "onnxruntime", "pandas",
+    "rapidocr", "safetensors", "scipy", "sklearn", "torch", "torchaudio",
+    "torchvision", "transformers"
+  )
+  foreach ($Module in $OptionalModules) {
+    $PyInstallerArgs += @("--exclude-module", $Module)
+  }
+}
+$PyInstallerArgs += (Join-Path $PSScriptRoot "sidecar_entry.py")
+& $Python -m PyInstaller @PyInstallerArgs
 
 $Extension = if ($IsWindows -or $env:OS -eq "Windows_NT") { ".exe" } else { "" }
 $Source = Join-Path $DistRoot "p2i-paper-engine$Extension"
 $Destination = Join-Path $OutputRoot "p2i-paper-engine-$TargetTriple$Extension"
 Copy-Item -Force $Source $Destination
-Write-Output $Destination
+Write-Output "$Destination ($Flavor)"

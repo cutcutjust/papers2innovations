@@ -51,6 +51,9 @@ jobs:
           cargo test
       - name: Build Tauri bundle
         run: npm run tauri build --workspace @p2i/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
           name: papers2innovations-${{ runner.os }}-${{ runner.arch }}

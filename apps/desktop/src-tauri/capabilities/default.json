@@ -7,6 +7,8 @@
     "core:default",
     "stronghold:default",
     "stronghold:allow-destroy",
-    "stronghold:allow-remove-store-record"
+    "stronghold:allow-remove-store-record",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

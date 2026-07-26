@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FolderOpen, LoaderCircle } from "lucide-react";
+import { FolderOpen } from "lucide-react";
+import { AppUpdater } from "./components/AppUpdater";
 import { Activity } from "./components/Activity";
 import { Settings } from "./components/Settings";
 import { ZoteroImport } from "./components/ZoteroImport";
@@ -9,6 +10,7 @@ import { PaperList } from "./components/PaperList";
 import { Reader } from "./components/Reader";
 import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
+import { LibraryStartup } from "./components/LibraryStartup";
 import { chooseLibrary, initializeLibrary, listJobs, listPapers, nativeRuntime, onEngineProgress, scanLibrary, startLibraryWatcher } from "./lib/bridge";
 import { hydrateOcrCredential } from "./lib/credentials";
 import { useWorkspace } from "./store";
@@ -20,9 +22,14 @@ export function App() {
   const root = workspace.root || defaultRoot;
   const papersQuery = useQuery({
     queryKey: ["papers", root],
-    queryFn: () => listPapers(root),
+    queryFn: async () => {
+      await initializeLibrary(root);
+      return listPapers(root);
+    },
     enabled: Boolean(root),
-    refetchInterval: nativeRuntime ? 4_000 : false,
+    refetchInterval: nativeRuntime ? 10_000 : false,
+    refetchOnWindowFocus: false,
+    retry: false,
   });
   const scanMutation = useMutation({
     mutationFn: () => scanLibrary(root),
@@ -32,7 +39,8 @@ export function App() {
     queryKey: ["jobs", root],
     queryFn: () => listJobs(root),
     enabled: Boolean(root && workspace.view === "jobs"),
-    refetchInterval: 2_000,
+    refetchInterval: 4_000,
+    retry: false,
   });
 
   useEffect(() => {
@@ -50,8 +58,12 @@ export function App() {
   }, [queryClient, root]);
 
   useEffect(() => {
-    if (!nativeRuntime || !root) return;
+    if (!nativeRuntime || !root || !papersQuery.isSuccess) return;
     startLibraryWatcher(root).catch(() => undefined);
+  }, [papersQuery.isSuccess, root]);
+
+  useEffect(() => {
+    if (!nativeRuntime || !root || !papersQuery.isSuccess) return;
     let running = false;
     const timer = window.setInterval(async () => {
       if (running) return;
@@ -62,9 +74,9 @@ export function App() {
       } finally {
         running = false;
       }
-    }, 2_000);
+    }, 10_000);
     return () => window.clearInterval(timer);
-  }, [queryClient, root]);
+  }, [papersQuery.isSuccess, queryClient, root]);
 
   const choose = async () => {
     const selected = await chooseLibrary();
@@ -95,6 +107,31 @@ export function App() {
 
   const selected = papers.find((paper) => paper.id === workspace.selectedPaperId);
 
+  const workspaceContent = workspace.view === "settings" ? (
+    <Settings />
+  ) : workspace.view === "import" ? (
+    <ZoteroImport root={root} />
+  ) : workspace.view === "jobs" ? (
+    <Activity
+      papers={papersQuery.data ?? []}
+      jobs={jobsQuery.data ?? []}
+      root={root}
+      loading={jobsQuery.isLoading}
+      error={jobsQuery.error instanceof Error ? jobsQuery.error : null}
+      onRetry={() => void jobsQuery.refetch()}
+    />
+  ) : papersQuery.isLoading ? (
+    <LibraryStartup onRetry={() => void papersQuery.refetch()} />
+  ) : papersQuery.isError ? (
+    <LibraryStartup error={new Error(papersQuery.error instanceof Error ? papersQuery.error.message : String(papersQuery.error ?? "Unable to open the local index"))} onRetry={() => void papersQuery.refetch()} />
+  ) : (
+    <div className="content-grid">
+      <PaperList papers={papers} />
+      <Reader paper={selected} root={root} />
+      <Inspector paper={selected} />
+    </div>
+  );
+
   if (!root) {
     return (
       <div className="setup-screen">
@@ -111,20 +148,9 @@ export function App() {
       <Sidebar />
       <div className="workspace-shell">
         <Topbar scanning={scanMutation.isPending} onScan={() => scanMutation.mutate()} onChooseLibrary={choose} />
-        {papersQuery.isLoading ? <div className="app-loading"><LoaderCircle className="spin" /><span>Opening local index…</span></div> : workspace.view === "jobs" ? (
-          <Activity papers={papersQuery.data ?? []} jobs={jobsQuery.data ?? []} root={root} />
-        ) : workspace.view === "import" ? (
-          <ZoteroImport root={root} />
-        ) : workspace.view === "settings" ? (
-          <Settings />
-        ) : (
-          <div className="content-grid">
-            <PaperList papers={papers} />
-            <Reader paper={selected} root={root} />
-            <Inspector paper={selected} />
-          </div>
-        )}
+        {workspaceContent}
       </div>
+      <AppUpdater />
     </div>
   );
 }

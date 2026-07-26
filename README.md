@@ -23,12 +23,26 @@ Run the paper engine directly:
 
 The library layout is created on first use. Users manage only `Papers/`; generated assets and the SQLite database live under `.p2i/`.
 
-Build the packaged Python sidecar before checking or bundling the native app because Tauri validates `externalBin` during its Rust build script:
+Build the lightweight packaged Python sidecar before checking or bundling the native app because Tauri validates `externalBin` during its Rust build script:
 
 ```powershell
 .\scripts\build-sidecar.ps1
 npm run tauri build --workspace @p2i/desktop
 ```
+
+The default `core` flavor omits Docling/Torch from the installer for fast startup and uses the marked `pypdf` fallback. Build the large offline Docling flavor only when required:
+
+```powershell
+.\scripts\build-sidecar.ps1 -Flavor full
+```
+
+Windows releases are signed for the Tauri updater and published with a static `latest.json` manifest:
+
+```powershell
+.\scripts\publish-windows.ps1
+```
+
+The updater signing private key stays outside the repository. The public binary distribution endpoint is configured in `tauri.conf.json`; the source repository can remain private.
 
 Qwen credentials must be entered through the native **OCR & security** settings view. The API key is encrypted in Stronghold, the Stronghold password is generated automatically and held by the operating system credential store, and neither value belongs in environment files or repository configuration.
 

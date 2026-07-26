@@ -5,7 +5,7 @@ import type { JobRecord } from "../lib/bridge";
 import { cancelJob, retryJob } from "../lib/bridge";
 import { Status } from "./Status";
 
-export function Activity({ papers, jobs, root }: { papers: LibraryPaper[]; jobs: JobRecord[]; root: string }) {
+export function Activity({ papers, jobs, root, loading = false, error, onRetry }: { papers: LibraryPaper[]; jobs: JobRecord[]; root: string; loading?: boolean; error?: Error | null; onRetry?: () => void }) {
   const queryClient = useQueryClient();
   const action = useMutation({
     mutationFn: ({ kind, id }: { kind: "cancel" | "retry"; id: string }) => kind === "cancel" ? cancelJob(root, id) : retryJob(root, id),
@@ -15,6 +15,8 @@ export function Activity({ papers, jobs, root }: { papers: LibraryPaper[]; jobs:
   return (
     <main className="activity-page">
       <div className="activity-header"><ActivityIcon size={21} /><div><h1>Activity</h1><p>Persisted ingestion and parse state</p></div></div>
+      {loading && <div className="inline-loading"><RefreshCw className="spin" size={16} /> Loading activity...</div>}
+      {error && <div className="notice error-notice"><FileText size={18} /><div><strong>Activity unavailable</strong><p>{error.message}</p>{onRetry && <button className="secondary-button" onClick={onRetry}><RefreshCw size={14} /> Retry</button>}</div></div>}
       <div className="job-list">
         {jobs.map((job) => {
           const paper = job.paper_id ? paperById.get(job.paper_id) : undefined;

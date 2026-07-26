@@ -28,4 +28,7 @@ Papers2Innovations-Library/
 *.sqlite-shm
 *.sqlite-wal
 .stronghold/
+.p2i-release/
+/Papers2Innovations_*-setup.exe
+/install-*/
 .DS_Store

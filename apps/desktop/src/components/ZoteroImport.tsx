@@ -1,14 +1,14 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ZoteroImportCandidate } from "@p2i/contracts";
-import { AlertTriangle, CheckCircle2, Database, FileInput, FolderTree, LoaderCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Database, FileInput, FolderTree, LoaderCircle, RefreshCw } from "lucide-react";
 import { getOcrStatus, importFromZotero, inspectZotero, previewZoteroImport } from "../lib/bridge";
 
 export function ZoteroImport({ root }: { root: string }) {
   const queryClient = useQueryClient();
-  const inspection = useQuery({ queryKey: ["zotero-inspection"], queryFn: inspectZotero });
-  const ocrStatus = useQuery({ queryKey: ["ocr-status"], queryFn: getOcrStatus });
-  const preview = useQuery({ queryKey: ["zotero-preview"], queryFn: previewZoteroImport, enabled: Boolean(inspection.data && !inspection.data.locked) });
+  const inspection = useQuery({ queryKey: ["zotero-inspection"], queryFn: inspectZotero, retry: false });
+  const ocrStatus = useQuery({ queryKey: ["ocr-status"], queryFn: getOcrStatus, retry: false });
+  const preview = useQuery({ queryKey: ["zotero-preview"], queryFn: previewZoteroImport, enabled: Boolean(inspection.data && !inspection.data.locked), retry: false });
   const [selection, setSelection] = useState<Record<string, boolean>>({});
   const candidates = useMemo(() => (preview.data ?? []).map((candidate) => ({ ...candidate, selected: selection[candidate.attachmentKey] ?? candidate.selected })), [preview.data, selection]);
   const selected = candidates.filter((candidate) => candidate.selected);
@@ -19,7 +19,8 @@ export function ZoteroImport({ root }: { root: string }) {
 
   return <main className="import-page">
     <div className="page-title-block"><div className="page-icon"><FileInput size={20} /></div><div><h1>Import from Zotero</h1><p>Copy managed PDFs into P2I and retain source provenance.</p></div></div>
-    {inspection.isLoading ? <div className="inline-loading"><LoaderCircle className="spin" /> Inspecting Zotero library…</div> : inspection.data?.locked ?
+    {inspection.isLoading ? <div className="inline-loading"><LoaderCircle className="spin" /> Inspecting Zotero library...</div> : inspection.isError ?
+      <div className="notice error-notice"><AlertTriangle size={19} /><div><strong>Local engine unavailable</strong><p>{inspection.error instanceof Error ? inspection.error.message : String(inspection.error ?? "Zotero inspection failed")}</p><button className="secondary-button" onClick={() => void inspection.refetch()}><RefreshCw size={14} /> Retry</button></div></div> : inspection.data?.locked ?
       <div className="notice error-notice"><AlertTriangle size={19} /><div><strong>Zotero library is locked</strong><p>{inspection.data.lockReason}</p><p>Close Zotero cleanly and refresh. Backups are never used for formal import.</p></div></div> : inspection.data && <>
         <section className="source-band"><Database size={18} /><div><strong>{inspection.data.dataDir}</strong><span>{inspection.data.itemCount} items · {inspection.data.pdfCount} PDFs · {inspection.data.missingPdfCount} missing</span></div><span className="source-ready"><CheckCircle2 size={14} /> Read-only</span></section>
         {!ocrReady && <div className="notice error-notice"><AlertTriangle size={19} /><div><strong>Qwen OCR is not ready</strong><p>Save a credential, grant page-upload consent, and pass the connection test in Settings before formal import.</p></div></div>}
