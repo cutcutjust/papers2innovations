@@ -14,3 +14,10 @@
     Delete "$SMPROGRAMS\Uninstall ${PRODUCTNAME}.lnk"
   !endif
 !macroend
+
+!macro NSIS_HOOK_POSTUNINSTALL
+  !if "${STARTMENUFOLDER}" != ""
+    Delete "$SMPROGRAMS\$AppStartMenuFolder\Uninstall ${PRODUCTNAME}.lnk"
+    RMDir "$SMPROGRAMS\$AppStartMenuFolder"
+  !endif
+!macroend
