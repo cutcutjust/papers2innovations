@@ -76,7 +76,17 @@ class RpcServer:
         if method == "ping":
             return {"pong": True, "version": __version__}
         if method == "library.initialize":
-            return self.library(params["root"]).initialize()
+            library = self.library(params["root"])
+            result = library.initialize(resume_recovered=False)
+            recovered_job_ids = library.take_recovered_job_ids()
+            if recovered_job_ids:
+                self.executor.submit(
+                    library.run_queued_jobs,
+                    recovered_job_ids,
+                    self.notify_progress,
+                    request_id,
+                )
+            return result
         if method == "library.scan":
             return self.library(params["root"]).scan(
                 self.notify_progress,
@@ -117,9 +127,22 @@ class RpcServer:
             importer = ZoteroImporter(params.get("dataDir"))
             return importer.recommended_sample(importer.candidates())
         if method == "zotero.import":
-            return self.library(params["root"]).import_zotero(
-                params.get("candidates", []), self.notify_progress, request_id
+            library = self.library(params["root"])
+            result = library.import_zotero(
+                params.get("candidates", []),
+                params.get("dataDir"),
+                self.notify_progress,
+                request_id,
             )
+            job_ids = result.get("jobIds", [])
+            if job_ids:
+                self.executor.submit(
+                    library.run_queued_jobs,
+                    job_ids,
+                    self.notify_progress,
+                    request_id,
+                )
+            return result
         if method == "component.status":
             import importlib.util
 
