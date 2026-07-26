@@ -6,6 +6,8 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from threading import Lock
+from typing import Any, Iterable
 
 import fitz
 
@@ -28,9 +30,11 @@ class Library:
         self.db = Database(self.internal_dir / "library.sqlite")
         self._stability: dict[str, tuple[int, int, float]] = {}
         self._initialized = False
+        self._recovered_jobs: list[dict[str, str]] = []
+        self._queue_lock = Lock()
         self.ocr_page = ocr_page
 
-    def initialize(self) -> dict[str, str]:
+    def initialize(self, resume_recovered: bool = True) -> dict[str, str]:
         for directory in (
             self.papers_dir,
             self.exports_dir / "bibtex",
@@ -45,22 +49,24 @@ class Library:
         if not self._initialized:
             recovered = self._recover_interrupted_jobs()
             self._initialized = True
-            for job in recovered:
-                path = Path(job["absolute_path"])
-                if path.is_file():
-                    self._parse(
-                        path,
-                        job["sha256"],
-                        job["paper_id"],
-                        job["id"],
-                        None,
-                        None,
-                    )
+            self._recovered_jobs = recovered
+            if resume_recovered:
+                self.run_queued_jobs(
+                    [job["id"] for job in recovered],
+                    callback=None,
+                    request_id=None,
+                )
+                self._recovered_jobs = []
         return {
             "root": str(self.root),
             "papersDir": str(self.papers_dir),
             "database": str(self.db.path),
         }
+
+    def take_recovered_job_ids(self) -> list[str]:
+        job_ids = [job["id"] for job in self._recovered_jobs]
+        self._recovered_jobs = []
+        return job_ids
 
     def _recover_interrupted_jobs(self) -> list[dict]:
         transient = tuple(
@@ -214,6 +220,11 @@ class Library:
                     now,
                     now,
                 ),
+            )
+            connection.execute(
+                "INSERT INTO job_stages(id, job_id, stage, status, progress, updated_at) "
+                "VALUES (?, ?, 'hash', ?, 0, ?)",
+                (str(uuid.uuid4()), job_id, JobStatus.DISCOVERED.value, now),
             )
         return paper_id, paper_file_id, job_id
 
@@ -609,6 +620,95 @@ class Library:
                     )
         return {"discovered": discovered, "parsed": parsed, "deduplicated": deduplicated}
 
+    def enqueue_paths(self, paths: Iterable[Path]) -> dict[str, Any]:
+        """Register trusted PDFs without blocking the import RPC on document parsing."""
+        self.initialize()
+        discovered = 0
+        deduplicated = 0
+        job_ids: list[str] = []
+        current_paths: dict[str, Path] = {}
+        for value in paths:
+            path = Path(value).resolve()
+            if path.suffix.lower() != ".pdf" or not path.is_file():
+                raise FileNotFoundError(path)
+            try:
+                path.relative_to(self.papers_dir)
+            except ValueError as error:
+                raise ValueError(f"Imported path is outside Papers: {path}") from error
+            current_paths[str(path)] = path
+
+        for absolute, path in sorted(current_paths.items()):
+            with self.db.connect() as connection:
+                existing = connection.execute(
+                    "SELECT * FROM paper_files WHERE absolute_path = ?", (absolute,)
+                ).fetchone()
+            stat = path.stat()
+            if existing and existing["size_bytes"] == stat.st_size and existing["modified_at_ns"] == stat.st_mtime_ns:
+                with self.db.connect() as connection:
+                    connection.execute(
+                        "UPDATE paper_files SET is_missing = 0, updated_at = ? WHERE id = ?",
+                        (utc_now(), existing["id"]),
+                    )
+                continue
+
+            sha256 = self._sha256(path)
+            if existing and existing["sha256"] == sha256:
+                with self.db.connect() as connection:
+                    connection.execute(
+                        "UPDATE paper_files SET is_missing = 0, updated_at = ? WHERE id = ?",
+                        (utc_now(), existing["id"]),
+                    )
+                continue
+            discovered += 1
+            if existing and existing["sha256"] != sha256:
+                with self.db.connect() as connection:
+                    connection.execute(
+                        "UPDATE paper_files SET absolute_path = ? WHERE id = ?",
+                        (f"{absolute}.superseded.{existing['sha256'][:8]}", existing["id"]),
+                    )
+            if self._attach_duplicate_or_move(path, sha256):
+                deduplicated += 1
+                continue
+            _, _, job_id = self._create_paper_and_file(path, sha256)
+            job_ids.append(job_id)
+
+        return {
+            "discovered": discovered,
+            "deduplicated": deduplicated,
+            "enqueued": len(job_ids),
+            "jobIds": job_ids,
+        }
+
+    def run_queued_jobs(
+        self,
+        job_ids: Iterable[str],
+        callback: ProgressCallback | None = None,
+        request_id: str | int | None = None,
+    ) -> dict[str, int]:
+        completed = 0
+        skipped = 0
+        with self._queue_lock:
+            for job_id in job_ids:
+                with self.db.connect() as connection:
+                    row = connection.execute(
+                        "SELECT j.id, j.paper_id, j.status, j.finished_at, pf.absolute_path, pf.sha256 "
+                        "FROM jobs j JOIN paper_files pf ON pf.id = j.paper_file_id WHERE j.id = ?",
+                        (job_id,),
+                    ).fetchone()
+                if not row or row["finished_at"] or row["status"] not in {
+                    JobStatus.DISCOVERED.value,
+                    JobStatus.QUEUED.value,
+                }:
+                    skipped += 1
+                    continue
+                path = Path(row["absolute_path"])
+                if not path.is_file():
+                    skipped += 1
+                    continue
+                self._parse(path, row["sha256"], row["paper_id"], row["id"], callback, request_id)
+                completed += 1
+        return {"completed": completed, "skipped": skipped}
+
     def list_papers(self) -> list[dict]:
         self.initialize()
         with self.db.connect() as connection:
@@ -750,18 +850,32 @@ class Library:
     def import_zotero(
         self,
         candidates: list[dict],
+        data_dir: str | Path | None = None,
         callback: ProgressCallback | None = None,
         request_id: str | int | None = None,
-    ) -> dict[str, int]:
+    ) -> dict[str, Any]:
         self.initialize()
-        importer = ZoteroImporter()
+        importer = ZoteroImporter(data_dir)
         if reason := importer.lock_reason():
             raise ZoteroLockedError(reason)
-        selected = [candidate for candidate in candidates if candidate.get("selected")]
+        selected_keys = {
+            candidate.get("attachmentKey")
+            for candidate in candidates
+            if candidate.get("selected") and isinstance(candidate.get("attachmentKey"), str)
+        }
+        if not selected_keys:
+            return {"selected": 0, "copied": 0, "enqueued": 0, "deduplicated": 0, "jobIds": []}
+        selected = importer.candidates(selected_keys)
+        found_keys = {candidate["attachmentKey"] for candidate in selected}
+        missing_keys = selected_keys - found_keys
+        if missing_keys:
+            raise ValueError(
+                "Selected Zotero attachments are unavailable: " + ", ".join(sorted(missing_keys))
+            )
         copied: list[tuple[dict, Path]] = []
         for candidate in selected:
             copied.append((candidate, importer.copy_candidate(candidate, self.papers_dir)))
-        scan_result = self.scan(callback, request_id)
+        enqueue_result = self.enqueue_paths(target for _, target in copied)
         now = utc_now()
         with self.db.connect() as connection:
             for candidate, target in copied:
@@ -820,7 +934,7 @@ class Library:
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         temporary_manifest.replace(manifest_path)
-        return {"selected": len(selected), "copied": len(copied), **scan_result}
+        return {"selected": len(selected), "copied": len(copied), **enqueue_result}
 
     def read_markdown(self, paper_id: str) -> str:
         with self.db.connect() as connection:
