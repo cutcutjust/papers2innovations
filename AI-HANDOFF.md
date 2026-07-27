@@ -9,14 +9,15 @@
 - 公开仓库：`cutcutjust/papers2innovations`；开发分支：`codex/native-import-release`；Draft PR：`#1`。
 - P0 已完成：OpenAI-compatible / Anthropic Provider、Stronghold 凭证、Rust 安全流式网关、取消、超时、usage 和错误脱敏。
 - Reader 已读取真实 `document.json`；段落翻译支持流式、取消、重试、revisioned SQLite 保存和重启恢复。
+- `0008_reader_interactions.sql` 已实现公式/定理解释和 Reader Agent Chat 的 revisioned 持久化；两者均复用 Rust 安全模型流，支持取消、重试、错误状态、usage、Markdown/公式渲染和窄屏 Agent 抽屉。
 - `0004_context_draft.sql` 已实现 Reader / Context / Agents / Innovate 共用的持久化 Context draft。
 - `0005_context_compressions.sql` 已实现 AI Context 压缩、精确 active revision、模型与 Prompt 版本缓存、source hash 失效保护、token/耗时 usage，以及原文/压缩模式切换。
 - P2 已完成：真实两层 Citation Graph、结构化引用提取、本地论文解析、环路与重复引用合并、关系分析、`.p2i` fingerprint 缓存，以及 Cytoscape.js 交互画布。
 - P3 Agent Runtime 首条链路已完成：profile CRUD、工具/网络/写入策略、system prompt、共享 Context snapshot、真实模型流、checkpoint、取消、重试、usage、错误和重启中断恢复均持久化到 schema 6。
 - P3 Innovate Pipeline 已完成：revisioned prompt、精确 Context snapshot、五阶段独立模型、串行真实模型流、stage checkpoint/usage、取消、失败阶段续跑和重启恢复均持久化到 schema 7。
-- 当前验证：Python `37 passed`、Vitest `10 passed`、TypeScript、Vite production build、Rust fmt/check/clippy 和 `7 passed`；Playwright 覆盖 1440×900、1100×760、720×600，控制台 0 error。
+- 当前验证：Python `38 passed`、Vitest `10 passed`、TypeScript、Vite production build、Rust fmt/check/clippy 和 `7 passed`；Playwright 已走通 Explain → Save 与 Chat → History，并覆盖 1440×900、720×600，控制台 0 error/0 warning。
 - 本机安装目录：`E:\Project_papers2innovations\install`；真实论文库：`E:\Papers2Innovations-Library`。
-- 下一优先级：Reader 公式/定理解释与 Agent Chat，然后实现受限 Tool Registry 的真实工具调用。下文中与本节冲突的“尚未实现”描述属于旧状态。
+- 下一优先级：实现受限 Tool Registry 的真实工具调用。下文中与本节冲突的“尚未实现”描述属于旧状态。
 
 ## 给下一位 AI 的启动提示词
 
@@ -103,7 +104,7 @@ Python paper engine (services/paper-engine/p2i_engine)
 | 全局顶栏 | `apps/desktop/src/components/Topbar.tsx` | 已迁移 Figma 风格 |
 | 研究侧栏 | `apps/desktop/src/components/Sidebar.tsx` | 已迁移，集合与 Agent 数量部分仍为展示数据 |
 | Library | `apps/desktop/src/components/LibraryWorkspace.tsx` | 论文表格、搜索、选择、扫描、打开 Reader 使用真实 `LibraryPaper` |
-| Reader | `apps/desktop/src/components/Reader.tsx` | Markdown/PDF/图片真实；翻译、解释、Context 操作仍是前端状态 |
+| Reader | `apps/desktop/src/components/Reader.tsx` | Markdown/PDF/图片、翻译、公式/定理解释、Agent Chat 和 Context 操作均已接真实 bridge；AI 交互 revisioned 持久化 |
 | Agents | `apps/desktop/src/components/Agents.tsx` | profile CRUD、权限、共享 Context、真实流式运行、取消/重试与 run 历史已接通 |
 | Context | `apps/desktop/src/components/ContextWorkspace.tsx` | 原文/压缩模式和 token UI 完成，未持久化、未真正压缩 |
 | Citation Graph | `apps/desktop/src/components/CitationGraph.tsx` | 真实两层图、引用关系、缓存、重分析、Context 与 Reader 操作已接通 |
@@ -150,17 +151,20 @@ Python RPC 当前支持：
 - `zotero.preview_import`
 - `zotero.import`
 - `component.status`
+- `reader.analysis_list`
+- `reader.analysis_save`
+- `reader.chat_get`
+- `reader.chat_save`
+- `reader.chat_clear`
 
 ## 6. 当前仍是演示或临时实现的部分
 
 ### Reader
 
-- 中文译文是固定说明文本，不是模型输出。
-- “Save Translation”只保存在 React state，切换页面后丢失。
-- 公式/定理解释是固定卡片内容。
-- Agent 聊天输入没有提交逻辑。
-- 全文 Context 的 46.1K/99.8K token 是固定估算。
-- “Add Section”“Add”按钮没有真正写入 Context。
+- 段落翻译、公式/定理解释和 Agent Chat 已使用安全模型流并持久化。
+- Reader 使用共享 Context draft，Add Section、Add 和 Load Full Text 已写入持久层。
+- token 使用量仍是可靠近似值，不是各模型的精确 tokenizer 结果。
+- 浏览器 fallback 只用于 UI 验收；刷新页面会重置其内存交互数据，原生端 SQLite 不受影响。
 
 ### Context
 
@@ -380,10 +384,9 @@ git diff -- apps/desktop/src
 
 ## 13. 建议下一位 AI 的第一项实现
 
-下一项是 Reader 深度交互与受限 Tool Registry：
+下一项是受限 Tool Registry：
 
-1. 让公式解释、定理解释和 Reader Agent Chat 复用安全模型流，并像翻译一样 revisioned 持久化。
-2. 建立 Tool Registry，只暴露白名单工具；第一批实现 `search_library`、`read_paper`、`read_section`、`read_figure`、`find_evidence`、`get_references`。
-3. 在 Rust 网关规范化 OpenAI-compatible/Anthropic tool call，在 Python 执行受限工具，并把调用/结果写入 run provenance。
-4. Agent Runtime 与 Innovate novelty 阶段接入工具循环；网络策略为 `none` 时拒绝外部工具，`academic` 只允许学术来源。
-5. 覆盖路径越界、权限拒绝、循环上限、取消/重试、证据锚点和三尺寸 Playwright。
+1. 建立 Tool Registry，只暴露白名单工具；第一批实现 `search_library`、`read_paper`、`read_section`、`read_figure`、`find_evidence`、`get_references`。
+2. 在 Rust 网关规范化 OpenAI-compatible/Anthropic tool call，在 Python 执行受限工具，并把调用/结果写入 run provenance。
+3. Agent Runtime 与 Innovate novelty 阶段接入工具循环；网络策略为 `none` 时拒绝外部工具，`academic` 只允许学术来源。
+4. 覆盖路径越界、权限拒绝、循环上限、取消/重试、证据锚点和三尺寸 Playwright。

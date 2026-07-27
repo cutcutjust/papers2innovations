@@ -234,6 +234,56 @@ export interface TranslationRecord {
   updatedAt: string;
 }
 
+export type ReaderAnalysisType = "formula" | "theorem";
+
+export interface ReaderAnalysisRecord {
+  id: string;
+  paperId: string;
+  sectionId: string;
+  blockId: string;
+  analysisType: ReaderAnalysisType;
+  sourceHash: string;
+  sourceText: string;
+  adjacentContext: string;
+  resultText: string;
+  modelId: string;
+  promptVersion: string;
+  revision: number;
+  usage: { inputTokens: number; outputTokens: number; durationMs: number };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReaderChatResponse {
+  id: string;
+  assistantText: string;
+  modelId: string;
+  promptVersion: string;
+  revision: number;
+  status: "completed" | "cancelled" | "failed";
+  usage: { inputTokens: number; outputTokens: number; durationMs: number };
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReaderChatTurn {
+  id: string;
+  turnIndex: number;
+  userMessage: string;
+  contextSnapshot: ContextSnapshot;
+  response?: ReaderChatResponse;
+  createdAt: string;
+}
+
+export interface ReaderConversation {
+  id: string;
+  paperId: string;
+  turns: ReaderChatTurn[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface AgentProfile {
   id: string;
   name: string;

@@ -36,7 +36,7 @@ def test_initializes_versioned_library_layout(tmp_path: Path) -> None:
 
     with sqlite3.connect(result["database"]) as connection:
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-    assert version == 7
+    assert version == 8
 
 
 def test_agent_profiles_runs_retry_and_restart_recovery_are_persistent(tmp_path: Path) -> None:
@@ -209,6 +209,79 @@ def test_reader_translation_is_revisioned_and_persisted(tmp_path: Path) -> None:
     assert len(restored) == 1
     assert restored[0]["translatedText"] == "修订后的译文。"
     assert restored[0]["sourceHash"]
+
+
+def test_reader_analysis_and_chat_are_revisioned_and_persisted(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    make_pdf(library.papers_dir / "reader-interactions.pdf")
+    library.scan()
+    paper = library.list_papers()[0]
+
+    analysis_payload = {
+        "paperId": paper["id"],
+        "sectionId": "method",
+        "blockId": "method:block-1",
+        "analysisType": "formula",
+        "sourceText": "$y = Wx$",
+        "adjacentContext": "The method projects the input representation.",
+        "resultText": "The matrix W maps input x to output y.",
+        "modelId": "test-model",
+        "promptVersion": "reader-analysis-v1",
+        "inputTokens": 20,
+        "outputTokens": 8,
+        "durationMs": 300,
+    }
+    first = library.save_reader_analysis(analysis_payload)
+    second = library.save_reader_analysis({
+        **analysis_payload,
+        "resultText": "W is a learned linear projection from x to y.",
+    })
+    assert first["revision"] == 1
+    assert second["revision"] == 2
+    assert Library(tmp_path).list_reader_analyses(paper["id"])[0]["revision"] == 2
+
+    snapshot = {"id": "reader-chat-context", "items": []}
+    turn = library.save_reader_chat_turn({
+        "paperId": paper["id"],
+        "userMessage": "What does this projection do?",
+        "assistantText": "It transforms x into the output space.",
+        "contextSnapshot": snapshot,
+        "modelId": "test-model",
+        "promptVersion": "reader-chat-v1",
+        "status": "completed",
+        "inputTokens": 30,
+        "outputTokens": 9,
+        "durationMs": 450,
+    })
+    retried = library.save_reader_chat_turn({
+        "paperId": paper["id"],
+        "turnId": turn["id"],
+        "userMessage": "What does this projection do?",
+        "assistantText": "It maps x into the learned representation y.",
+        "contextSnapshot": snapshot,
+        "modelId": "test-model",
+        "promptVersion": "reader-chat-v1",
+        "status": "completed",
+    })
+    assert retried["response"]["revision"] == 2
+    restored = Library(tmp_path).get_reader_conversation(paper["id"])
+    assert len(restored["turns"]) == 1
+    assert restored["turns"][0]["response"]["assistantText"].startswith("It maps")
+    failed = library.save_reader_chat_turn({
+        "paperId": paper["id"],
+        "userMessage": "Can this fail before the first token?",
+        "assistantText": "",
+        "contextSnapshot": snapshot,
+        "modelId": "test-model",
+        "promptVersion": "reader-chat-v1",
+        "status": "failed",
+        "error": "Connection refused",
+    })
+    assert failed["response"]["assistantText"] == ""
+    assert failed["response"]["status"] == "failed"
+    assert library.clear_reader_conversation(paper["id"]) is True
+    assert library.get_reader_conversation(paper["id"])["turns"] == []
 
 
 def test_context_draft_is_shared_persistent_and_deduplicated(tmp_path: Path) -> None:

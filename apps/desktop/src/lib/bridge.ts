@@ -1,4 +1,4 @@
-import type { AgentProfile, AgentRun, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryPaper, ModelStreamEvent, ModelStreamRequest, PaperDocument, ProgressNotification, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
+import type { AgentProfile, AgentRun, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryPaper, ModelStreamEvent, ModelStreamRequest, PaperDocument, ProgressNotification, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, ReaderConversation, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { demoMarkdown, demoPapers } from "../demo";
@@ -105,6 +105,103 @@ export async function saveTranslation(root: string, input: Omit<TranslationRecor
     return { ...input, id: crypto.randomUUID(), sourceHash: "demo-source-hash", revision: 1, createdAt: now, updatedAt: now };
   }
   return rpc<TranslationRecord>("translation.save", { root, ...input });
+}
+
+let demoReaderAnalyses: ReaderAnalysisRecord[] = [];
+let demoReaderConversation: ReaderConversation | null = null;
+
+export async function listReaderAnalyses(root: string, paperId: string): Promise<ReaderAnalysisRecord[]> {
+  if (!nativeRuntime) return demoReaderAnalyses.filter((record) => record.paperId === paperId);
+  return rpc<ReaderAnalysisRecord[]>("reader.analysis_list", { root, paperId });
+}
+
+export async function saveReaderAnalysis(root: string, input: {
+  paperId: string;
+  sectionId: string;
+  blockId: string;
+  analysisType: ReaderAnalysisType;
+  sourceText: string;
+  adjacentContext: string;
+  resultText: string;
+  modelId: string;
+  promptVersion: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  durationMs?: number;
+}): Promise<ReaderAnalysisRecord> {
+  if (!nativeRuntime) {
+    const now = new Date().toISOString();
+    const previous = demoReaderAnalyses.filter((record) => record.paperId === input.paperId && record.blockId === input.blockId && record.analysisType === input.analysisType);
+    const record: ReaderAnalysisRecord = {
+      ...input,
+      id: crypto.randomUUID(),
+      sourceHash: "demo-source-hash",
+      revision: Math.max(0, ...previous.map((item) => item.revision)) + 1,
+      usage: { inputTokens: input.inputTokens ?? 0, outputTokens: input.outputTokens ?? 0, durationMs: input.durationMs ?? 0 },
+      createdAt: now,
+      updatedAt: now,
+    };
+    demoReaderAnalyses = [...demoReaderAnalyses.filter((item) => !(item.paperId === record.paperId && item.blockId === record.blockId && item.analysisType === record.analysisType)), record];
+    return record;
+  }
+  return rpc<ReaderAnalysisRecord>("reader.analysis_save", { root, ...input });
+}
+
+export async function getReaderConversation(root: string, paperId: string): Promise<ReaderConversation> {
+  if (!nativeRuntime) return demoReaderConversation?.paperId === paperId ? demoReaderConversation : { id: "", paperId, turns: [] };
+  return rpc<ReaderConversation>("reader.chat_get", { root, paperId });
+}
+
+export async function saveReaderChatTurn(root: string, input: {
+  paperId: string;
+  turnId?: string;
+  userMessage: string;
+  assistantText: string;
+  contextSnapshot: ContextSnapshot;
+  modelId: string;
+  promptVersion: string;
+  status: "completed" | "cancelled" | "failed";
+  inputTokens?: number;
+  outputTokens?: number;
+  durationMs?: number;
+  error?: string;
+}): Promise<ReaderChatTurn> {
+  if (!nativeRuntime) {
+    const now = new Date().toISOString();
+    const existingTurns = demoReaderConversation?.paperId === input.paperId ? demoReaderConversation.turns : [];
+    const existing = input.turnId ? existingTurns.find((turn) => turn.id === input.turnId) : undefined;
+    const turn: ReaderChatTurn = {
+      id: existing?.id ?? crypto.randomUUID(),
+      turnIndex: existing?.turnIndex ?? existingTurns.length + 1,
+      userMessage: existing?.userMessage ?? input.userMessage,
+      contextSnapshot: existing?.contextSnapshot ?? input.contextSnapshot,
+      createdAt: existing?.createdAt ?? now,
+      response: {
+        id: crypto.randomUUID(),
+        assistantText: input.assistantText,
+        modelId: input.modelId,
+        promptVersion: input.promptVersion,
+        revision: (existing?.response?.revision ?? 0) + 1,
+        status: input.status,
+        usage: { inputTokens: input.inputTokens ?? 0, outputTokens: input.outputTokens ?? 0, durationMs: input.durationMs ?? 0 },
+        error: input.error,
+        createdAt: now,
+        updatedAt: now,
+      },
+    };
+    const turns = [...existingTurns.filter((item) => item.id !== turn.id), turn].sort((left, right) => left.turnIndex - right.turnIndex);
+    demoReaderConversation = { id: demoReaderConversation?.id || crypto.randomUUID(), paperId: input.paperId, turns, createdAt: demoReaderConversation?.createdAt ?? now, updatedAt: now };
+    return turn;
+  }
+  return rpc<ReaderChatTurn>("reader.chat_save", { root, ...input });
+}
+
+export async function clearReaderConversation(root: string, paperId: string): Promise<void> {
+  if (!nativeRuntime) {
+    if (demoReaderConversation?.paperId === paperId) demoReaderConversation = null;
+    return;
+  }
+  await rpc("reader.chat_clear", { root, paperId });
 }
 
 let demoContextItems: ContextDraftItem[] = [];

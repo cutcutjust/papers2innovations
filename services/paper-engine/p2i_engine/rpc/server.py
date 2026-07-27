@@ -131,6 +131,20 @@ class RpcServer:
             return self.library(params["root"]).list_translations(params["paperId"])
         if method == "translation.save":
             return self.library(params["root"]).save_translation(params)
+        if method == "reader.analysis_list":
+            return self.library(params["root"]).list_reader_analyses(params["paperId"])
+        if method == "reader.analysis_save":
+            return self.library(params["root"]).save_reader_analysis(params)
+        if method == "reader.chat_get":
+            return self.library(params["root"]).get_reader_conversation(params["paperId"])
+        if method == "reader.chat_save":
+            return self.library(params["root"]).save_reader_chat_turn(params)
+        if method == "reader.chat_clear":
+            return {
+                "cleared": self.library(params["root"]).clear_reader_conversation(
+                    params["paperId"]
+                )
+            }
         if method == "context.get":
             return self.library(params["root"]).get_context_draft()
         if method == "context.add_paper":

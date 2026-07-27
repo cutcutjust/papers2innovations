@@ -1176,6 +1176,229 @@ class Library:
             )
         return self._translation_contract(record)
 
+    def list_reader_analyses(self, paper_id: str) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                "SELECT ra.* FROM reader_analyses ra JOIN (SELECT block_id, analysis_type, "
+                "MAX(revision) revision FROM reader_analyses WHERE paper_id = ? "
+                "GROUP BY block_id, analysis_type) latest ON latest.block_id = ra.block_id "
+                "AND latest.analysis_type = ra.analysis_type AND latest.revision = ra.revision "
+                "WHERE ra.paper_id = ? ORDER BY ra.updated_at",
+                (paper_id, paper_id),
+            ).fetchall()
+        return [self._reader_analysis_contract(row) for row in rows]
+
+    def save_reader_analysis(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        required = (
+            "paperId",
+            "sectionId",
+            "blockId",
+            "analysisType",
+            "sourceText",
+            "resultText",
+            "modelId",
+            "promptVersion",
+        )
+        missing = [key for key in required if not str(payload.get(key, "")).strip()]
+        if missing:
+            raise ValueError("Missing reader analysis fields: " + ", ".join(missing))
+        analysis_type = str(payload["analysisType"])
+        if analysis_type not in {"formula", "theorem"}:
+            raise ValueError("Reader analysis type must be formula or theorem")
+        paper_id = str(payload["paperId"])
+        result_text = str(payload["resultText"])
+        if len(result_text) > 1_000_000:
+            raise ValueError("Reader analysis result exceeds 1 million characters")
+        now = utc_now()
+        with self.db.connect() as connection:
+            paper = connection.execute(
+                "SELECT canonical_sha256 FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone()
+            if not paper:
+                raise KeyError(f"Unknown paper: {paper_id}")
+            revision = connection.execute(
+                "SELECT COALESCE(MAX(revision), 0) + 1 FROM reader_analyses "
+                "WHERE paper_id = ? AND block_id = ? AND analysis_type = ?",
+                (paper_id, payload["blockId"], analysis_type),
+            ).fetchone()[0]
+            record = {
+                "id": str(uuid.uuid4()),
+                "paper_id": paper_id,
+                "section_id": str(payload["sectionId"]),
+                "block_id": str(payload["blockId"]),
+                "analysis_type": analysis_type,
+                "source_hash": paper["canonical_sha256"],
+                "source_text": str(payload["sourceText"]),
+                "adjacent_context": str(payload.get("adjacentContext", "")),
+                "result_text": result_text,
+                "model_id": str(payload["modelId"]),
+                "prompt_version": str(payload["promptVersion"]),
+                "revision": revision,
+                "input_tokens": max(0, int(payload.get("inputTokens", 0))),
+                "output_tokens": max(0, int(payload.get("outputTokens", 0))),
+                "duration_ms": max(0, int(payload.get("durationMs", 0))),
+                "created_at": now,
+                "updated_at": now,
+            }
+            connection.execute(
+                "INSERT INTO reader_analyses(id, paper_id, section_id, block_id, analysis_type, "
+                "source_hash, source_text, adjacent_context, result_text, model_id, prompt_version, "
+                "revision, input_tokens, output_tokens, duration_ms, created_at, updated_at) "
+                "VALUES (:id, :paper_id, :section_id, :block_id, :analysis_type, :source_hash, "
+                ":source_text, :adjacent_context, :result_text, :model_id, :prompt_version, "
+                ":revision, :input_tokens, :output_tokens, :duration_ms, :created_at, :updated_at)",
+                record,
+            )
+        return self._reader_analysis_contract(record)
+
+    def get_reader_conversation(self, paper_id: str) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            paper = connection.execute(
+                "SELECT id FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone()
+            if not paper:
+                raise KeyError(f"Unknown paper: {paper_id}")
+            conversation = connection.execute(
+                "SELECT * FROM reader_conversations WHERE paper_id = ?", (paper_id,)
+            ).fetchone()
+            if not conversation:
+                return {"id": "", "paperId": paper_id, "turns": []}
+            turns = connection.execute(
+                "SELECT * FROM reader_chat_turns WHERE conversation_id = ? ORDER BY turn_index",
+                (conversation["id"],),
+            ).fetchall()
+            contracts = []
+            for turn in turns:
+                response = connection.execute(
+                    "SELECT * FROM reader_chat_responses WHERE turn_id = ? "
+                    "ORDER BY revision DESC LIMIT 1",
+                    (turn["id"],),
+                ).fetchone()
+                contracts.append(self._reader_chat_turn_contract(turn, response))
+        return {
+            "id": conversation["id"],
+            "paperId": paper_id,
+            "turns": contracts,
+            "createdAt": conversation["created_at"],
+            "updatedAt": conversation["updated_at"],
+        }
+
+    def save_reader_chat_turn(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        required = (
+            "paperId",
+            "userMessage",
+            "modelId",
+            "promptVersion",
+            "status",
+        )
+        missing = [key for key in required if not str(payload.get(key, "")).strip()]
+        if missing:
+            raise ValueError("Missing reader chat fields: " + ", ".join(missing))
+        status = str(payload["status"])
+        if status not in {"completed", "cancelled", "failed"}:
+            raise ValueError("Invalid reader chat response status")
+        assistant_text = str(payload.get("assistantText", ""))
+        if status == "completed" and not assistant_text.strip():
+            raise ValueError("Completed reader chat responses require assistantText")
+        user_message = str(payload["userMessage"]).strip()
+        if len(user_message) > 100000 or len(assistant_text) > 1_000_000:
+            raise ValueError("Reader chat turn exceeds its size limit")
+        snapshot = payload.get("contextSnapshot") or {}
+        if not isinstance(snapshot, dict):
+            raise ValueError("Reader chat context snapshot must be an object")
+        snapshot_json = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+        if len(snapshot_json.encode("utf-8")) > 2 * 1024 * 1024:
+            raise ValueError("Reader chat context snapshot exceeds 2 MB")
+        paper_id = str(payload["paperId"])
+        now = utc_now()
+        with self.db.connect() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone():
+                raise KeyError(f"Unknown paper: {paper_id}")
+            conversation = connection.execute(
+                "SELECT * FROM reader_conversations WHERE paper_id = ?", (paper_id,)
+            ).fetchone()
+            if not conversation:
+                conversation_id = str(uuid.uuid4())
+                connection.execute(
+                    "INSERT INTO reader_conversations(id, paper_id, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (conversation_id, paper_id, now, now),
+                )
+            else:
+                conversation_id = conversation["id"]
+            turn_id = str(payload.get("turnId", "")).strip()
+            turn = None
+            if turn_id:
+                turn = connection.execute(
+                    "SELECT t.* FROM reader_chat_turns t JOIN reader_conversations c "
+                    "ON c.id = t.conversation_id WHERE t.id = ? AND c.paper_id = ?",
+                    (turn_id, paper_id),
+                ).fetchone()
+                if not turn:
+                    raise KeyError(f"Unknown reader chat turn: {turn_id}")
+            else:
+                turn_id = str(uuid.uuid4())
+                turn_index = connection.execute(
+                    "SELECT COALESCE(MAX(turn_index), 0) + 1 FROM reader_chat_turns "
+                    "WHERE conversation_id = ?",
+                    (conversation_id,),
+                ).fetchone()[0]
+                connection.execute(
+                    "INSERT INTO reader_chat_turns(id, conversation_id, turn_index, user_message, "
+                    "context_snapshot_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (turn_id, conversation_id, turn_index, user_message, snapshot_json, now),
+                )
+                turn = connection.execute(
+                    "SELECT * FROM reader_chat_turns WHERE id = ?", (turn_id,)
+                ).fetchone()
+            revision = connection.execute(
+                "SELECT COALESCE(MAX(revision), 0) + 1 FROM reader_chat_responses "
+                "WHERE turn_id = ?",
+                (turn_id,),
+            ).fetchone()[0]
+            response = {
+                "id": str(uuid.uuid4()),
+                "turn_id": turn_id,
+                "assistant_text": assistant_text,
+                "model_id": str(payload["modelId"]),
+                "prompt_version": str(payload["promptVersion"]),
+                "revision": revision,
+                "status": status,
+                "input_tokens": max(0, int(payload.get("inputTokens", 0))),
+                "output_tokens": max(0, int(payload.get("outputTokens", 0))),
+                "duration_ms": max(0, int(payload.get("durationMs", 0))),
+                "error": str(payload.get("error", ""))[:4000] or None,
+                "created_at": now,
+                "updated_at": now,
+            }
+            connection.execute(
+                "INSERT INTO reader_chat_responses(id, turn_id, assistant_text, model_id, "
+                "prompt_version, revision, status, input_tokens, output_tokens, duration_ms, "
+                "error, created_at, updated_at) VALUES (:id, :turn_id, :assistant_text, "
+                ":model_id, :prompt_version, :revision, :status, :input_tokens, :output_tokens, "
+                ":duration_ms, :error, :created_at, :updated_at)",
+                response,
+            )
+            connection.execute(
+                "UPDATE reader_conversations SET updated_at = ? WHERE id = ?",
+                (now, conversation_id),
+            )
+        return self._reader_chat_turn_contract(turn, response)
+
+    def clear_reader_conversation(self, paper_id: str) -> bool:
+        self.initialize()
+        with self.db.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM reader_conversations WHERE paper_id = ?", (paper_id,)
+            )
+        return bool(cursor.rowcount)
+
     @staticmethod
     def _estimate_context_tokens(text: str) -> int:
         return max(1, (len(text.encode("utf-8")) + 3) // 4)
@@ -2195,6 +2418,58 @@ class Library:
                 (resume["stage"], now, run_id),
             )
             return self._read_innovation_run(connection, run_id)
+
+    @staticmethod
+    def _reader_analysis_contract(record: Any) -> dict[str, Any]:
+        return {
+            "id": record["id"],
+            "paperId": record["paper_id"],
+            "sectionId": record["section_id"],
+            "blockId": record["block_id"],
+            "analysisType": record["analysis_type"],
+            "sourceHash": record["source_hash"],
+            "sourceText": record["source_text"],
+            "adjacentContext": record["adjacent_context"],
+            "resultText": record["result_text"],
+            "modelId": record["model_id"],
+            "promptVersion": record["prompt_version"],
+            "revision": record["revision"],
+            "usage": {
+                "inputTokens": record["input_tokens"],
+                "outputTokens": record["output_tokens"],
+                "durationMs": record["duration_ms"],
+            },
+            "createdAt": record["created_at"],
+            "updatedAt": record["updated_at"],
+        }
+
+    @staticmethod
+    def _reader_chat_turn_contract(turn: Any, response: Any | None) -> dict[str, Any]:
+        contract = {
+            "id": turn["id"],
+            "turnIndex": turn["turn_index"],
+            "userMessage": turn["user_message"],
+            "contextSnapshot": json.loads(turn["context_snapshot_json"]),
+            "createdAt": turn["created_at"],
+        }
+        if response:
+            contract["response"] = {
+                "id": response["id"],
+                "assistantText": response["assistant_text"],
+                "modelId": response["model_id"],
+                "promptVersion": response["prompt_version"],
+                "revision": response["revision"],
+                "status": response["status"],
+                "usage": {
+                    "inputTokens": response["input_tokens"],
+                    "outputTokens": response["output_tokens"],
+                    "durationMs": response["duration_ms"],
+                },
+                "error": response["error"],
+                "createdAt": response["created_at"],
+                "updatedAt": response["updated_at"],
+            }
+        return contract
 
     @staticmethod
     def _translation_contract(record: dict[str, Any]) -> dict[str, Any]:

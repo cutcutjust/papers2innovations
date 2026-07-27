@@ -1,18 +1,17 @@
-import type { LibraryPaper, ModelStreamEvent, PaperDocument, TranslationRecord } from "@p2i/contracts";
+import type { ContextSnapshot, LibraryPaper, ModelStreamEvent, PaperDocument, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, TranslationRecord } from "@p2i/contracts";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpen, Bot, Check, ChevronLeft, FileImage, FileText, Languages, Layers3, LoaderCircle, MessageSquareText, RefreshCw, Search, Send, Sigma, Sparkles, Square, TriangleAlert } from "lucide-react";
+import { BookOpen, Bot, Check, ChevronLeft, FileImage, FileText, Languages, Layers3, LoaderCircle, MessageSquareText, RefreshCw, Search, Send, Sparkles, Square, Trash2, TriangleAlert } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import { addPaperToContext, addSelectionToContext, assetUrl, getContextDraft, listTranslations, readDocument, readMarkdown, removePaperFromContext, saveTranslation, startModelStream, type ModelStreamHandle } from "../lib/bridge";
+import { addPaperToContext, addSelectionToContext, assetUrl, clearReaderConversation, getContextCompression, getContextDraft, getReaderConversation, listReaderAnalyses, listTranslations, nativeRuntime, readContextItem, readDocument, readMarkdown, removePaperFromContext, saveReaderAnalysis, saveReaderChatTurn, saveTranslation, startModelStream, type ModelStreamHandle } from "../lib/bridge";
 import { hydrateProviderCredentials } from "../lib/credentials";
 import { buildReaderBlocks, type ReaderDocumentBlock } from "../lib/documentBlocks";
 import { useWorkspace } from "../store";
 
 type ReaderMode = "integrated" | "pdf" | "figures";
-type Analysis = "formula" | "theorem" | null;
 type ReaderBlock = ReaderDocumentBlock;
 type ReaderSection = { id: string; title: string; blocks: ReaderBlock[] };
 type SelectionSource = ReaderBlock & { start: number; end: number };
@@ -22,8 +21,19 @@ type TranslationState = {
   error?: string;
   record?: TranslationRecord;
 };
+type AnalysisState = {
+  status: "streaming" | "unsaved" | "saved" | "cancelled" | "error";
+  text: string;
+  adjacentContext: string;
+  usage: { inputTokens: number; outputTokens: number; durationMs: number };
+  error?: string;
+  record?: ReaderAnalysisRecord;
+};
 
 const TRANSLATION_PROMPT_VERSION = "reader-translate-v1";
+const ANALYSIS_PROMPT_VERSION = "reader-analysis-v1";
+const CHAT_PROMPT_VERSION = "reader-chat-v1";
+const analysisKey = (blockId: string, type: ReaderAnalysisType) => `${blockId}:${type}`;
 
 function documentSections(document: PaperDocument | undefined, markdown: string): ReaderSection[] {
   if (document?.sections.length) {
@@ -49,11 +59,19 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const [mode, setMode] = useState<ReaderMode>("integrated");
   const [selection, setSelection] = useState<SelectionSource | null>(null);
   const [translations, setTranslations] = useState<Record<string, TranslationState>>({});
-  const [analysis, setAnalysis] = useState<Analysis>(null);
+  const [analysisStates, setAnalysisStates] = useState<Record<string, AnalysisState>>({});
+  const [activeAnalysis, setActiveAnalysis] = useState<{ blockId: string; type: ReaderAnalysisType } | null>(null);
   const [activeBlock, setActiveBlock] = useState("");
   const [contextBusy, setContextBusy] = useState("");
   const [agentModel, setAgentModel] = useState(customModels[0]?.id ?? "");
+  const [chatInput, setChatInput] = useState("");
+  const [chatLive, setChatLive] = useState("");
+  const [chatPendingQuestion, setChatPendingQuestion] = useState("");
+  const [chatStatus, setChatStatus] = useState<"idle" | "streaming" | "error">("idle");
+  const [chatError, setChatError] = useState("");
+  const [agentOpen, setAgentOpen] = useState(false);
   const streamHandles = useRef(new Map<string, ModelStreamHandle>());
+  const chatHandle = useRef<ModelStreamHandle | null>(null);
   const readable = Boolean(paper?.id && paper && ["READY", "PARTIAL"].includes(paper.status));
   const markdownQuery = useQuery({
     queryKey: ["paper-markdown", root, paper?.id],
@@ -69,6 +87,18 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const translationQuery = useQuery({
     queryKey: ["paper-translations", root, paper?.id],
     queryFn: () => listTranslations(root, paper!.id),
+    enabled: readable,
+    retry: false,
+  });
+  const analysisQuery = useQuery({
+    queryKey: ["reader-analyses", root, paper?.id],
+    queryFn: () => listReaderAnalyses(root, paper!.id),
+    enabled: readable,
+    retry: false,
+  });
+  const chatQuery = useQuery({
+    queryKey: ["reader-chat", root, paper?.id],
+    queryFn: () => getReaderConversation(root, paper!.id),
     enabled: readable,
     retry: false,
   });
@@ -90,6 +120,16 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     () => Object.fromEntries((translationQuery.data ?? []).map((record) => [record.blockId, { status: "saved", text: record.translatedText, record } satisfies TranslationState])),
     [translationQuery.data],
   );
+  const persistedAnalyses = useMemo(
+    () => Object.fromEntries((analysisQuery.data ?? []).map((record) => [analysisKey(record.blockId, record.analysisType), {
+      status: "saved",
+      text: record.resultText,
+      adjacentContext: record.adjacentContext,
+      usage: record.usage,
+      record,
+    } satisfies AnalysisState])),
+    [analysisQuery.data],
+  );
   const selectedModel = customModels.find((model) => model.id === agentModel) ?? customModels[0];
   const selectedProvider = providers.find((provider) => provider.id === selectedModel?.providerId);
   const maxContextTokens = selectedModel?.maxContextTokens ?? 128000;
@@ -102,10 +142,23 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
 
   useEffect(() => {
     setTranslations({});
+    setAnalysisStates({});
     setSelection(null);
     setActiveBlock("");
+    setActiveAnalysis(null);
+    setChatInput("");
+    setChatLive("");
+    setChatPendingQuestion("");
+    setChatStatus("idle");
+    setChatError("");
+    setAgentOpen(false);
     for (const handle of streamHandles.current.values()) void handle.cancel();
     streamHandles.current.clear();
+    if (chatHandle.current) {
+      void chatHandle.current.cancel();
+      chatHandle.current.dispose();
+      chatHandle.current = null;
+    }
   }, [paper?.id]);
 
   useEffect(() => () => {
@@ -113,11 +166,15 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       handle.dispose();
       void handle.cancel();
     }
+    if (chatHandle.current) {
+      chatHandle.current.dispose();
+      void chatHandle.current.cancel();
+    }
   }, []);
 
   if (!paper) return <main className="reader-empty"><BookOpen size={34} /><h2>No paper selected</h2><p>Choose a paper in Library, then open it in Reader.</p><button className="primary-button compact" onClick={() => setView("library")}>Open Library</button></main>;
 
-  const credentialReady = Boolean(selectedProvider && providerCredentialQuery.data?.some(
+  const credentialReady = !nativeRuntime || Boolean(selectedProvider && providerCredentialQuery.data?.some(
     (summary) => summary.credentialId === selectedProvider.credentialId && summary.configured,
   ));
 
@@ -140,7 +197,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       streamHandles.current.delete(block.id);
     }
     setActiveBlock(block.id);
-    setAnalysis(null);
+    setActiveAnalysis(null);
     setTranslations((current) => ({ ...current, [block.id]: { status: "streaming", text: "" } }));
     const requestId = crypto.randomUUID();
     const onEvent = (event: ModelStreamEvent) => {
@@ -199,7 +256,279 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     }
   };
 
-  const explain = (type: "formula" | "theorem", id: string) => { setActiveBlock(id); setAnalysis(type); };
+  const updateAnalysis = (key: string, update: (current: AnalysisState) => AnalysisState) => {
+    setAnalysisStates((current) => ({
+      ...current,
+      [key]: update(current[key] ?? {
+        status: "streaming",
+        text: "",
+        adjacentContext: "",
+        usage: { inputTokens: 0, outputTokens: 0, durationMs: 0 },
+      }),
+    }));
+  };
+
+  const adjacentContextFor = (block: ReaderBlock) => {
+    const blocks = sections.flatMap((section) => section.blocks);
+    const index = blocks.findIndex((candidate) => candidate.id === block.id);
+    if (index < 0) return block.text;
+    return blocks.slice(Math.max(0, index - 1), index + 2).map((candidate) => candidate.text).join("\n\n");
+  };
+
+  const explain = async (type: ReaderAnalysisType, block: ReaderBlock) => {
+    const key = analysisKey(block.id, type);
+    setActiveBlock(block.id);
+    setActiveAnalysis({ blockId: block.id, type });
+    if (!selectedModel || !selectedProvider || !credentialReady) {
+      setAnalysisStates((current) => ({ ...current, [key]: {
+        status: "error",
+        text: "",
+        adjacentContext: "",
+        usage: { inputTokens: 0, outputTokens: 0, durationMs: 0 },
+        error: "Configure this model's API key in Settings before requesting an explanation.",
+      } }));
+      return;
+    }
+    const handleKey = `analysis:${key}`;
+    const existing = streamHandles.current.get(handleKey);
+    if (existing) {
+      await existing.cancel();
+      existing.dispose();
+      streamHandles.current.delete(handleKey);
+    }
+    const adjacentContext = adjacentContextFor(block);
+    const started = performance.now();
+    let text = "";
+    let terminal = false;
+    setAnalysisStates((current) => ({ ...current, [key]: {
+      status: "streaming",
+      text: "",
+      adjacentContext,
+      usage: { inputTokens: 0, outputTokens: 0, durationMs: 0 },
+    } }));
+    const onEvent = (event: ModelStreamEvent) => {
+      if (event.kind === "delta" && event.text) {
+        text += event.text;
+        updateAnalysis(key, (current) => ({ ...current, status: "streaming", text }));
+      } else if (event.kind === "done") {
+        terminal = true;
+        updateAnalysis(key, (current) => ({ ...current, status: "unsaved", text, usage: {
+          inputTokens: event.usage?.inputTokens ?? 0,
+          outputTokens: event.usage?.outputTokens ?? 0,
+          durationMs: Math.round(performance.now() - started),
+        } }));
+      } else if (event.kind === "cancelled") {
+        terminal = true;
+        updateAnalysis(key, (current) => ({ ...current, status: "cancelled", text, usage: { ...current.usage, durationMs: Math.round(performance.now() - started) } }));
+      } else if (event.kind === "error") {
+        terminal = true;
+        updateAnalysis(key, (current) => ({ ...current, status: "error", text, error: event.error ?? "Model request failed.", usage: { ...current.usage, durationMs: Math.round(performance.now() - started) } }));
+      }
+      if (["done", "cancelled", "error"].includes(event.kind)) {
+        streamHandles.current.get(handleKey)?.dispose();
+        streamHandles.current.delete(handleKey);
+      }
+    };
+    try {
+      const handle = await startModelStream({
+        requestId: crypto.randomUUID(),
+        provider: selectedProvider,
+        model: selectedModel,
+        temperature: 0.1,
+        messages: [
+          { role: "system", content: type === "formula"
+            ? "Explain the supplied scientific formula rigorously. Identify the exact expression, define every symbol, explain dimensions and operations, connect it to adjacent method text, and state assumptions or ambiguities. Preserve LaTeX and cite the provided section/block/page anchor."
+            : "Explain the supplied scientific claim or theorem rigorously. Separate statement, assumptions, reasoning or proof sketch, implications, limitations, and unresolved gaps. Do not invent a proof. Cite the provided section/block/page anchor." },
+          { role: "user", content: `Source anchor: paper=${paper.id}, section=${block.sectionId}, block=${block.id}, page=${block.page ?? "unknown"}\n\nTarget source:\n${block.text}\n\nAdjacent structured context:\n${adjacentContext}` },
+        ],
+      }, onEvent);
+      if (terminal) handle.dispose();
+      else streamHandles.current.set(handleKey, handle);
+    } catch (error) {
+      updateAnalysis(key, (current) => ({ ...current, status: "error", error: error instanceof Error ? error.message : String(error) }));
+    }
+  };
+
+  const persistAnalysis = async (block: ReaderBlock, type: ReaderAnalysisType, state: AnalysisState) => {
+    if (!selectedModel || !state.text.trim()) return;
+    const key = analysisKey(block.id, type);
+    try {
+      const record = await saveReaderAnalysis(root, {
+        paperId: paper.id,
+        sectionId: block.sectionId,
+        blockId: block.id,
+        analysisType: type,
+        sourceText: block.text,
+        adjacentContext: state.adjacentContext,
+        resultText: state.text,
+        modelId: selectedModel.id,
+        promptVersion: ANALYSIS_PROMPT_VERSION,
+        inputTokens: state.usage.inputTokens,
+        outputTokens: state.usage.outputTokens,
+        durationMs: state.usage.durationMs,
+      });
+      setAnalysisStates((current) => ({ ...current, [key]: { ...state, status: "saved", text: record.resultText, record } }));
+      await analysisQuery.refetch();
+    } catch (error) {
+      updateAnalysis(key, (current) => ({ ...current, status: "error", error: error instanceof Error ? error.message : String(error) }));
+    }
+  };
+
+  const assembleChatContext = async (): Promise<{ snapshot: ContextSnapshot; contextText: string }> => {
+    const draft = await getContextDraft(root);
+    const snapshotItems: ContextSnapshot["items"] = [];
+    const content: string[] = [];
+    for (const item of draft.items) {
+      const source = await readContextItem(root, item.id);
+      let sourceText = source.sourceText;
+      if (item.mode === "compressed" && item.compression) {
+        const compression = await getContextCompression(root, item.id, item.compression.modelId, item.compression.promptVersion);
+        if (compression) sourceText = compression.compressedText;
+      }
+      content.push(`## ${item.paperTitle}${item.sectionId ? ` / ${item.sectionId}` : ""}\n${sourceText}`);
+      snapshotItems.push({
+        contextItemId: item.id,
+        paperId: item.paperId,
+        sourceHash: item.sourceHash,
+        mode: item.mode,
+        sectionIds: item.sectionId ? [item.sectionId] : [],
+        figureIds: [],
+        estimatedTokens: item.estimatedTokens,
+      });
+    }
+    if (!snapshotItems.some((item) => item.paperId === paper.id)) {
+      const sourceText = markdownQuery.data ?? "";
+      content.unshift(`## ${paper.title}\n${sourceText}`);
+      snapshotItems.unshift({
+        paperId: paper.id,
+        sourceHash: documentQuery.data?.source_sha256,
+        mode: "structured",
+        sectionIds: [],
+        figureIds: [],
+        estimatedTokens: Math.ceil(new TextEncoder().encode(sourceText).length / 4),
+      });
+    }
+    const maxCharacters = Math.max(16000, Math.floor((selectedModel?.maxContextTokens ?? 128000) * 2.8));
+    return {
+      contextText: content.join("\n\n").slice(0, maxCharacters),
+      snapshot: {
+        id: crypto.randomUUID(),
+        agentProfileId: "reader-paper-analyst",
+        modelId: selectedModel?.id ?? "",
+        items: snapshotItems,
+        tokenBreakdown: draft.tokenBreakdown,
+        promptVersion: CHAT_PROMPT_VERSION,
+        toolVersions: { read_paper: "1", read_section: "1", find_evidence: "1" },
+        retrievalQueries: [],
+        externalResults: [],
+        createdAt: new Date().toISOString(),
+      },
+    };
+  };
+
+  const sendChat = async (retryTurn?: ReaderChatTurn) => {
+    if (chatStatus === "streaming") return;
+    const userMessage = retryTurn?.userMessage ?? chatInput.trim();
+    if (!userMessage) return;
+    if (!selectedModel || !selectedProvider || !credentialReady) {
+      setChatStatus("error");
+      setChatError("Configure this model's API key in Settings before asking the paper agent.");
+      return;
+    }
+    setChatInput("");
+    setChatLive("");
+    setChatPendingQuestion(userMessage);
+    setChatError("");
+    setChatStatus("streaming");
+    let assembled: Awaited<ReturnType<typeof assembleChatContext>>;
+    try {
+      assembled = await assembleChatContext();
+    } catch (error) {
+      setChatInput(userMessage);
+      setChatPendingQuestion("");
+      setChatStatus("error");
+      setChatError(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    const started = performance.now();
+    let responseText = "";
+    let terminal = false;
+    const priorMessages = (chatQuery.data?.turns ?? []).slice(-6).flatMap((turn) => [
+      { role: "user" as const, content: turn.userMessage },
+      ...(turn.response?.assistantText ? [{ role: "assistant" as const, content: turn.response.assistantText }] : []),
+    ]);
+    const persistTerminal = async (status: "completed" | "cancelled" | "failed", event: ModelStreamEvent) => {
+      if (terminal) return;
+      terminal = true;
+      const finalStatus = status === "completed" && !responseText.trim() ? "failed" : status;
+      const finalError = finalStatus === "failed" ? event.error ?? "The model returned an empty response." : undefined;
+      try {
+        await saveReaderChatTurn(root, {
+          paperId: paper.id,
+          turnId: retryTurn?.id,
+          userMessage,
+          assistantText: responseText,
+          contextSnapshot: retryTurn?.contextSnapshot ?? assembled.snapshot,
+          modelId: selectedModel.id,
+          promptVersion: CHAT_PROMPT_VERSION,
+          status: finalStatus,
+          inputTokens: event.usage?.inputTokens,
+          outputTokens: event.usage?.outputTokens,
+          durationMs: Math.round(performance.now() - started),
+          error: finalError,
+        });
+        await chatQuery.refetch();
+        setChatStatus(finalStatus === "failed" ? "error" : "idle");
+        setChatError(finalError ?? "");
+      } catch (error) {
+        setChatStatus("error");
+        setChatError(error instanceof Error ? error.message : String(error));
+      } finally {
+        chatHandle.current?.dispose();
+        chatHandle.current = null;
+        setChatLive("");
+        setChatPendingQuestion("");
+      }
+    };
+    const onEvent = (event: ModelStreamEvent) => {
+      if (event.kind === "delta" && event.text) {
+        responseText += event.text;
+        setChatLive(responseText);
+      } else if (event.kind === "done") void persistTerminal("completed", event);
+      else if (event.kind === "cancelled") void persistTerminal("cancelled", event);
+      else if (event.kind === "error") void persistTerminal("failed", event);
+    };
+    try {
+      const handle = await startModelStream({
+        requestId: crypto.randomUUID(),
+        provider: selectedProvider,
+        model: selectedModel,
+        temperature: 0.2,
+        messages: [
+          { role: "system", content: "You are the Reader paper analyst. Answer from the supplied local paper context. Every factual claim must cite paper, section, block, or page when available. Distinguish direct evidence from inference and say when the context is insufficient." },
+          ...priorMessages,
+          { role: "user", content: `Question: ${userMessage}\n\nCurrent local research context:\n${assembled.contextText}` },
+        ],
+      }, onEvent);
+      if (terminal) handle.dispose();
+      else chatHandle.current = handle;
+    } catch (error) {
+      await persistTerminal("failed", { requestId: crypto.randomUUID(), kind: "error", error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
+  const cancelChat = async () => {
+    await chatHandle.current?.cancel();
+  };
+
+  const clearChat = async () => {
+    if (!window.confirm("Clear this paper's persisted Reader conversation?")) return;
+    await clearReaderConversation(root, paper.id);
+    setChatLive("");
+    setChatPendingQuestion("");
+    setChatError("");
+    await chatQuery.refetch();
+  };
   const addContext = async (sectionId: string, blockId: string | undefined, sourceText: string) => {
     if (!paper) return;
     const key = blockId ?? sectionId;
@@ -237,23 +566,25 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       <button onClick={() => setView("library")}><ChevronLeft size={13} /> Library</button>
       <strong title={paper.title}>{paper.title}</strong>
       <div className="reader-mode-switch"><button className={mode === "integrated" ? "active" : ""} onClick={() => setMode("integrated")}>Integrated Reading</button><button className={mode === "pdf" ? "active" : ""} onClick={() => setMode("pdf")}>PDF Only</button><button className={mode === "figures" ? "active" : ""} onClick={() => setMode("figures")}>Figures</button></div>
-      <button><Search size={13} /> Find</button><button className={fullText ? "active" : ""} disabled={contextBusy === "paper"} onClick={() => void togglePaperContext()}><Layers3 size={13} /> {fullText ? `Paper Context · ${contextPercent}%` : "Load Full Text"}</button>
+      <button><Search size={13} /> Find</button><button className={fullText ? "active" : ""} disabled={contextBusy === "paper"} onClick={() => void togglePaperContext()}><Layers3 size={13} /> {fullText ? `Paper Context · ${contextPercent}%` : "Load Full Text"}</button><button className="reader-agent-toggle" onClick={() => setAgentOpen(true)}><Bot size={13} /> Ask AI</button>
     </div>
     <div className="reader-main">
       <aside className="reader-outline"><span>Outline</span>{sections.map((section, index) => <button key={section.id} className={index === 0 ? "active" : ""}>{section.title}<small>{section.blocks.length}</small></button>)}</aside>
       <main className="reader-canvas">
         {mode === "integrated" && <article className="integrated-paper">
           <header className="paper-reading-header"><span className="tag tag-primary">STRUCTURED DOCUMENT</span><h1>{paper.title}</h1><p>Local document · {paper.pageCount || "—"} pages · Updated {new Date(paper.updatedAt).toLocaleDateString()}</p></header>
-          {selection && <div className="selection-toolbar"><span className="tag tag-ai">Selected {selection.start}:{selection.end}</span><strong>“{selection.text.slice(0, 64)}”</strong><button onClick={() => void translate(selection)}><Languages size={12} /> Translate word</button><button onClick={() => explain("theorem", selection.id)}><Sparkles size={12} /> Explain</button><button onClick={() => setSelection(null)}>Close</button></div>}
+          {selection && <div className="selection-toolbar"><span className="tag tag-ai">Selected {selection.start}:{selection.end}</span><strong>“{selection.text.slice(0, 64)}”</strong><button onClick={() => void translate(selection)}><Languages size={12} /> Translate word</button><button onClick={() => void explain("theorem", selection)}><Sparkles size={12} /> Explain</button><button onClick={() => setSelection(null)}>Close</button></div>}
           {markdownQuery.isLoading || documentQuery.isLoading ? <div className="document-loading">Loading structured document…</div> : sections.map((section, sectionIndex) => <section className={`reading-section ${sectionIndex === 0 ? "active" : ""}`} key={section.id}>
             <header><div><h2>{section.title}</h2><span>{section.blocks.length} paragraphs · structured source</span></div><button disabled={contextBusy === section.id} onClick={() => void addContext(section.id, undefined, section.blocks.map((block) => block.text).join("\n\n"))}><Layers3 size={12} /> {contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.sectionId === section.id && !item.blockId) ? "Added" : "Add Section"}</button></header>
             <div className="paragraph-stack">{section.blocks.map((block, blockIndex) => {
               const state = translations[block.id] ?? persistedTranslations[block.id];
               const hasFormula = /\$|\\\[|\\begin\{equation/.test(block.text);
+              const explanationType = activeAnalysis?.blockId === block.id ? activeAnalysis.type : hasFormula ? "formula" : "theorem";
+              const explanation = analysisStates[analysisKey(block.id, explanationType)] ?? persistedAnalyses[analysisKey(block.id, explanationType)];
               return <div className={`paragraph-card ${activeBlock === block.id ? "active" : ""}`} key={block.id} onMouseUp={() => captureSelection(block)}>
-                <div className="paragraph-main"><span className="paragraph-number">{sectionIndex ? `${sectionIndex}.${blockIndex + 1}` : `A${blockIndex + 1}`}</span><div className="paragraph-markdown"><MarkdownBlock value={block.text} /></div><div className="paragraph-actions"><button onClick={() => void translate(block)}><Languages size={12} /> Translate</button><button onClick={() => explain(hasFormula ? "formula" : "theorem", block.id)}><Sparkles size={12} /> Explain</button><button disabled={contextBusy === block.id} onClick={() => void addContext(block.sectionId, block.id, block.text)}><Layers3 size={12} /> {contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.blockId === block.id) ? "Added" : "Add"}</button></div></div>
+                <div className="paragraph-main"><span className="paragraph-number">{sectionIndex ? `${sectionIndex}.${blockIndex + 1}` : `A${blockIndex + 1}`}</span><div className="paragraph-markdown"><MarkdownBlock value={block.text} /></div><div className="paragraph-actions"><button onClick={() => void translate(block)}><Languages size={12} /> Translate</button><button onClick={() => void explain(hasFormula ? "formula" : "theorem", block)}><Sparkles size={12} /> Explain</button><button disabled={contextBusy === block.id} onClick={() => void addContext(block.sectionId, block.id, block.text)}><Layers3 size={12} /> {contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.blockId === block.id) ? "Added" : "Add"}</button></div></div>
                 {state && <TranslationPanel block={block} state={state} onSave={() => void persistTranslation(block, state)} onRetry={() => void translate(block)} onCancel={() => void cancelTranslation(block.id)} />}
-                {analysis && activeBlock === block.id && <AnalysisCard type={analysis} />}
+                {explanation && <AnalysisCard block={block} type={explanationType} state={explanation} onSave={() => void persistAnalysis(block, explanationType, explanation)} onRetry={() => void explain(explanationType, block)} onCancel={() => void streamHandles.current.get(`analysis:${analysisKey(block.id, explanationType)}`)?.cancel()} onFollowUp={() => { setChatInput(`Follow up on the ${explanationType} explanation for ${block.sectionId}/${block.id}: `); setAgentOpen(true); }} />}
               </div>;
             })}</div>
           </section>)}
@@ -261,10 +592,22 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         {mode === "pdf" && <div className="integrated-pdf">{assetUrl(paper.sourcePath) ? <iframe title="Source PDF" src={assetUrl(paper.sourcePath)} /> : <div className="pdf-placeholder"><FileText size={38} /><h2>Native PDF preview</h2><p>The source PDF is displayed here in the Windows desktop build.</p></div>}</div>}
         {mode === "figures" && <div className="reader-figures">{paper.figures.length ? paper.figures.map((figure) => <figure key={figure.id}>{assetUrl(`${paper.markdownPath?.replace(/[\\/][^\\/]+$/, "")}/${figure.relativePath}`) ? <img src={assetUrl(`${paper.markdownPath?.replace(/[\\/][^\\/]+$/, "")}/${figure.relativePath}`)} alt={figure.caption ?? "Extracted figure"} /> : <div><FileImage size={32} /></div>}<figcaption>{figure.caption ?? "Extracted figure"}</figcaption></figure>) : <div className="pdf-placeholder"><FileImage size={36} /><h2>No extracted figures</h2><p>Figures will appear after the parser finishes extraction.</p></div>}</div>}
       </main>
-      <aside className="reader-agent-panel">
-        <header><Bot size={15} /><strong>Paper Analyst Agent</strong><span className={`tag ${credentialReady ? "tag-success" : "tag-warning"}`}>{credentialReady ? "Gateway ready" : selectedProvider ? "Needs key" : "Needs model"}</span></header>
-        <div className="agent-panel-scroll"><p className="agent-intro">Translations stream through the secure Rust model gateway and can be persisted with exact section and block provenance.</p><div className="agent-context-card"><div><strong>Conversation Context</strong><b>{contextPercent}%</b></div><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><p>{(contextUsed / 1000).toFixed(1)}K / {(maxContextTokens / 1000).toFixed(0)}K tokens · {contextDraftQuery.data?.items.length ?? 0} persisted items</p><button onClick={() => setView("context")}>Open Context Workspace</button></div><label className="agent-model-field"><span>Translation and agent model</span><select value={agentModel} onChange={(event) => setAgentModel(event.target.value)}>{customModels.map((model) => <option key={model.id} value={model.id}>{model.displayName} · {providers.find((provider) => provider.id === model.providerId)?.format ?? "unavailable"}</option>)}</select></label><div className="agent-tool-call"><span><Sparkles size={12} /> secure_model_gateway</span><b>Rust</b><code>provider: {selectedProvider?.name ?? "not configured"}<br />credential: {selectedProvider?.credentialId ?? "none"}</code></div><p className="agent-answer">API keys remain in Stronghold and Rust memory. Python, SQLite, logs and persisted React state receive no provider secret.</p></div>
-        <label className="agent-chat-input"><MessageSquareText size={13} /><input placeholder="Ask about this paper…" /><Send size={13} /></label>
+      <aside className={`reader-agent-panel ${agentOpen ? "open" : ""}`}>
+        <header><Bot size={15} /><strong>Paper Analyst Agent</strong><span className={`tag ${credentialReady ? "tag-success" : "tag-warning"}`}>{credentialReady ? "Gateway ready" : selectedProvider ? "Needs key" : "Needs model"}</span><button className="reader-agent-close" title="Close agent" onClick={() => setAgentOpen(false)}><ChevronLeft size={13} /></button></header>
+        <div className="agent-panel-scroll">
+          <div className="agent-chat-summary"><div><strong>Conversation Context</strong><b>{contextPercent}%</b></div><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><span>{(contextUsed / 1000).toFixed(1)}K / {(maxContextTokens / 1000).toFixed(0)}K · {contextDraftQuery.data?.items.length ?? 0} items</span><button title="Open Context Workspace" onClick={() => setView("context")}><Layers3 size={11} /></button>{Boolean(chatQuery.data?.turns.length) && <button title="Clear conversation" onClick={() => void clearChat()}><Trash2 size={11} /></button>}</div>
+          <label className="agent-model-field"><span>Paper analyst model</span><select value={agentModel} onChange={(event) => setAgentModel(event.target.value)}>{customModels.map((model) => <option key={model.id} value={model.id}>{model.displayName} · {providers.find((provider) => provider.id === model.providerId)?.format ?? "unavailable"}</option>)}</select></label>
+          <div className="agent-chat-thread">
+            {!chatQuery.data?.turns.length && chatStatus !== "streaming" && <div className="agent-chat-empty"><MessageSquareText size={18} /><strong>Ask this paper</strong><span>Answers use the persisted research context and retain revision history.</span></div>}
+            {(chatQuery.data?.turns ?? []).map((turn) => <div className="agent-chat-turn" key={turn.id}>
+              <div className="chat-message user"><span>You</span><p>{turn.userMessage}</p></div>
+              <div className={`chat-message assistant ${turn.response?.status ?? "pending"}`}><span>Paper Analyst{turn.response ? ` · Revision ${turn.response.revision}` : ""}</span>{turn.response?.assistantText ? <div className="chat-markdown"><MarkdownBlock value={turn.response.assistantText} /></div> : <p>{turn.response?.error ?? "No response was produced."}</p>}<footer><small>{turn.response?.status ?? "pending"}{turn.response?.usage ? ` · ${turn.response.usage.outputTokens} tokens · ${(turn.response.usage.durationMs / 1000).toFixed(1)}s` : ""}</small>{turn.response && turn.response.status !== "completed" && <button onClick={() => void sendChat(turn)}><RefreshCw size={10} /> Retry</button>}</footer></div>
+            </div>)}
+            {chatStatus === "streaming" && <div className="agent-chat-turn live"><div className="chat-message user"><span>You</span><p>{chatPendingQuestion}</p></div><div className="chat-message assistant streaming"><span><LoaderCircle className="spin" size={11} /> Paper Analyst</span>{chatLive ? <div className="chat-markdown"><MarkdownBlock value={chatLive} /></div> : <p>Waiting for the first model token…</p>}<footer><button onClick={() => void cancelChat()}><Square size={9} /> Cancel</button></footer></div></div>}
+            {chatError && <p className="agent-chat-error"><TriangleAlert size={12} /> {chatError}</p>}
+          </div>
+        </div>
+        <form className="agent-chat-input" onSubmit={(event) => { event.preventDefault(); void sendChat(); }}><MessageSquareText size={13} /><input aria-label="Ask about this paper" value={chatInput} onChange={(event) => setChatInput(event.target.value)} disabled={chatStatus === "streaming"} placeholder="Ask about this paper…" /><button title="Send" type="submit" disabled={!chatInput.trim() || chatStatus === "streaming"}><Send size={13} /></button></form>
       </aside>
     </div>
     <footer className="reader-context-bar"><Layers3 size={14} /><strong>Conversation Context</strong><span className="tag tag-primary">{contextDraftQuery.data?.items.length ?? 0} persisted items</span><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><code>{(contextUsed / 1000).toFixed(1)}K / {(maxContextTokens / 1000).toFixed(0)}K · {contextPercent}%</code><span>Shared by Reader, Context, Agents and Innovate.</span><button onClick={() => setView("context")}>Open Context</button></footer>
@@ -285,6 +628,14 @@ function TranslationPanel({ block, state, onSave, onRetry, onCancel }: { block: 
   </div>;
 }
 
-function AnalysisCard({ type }: { type: "formula" | "theorem" }) {
-  return <div className={`reader-analysis ${type}`}><span className="tag tag-ai">AI {type === "formula" ? "Formula" : "Theorem"} Explanation · Gateway pending</span><h3>{type === "formula" ? "Formula intuition and term-by-term explanation" : "Claim, assumptions and proof sketch"}</h3>{type === "formula" ? <div className="formula-grid"><div><b>Inputs</b><p>Identifies each symbol and its role in the computation.</p></div><div><b>Operation</b><p>Explains the transformation and normalization step.</p></div><div><b>Output</b><p>Connects the result back to the surrounding method.</p></div></div> : <p><b>Next connection.</b> This panel will reuse the secure model stream with the source statement, proof and adjacent structured blocks.</p>}<footer><button disabled>Save Explanation</button><button>Show Source Evidence</button><button>Ask Follow-up</button></footer></div>;
+function AnalysisCard({ block, type, state, onSave, onRetry, onCancel, onFollowUp }: { block: ReaderBlock; type: ReaderAnalysisType; state: AnalysisState; onSave: () => void; onRetry: () => void; onCancel: () => void; onFollowUp: () => void }) {
+  const title = type === "formula" ? "Formula Explanation" : "Theorem Explanation";
+  return <div className={`reader-analysis ${type} ${state.status}`} data-block-id={block.id}>
+    <div className="reader-analysis-head"><span className="tag tag-ai">AI {title}{state.record ? ` · Revision ${state.record.revision}` : ""}</span>{state.status === "saved" && <span className="tag tag-success"><Check size={10} /> Saved</span>}</div>
+    {state.status === "streaming" && !state.text && <p className="analysis-wait"><LoaderCircle className="spin" size={13} /> Waiting for the first model token…</p>}
+    {state.text && <div className="analysis-markdown"><MarkdownBlock value={state.text} /></div>}
+    {state.error && <p className="translation-error"><TriangleAlert size={13} /> {state.error}</p>}
+    <div className="analysis-provenance"><code>{block.sectionId}/{block.id}{block.page ? ` · page ${block.page}` : ""}</code><span>{state.usage.outputTokens} output tokens · {(state.usage.durationMs / 1000).toFixed(1)}s</span></div>
+    <footer>{state.status === "streaming" ? <button onClick={onCancel}><Square size={10} /> Cancel</button> : <button onClick={onRetry}><RefreshCw size={11} /> {state.status === "error" ? "Retry" : "Regenerate"}</button>}{state.status === "unsaved" && <button onClick={onSave}>Save Explanation</button>}{state.status === "saved" && <button className="active" disabled>Persisted</button>}<button onClick={onFollowUp}><MessageSquareText size={11} /> Ask Follow-up</button></footer>
+  </div>;
 }
