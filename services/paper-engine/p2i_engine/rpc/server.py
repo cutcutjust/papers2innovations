@@ -25,7 +25,9 @@ class RpcServer:
         self.host_pending_lock = threading.Lock()
 
     def send(self, payload: dict[str, Any]) -> None:
-        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        # JSON-RPC is a wire protocol. ASCII escaping keeps every response valid
+        # UTF-8 even when a frozen Windows Python process inherited a legacy code page.
+        encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
         with self.output_lock:
             self.output.write(encoded + "\n")
             self.output.flush()

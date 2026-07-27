@@ -24,6 +24,8 @@ const KEYRING_USER: &str = "stronghold-vault-v1";
 struct EngineInner {
     child: Mutex<Option<Child>>,
     writer: Mutex<Option<ChildStdin>>,
+    startup: Mutex<()>,
+    generation: AtomicU64,
     pending: Mutex<Pending>,
     next_id: AtomicU64,
     ocr: Mutex<OcrConfig>,
@@ -103,6 +105,8 @@ impl Engine {
         Self(Arc::new(EngineInner {
             child: Mutex::new(None),
             writer: Mutex::new(None),
+            startup: Mutex::new(()),
+            generation: AtomicU64::new(0),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             ocr: Mutex::new(OcrConfig::default()),
@@ -144,7 +148,7 @@ impl Engine {
             command.arg("rpc");
             command.env("PYTHONIOENCODING", "utf-8");
             command.env("PYTHONUTF8", "1");
-            return (command, service_dir);
+            return (command, std::env::temp_dir());
         }
         let executable_name = if cfg!(windows) {
             "p2i-paper-engine.exe"
@@ -161,7 +165,7 @@ impl Engine {
                     command.arg("rpc");
                     command.env("PYTHONIOENCODING", "utf-8");
                     command.env("PYTHONUTF8", "1");
-                    return (command, service_dir);
+                    return (command, std::env::temp_dir());
                 }
             }
         }
@@ -183,6 +187,11 @@ impl Engine {
     }
 
     fn ensure_started(&self, app: AppHandle) -> Result<(), String> {
+        let _startup = self
+            .0
+            .startup
+            .lock()
+            .map_err(|_| "engine startup lock poisoned")?;
         if self
             .0
             .writer
@@ -193,6 +202,8 @@ impl Engine {
             return Ok(());
         }
         let (mut command, working_dir) = Self::engine_command();
+        std::fs::create_dir_all(&working_dir)
+            .map_err(|error| format!("failed to prepare paper engine work directory: {error}"))?;
         let mut child = command
             .current_dir(working_dir)
             .stdin(Stdio::piped())
@@ -210,6 +221,7 @@ impl Engine {
             .stderr
             .take()
             .ok_or("paper engine stderr unavailable")?;
+        let generation = self.0.generation.fetch_add(1, Ordering::Relaxed) + 1;
         *self.0.writer.lock().map_err(|_| "engine lock poisoned")? = Some(stdin);
         *self.0.child.lock().map_err(|_| "engine lock poisoned")? = Some(child);
 
@@ -242,6 +254,9 @@ impl Engine {
                         let _ = sender.send(message);
                     }
                 }
+            }
+            if reader_engine.0.generation.load(Ordering::Relaxed) != generation {
+                return;
             }
             if let Ok(mut writer) = reader_engine.0.writer.lock() {
                 *writer = None;
