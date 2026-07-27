@@ -17,7 +17,7 @@
 - `0009_agent_tool_registry.sql` 已实现 Agent tool-call provenance；Rust 已规范化 OpenAI-compatible/Anthropic 流式工具调用，Python 仅执行 profile 与 run snapshot 同时允许的白名单工具，React 支持最多 6 轮模型/工具循环。
 - P3 Innovate Pipeline 已完成：revisioned prompt、精确 Context snapshot、五阶段独立模型、串行真实模型流、stage checkpoint/usage、取消、失败阶段续跑和重启恢复均持久化到 schema 7。
 - 当前验证：Python `39 passed`、Vitest `10 passed`、TypeScript、Vite production build、Rust fmt/check/clippy 和 `8 passed`；Playwright 已走通 Explain → Save、Chat → History 及 Agent → find_evidence → final answer，覆盖 1440×900、720×600，控制台 0 error/0 warning。
-- 本机安装目录：`E:\Project_papers2innovations\install`；真实论文库：`E:\Papers2Innovations-Library`。
+- 本机已安装 `0.1.7`：`E:\Project_papers2innovations\install`；真实论文库已升级到 schema 9：`E:\Papers2Innovations-Library`；公开 Release 为 `v0.1.7`。
 - 下一优先级：将工具循环接入 Innovate novelty 阶段，再实现受确认控制的写工具与 academic 网络工具。下文中与本节冲突的“尚未实现”描述属于旧状态。
 
 ## 给下一位 AI 的启动提示词

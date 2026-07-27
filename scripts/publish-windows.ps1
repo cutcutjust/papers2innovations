@@ -59,6 +59,8 @@ if (-not (Test-Path -LiteralPath $Installer -PathType Leaf)) { throw "Installer 
 if (-not (Test-Path -LiteralPath $Signature -PathType Leaf)) { throw "Updater signature not found: $Signature" }
 
 $Tag = "v$Version"
+$ReleaseTarget = (& git -C $RepoRoot rev-parse HEAD).Trim()
+if (-not $ReleaseTarget) { throw "Cannot resolve the release source commit" }
 $FileName = Split-Path -Leaf $Installer
 $DownloadUrl = "https://github.com/$ReleaseRepo/releases/download/$Tag/$FileName"
 $Manifest = [ordered]@{
@@ -89,6 +91,7 @@ if ($ReleaseExists) {
   & $GhPath release upload $Tag $Installer $Signature $ManifestPath --repo $ReleaseRepo --clobber
 } else {
   & $GhPath release create $Tag $Installer $Signature $ManifestPath --repo $ReleaseRepo `
+    --target $ReleaseTarget `
     --title "Papers2Innovations $Version - Windows x64" `
     --notes $Manifest.notes
 }
