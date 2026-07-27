@@ -1,37 +1,33 @@
-import { FolderOpen, RefreshCw, Search } from "lucide-react";
-import { nativeRuntime } from "../lib/bridge";
-import { useWorkspace } from "../store";
+import { Atom, Search, Sparkles } from "lucide-react";
+import { useWorkspace, type View } from "../store";
 
-interface TopbarProps {
-  scanning: boolean;
-  onScan: () => void;
-  onChooseLibrary: () => void;
-}
+const primaryViews: Array<{ view: View; label: string }> = [
+  { view: "library", label: "Library" },
+  { view: "reader", label: "Reader" },
+  { view: "agents", label: "Agents" },
+  { view: "graph", label: "Graph" },
+  { view: "innovate", label: "Innovate" },
+];
 
-export function Topbar({ scanning, onScan, onChooseLibrary }: TopbarProps) {
-  const { root, query, setQuery } = useWorkspace();
-  const folderName = root.split(/[\\/]/).filter(Boolean).at(-1) ?? "Choose a library";
+export function Topbar() {
+  const { view, setView, query, setQuery } = useWorkspace();
   return (
-    <header className="topbar">
-      <button className="workspace-switcher" onClick={onChooseLibrary} title={root || "Choose library folder"}>
-        <FolderOpen size={16} />
-        <span>{folderName}</span>
-        {!nativeRuntime && <span className="demo-badge">Demo</span>}
+    <header className="figma-topbar">
+      <div className="window-controls" aria-hidden="true"><i /><i /><i /></div>
+      <button className="figma-brand" onClick={() => setView("library")}>
+        <span><Atom size={15} /></span><strong>Papers2Innovations</strong>
       </button>
-      <label className="search-box">
-        <Search size={16} />
-        <input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search title or path"
-          aria-label="Search papers"
-        />
-        <kbd>Ctrl K</kbd>
+      <nav className="top-navigation" aria-label="Product navigation">
+        {primaryViews.map((item) => (
+          <button key={item.view} className={view === item.view ? "active" : ""} onClick={() => setView(item.view)}>{item.label}</button>
+        ))}
+      </nav>
+      <label className="top-command-search">
+        <Search size={14} />
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search papers" aria-label="Search papers" />
       </label>
-      <button className="icon-button" onClick={onScan} disabled={scanning || !root} title="Scan library now">
-        <RefreshCw size={17} className={scanning ? "spin" : ""} />
-      </button>
+      <button className="top-ai-button" title="AI actions"><Sparkles size={14} /></button>
+      <span className="user-avatar">RW</span>
     </header>
   );
 }
-

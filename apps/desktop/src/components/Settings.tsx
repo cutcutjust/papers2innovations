@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, Eye, EyeOff, LoaderCircle, ShieldCheck, Trash2, Wifi } from "lucide-react";
+import { Bot, CheckCircle2, Eye, EyeOff, LoaderCircle, Plus, ShieldCheck, Trash2, Wifi } from "lucide-react";
 import {
   deleteOcrCredential,
   hydrateOcrCredential,
@@ -7,8 +7,10 @@ import {
   testQwenConnection,
 } from "../lib/credentials";
 import { nativeRuntime, uninstallApplication } from "../lib/bridge";
+import { useWorkspace, type ModelApiFormat } from "../store";
 
 export function Settings() {
+  const { customModels, addCustomModel, removeCustomModel } = useWorkspace();
   const [configured, setConfigured] = useState(false);
   const [workspaceId, setWorkspaceId] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -17,6 +19,10 @@ export function Settings() {
   const [showKey, setShowKey] = useState(false);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  const [modelName, setModelName] = useState("");
+  const [modelId, setModelId] = useState("");
+  const [modelBaseUrl, setModelBaseUrl] = useState("");
+  const [modelFormat, setModelFormat] = useState<ModelApiFormat>("openai");
 
   const run = async (action: () => Promise<void>) => {
     setBusy(true);
@@ -74,8 +80,44 @@ export function Settings() {
     void run(uninstallApplication);
   };
 
+  const addModel = () => {
+    const id = modelId.trim();
+    if (!id || !modelBaseUrl.trim()) {
+      setStatus("Model ID and Base URL are required.");
+      return;
+    }
+    addCustomModel({
+      id,
+      name: modelName.trim() || id,
+      model: id,
+      baseUrl: modelBaseUrl.trim().replace(/\/$/, ""),
+      format: modelFormat,
+    });
+    setModelName("");
+    setModelId("");
+    setModelBaseUrl("");
+    setStatus(`Custom model ${id} is available to every AI stage.`);
+  };
+
   return <main className="settings-page">
-    <div className="page-title-block"><div className="page-icon"><ShieldCheck size={20} /></div><div><h1>OCR & security</h1><p>Configure full-page Qwen OCR through the Rust model gateway.</p></div></div>
+    <div className="page-title-block"><div className="page-icon"><ShieldCheck size={20} /></div><div><h1>Models & security</h1><p>Manage reusable AI endpoints and full-page OCR credentials.</p></div></div>
+    <section className="settings-section model-settings-section">
+      <div className="settings-heading"><div><h2>Custom AI models</h2><p>Shared by compression, evidence extraction, idea generation, novelty and critique.</p></div><Bot size={18} /></div>
+      <div className="model-registry">
+        {customModels.map((model) => <div className="model-registry-row" key={model.id}>
+          <span className="model-format-badge">{model.format === "openai" ? "OpenAI" : "Anthropic"}</span>
+          <span className="model-registry-copy"><strong>{model.name}</strong><small>{model.model} / {model.baseUrl}</small></span>
+          <button className="icon-button small" onClick={() => removeCustomModel(model.id)} title={`Remove ${model.name}`} disabled={customModels.length === 1}><Trash2 size={14} /></button>
+        </div>)}
+      </div>
+      <div className="model-entry-grid">
+        <label><span>Display name</span><input value={modelName} onChange={(event) => setModelName(event.target.value)} placeholder="Reasoning" /></label>
+        <label><span>Model ID</span><input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="custom-reasoning-model" /></label>
+        <label className="model-url-field"><span>Base URL</span><input value={modelBaseUrl} onChange={(event) => setModelBaseUrl(event.target.value)} placeholder="https://gateway.example.com/v1" /></label>
+        <label><span>API format</span><select value={modelFormat} onChange={(event) => setModelFormat(event.target.value as ModelApiFormat)}><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option></select></label>
+        <button className="primary-button compact model-add-button" onClick={addModel}><Plus size={14} /> Add model</button>
+      </div>
+    </section>
     <section className="settings-section"><div className="settings-heading"><div><h2>Stronghold vault</h2><p>Automatically unlocked with a random key held by the operating system credential store.</p></div><ShieldCheck size={18} /></div><div className="vault-state"><span>{configured ? "Qwen credential stored" : "Vault ready"}</span><strong>{configured ? "Configured" : "Not configured"}</strong></div></section>
     <section className="settings-section"><div className="settings-heading"><div><h2>Alibaba Cloud Model Studio</h2><p>Beijing region | OpenAI-compatible API | qwen3.5-ocr</p></div><Wifi size={18} /></div>
       <div className="form-grid"><label><span>Workspace ID <small>optional</small></span><input value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)} placeholder="Only required for dedicated business spaces" /></label><label><span>Custom Base URL <small>optional</small></span><input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="Public Beijing endpoint by default" /></label><label className="full-field"><span>DashScope API key</span><div className="secret-input"><input type={showKey ? "text" : "password"} value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={configured ? "Enter a new key to replace the stored credential" : "sk-..."} autoComplete="off" /><button type="button" onClick={() => setShowKey((value) => !value)} title={showKey ? "Hide key" : "Show key"}>{showKey ? <EyeOff size={16} /> : <Eye size={16} />}</button></div></label></div>
