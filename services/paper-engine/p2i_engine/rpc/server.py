@@ -177,6 +177,32 @@ class RpcServer:
             return self.library(params["root"]).cancel_agent_run(params["runId"])
         if method == "agent.run_retry":
             return self.library(params["root"]).retry_agent_run(params["runId"])
+        if method == "innovation.prompt_get":
+            return self.library(params["root"]).get_innovation_prompt(
+                params.get("promptVersion", "innovation-v1")
+            )
+        if method == "innovation.prompt_save":
+            return self.library(params["root"]).save_innovation_prompt(
+                params["promptText"], params.get("promptVersion", "innovation-v1")
+            )
+        if method == "innovation.run_list":
+            return self.library(params["root"]).list_innovation_runs(
+                int(params.get("limit", 30))
+            )
+        if method == "innovation.run_start":
+            return self.library(params["root"]).start_innovation_run(params)
+        if method == "innovation.stage_start":
+            return self.library(params["root"]).start_innovation_stage(
+                params["runId"], params["stage"]
+            )
+        if method == "innovation.stage_update":
+            return self.library(params["root"]).update_innovation_stage(
+                params["runId"], params["stage"], params
+            )
+        if method == "innovation.run_cancel":
+            return self.library(params["root"]).cancel_innovation_run(params["runId"])
+        if method == "innovation.run_retry":
+            return self.library(params["root"]).retry_innovation_run(params["runId"])
         if method == "zotero.inspect":
             from ..zotero import ZoteroImporter
 

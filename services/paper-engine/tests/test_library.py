@@ -36,7 +36,7 @@ def test_initializes_versioned_library_layout(tmp_path: Path) -> None:
 
     with sqlite3.connect(result["database"]) as connection:
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-    assert version == 6
+    assert version == 7
 
 
 def test_agent_profiles_runs_retry_and_restart_recovery_are_persistent(tmp_path: Path) -> None:
@@ -114,6 +114,69 @@ def test_agent_profile_rejects_unknown_tool_and_protects_run_history(tmp_path: P
     })
     with pytest.raises(ValueError, match="run history"):
         library.delete_agent_profile(profile["id"])
+
+
+def test_innovation_pipeline_resumes_from_failed_stage_without_repeating_completed(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    prompt = library.save_innovation_prompt("Generate grounded ideas.")
+    assert prompt["revision"] == 1
+    assert library.get_innovation_prompt()["promptText"] == "Generate grounded ideas."
+
+    stage_models = {
+        "compression": "model-fast",
+        "evidence": "model-long",
+        "ideas": "model-reasoning",
+        "novelty": "model-reasoning",
+        "critique": "model-reasoning",
+    }
+    run = library.start_innovation_run({
+        "promptText": prompt["promptText"],
+        "promptVersion": prompt["promptVersion"],
+        "contextSnapshot": {"id": "snapshot-innovation", "items": []},
+        "stageModels": stage_models,
+    })
+    assert [stage["status"] for stage in run["stages"]] == ["pending"] * 5
+
+    library.start_innovation_stage(run["id"], "compression")
+    library.update_innovation_stage(run["id"], "compression", {
+        "status": "completed",
+        "outputText": "Compressed context with anchors.",
+        "inputTokens": 50,
+        "outputTokens": 10,
+    })
+    library.start_innovation_stage(run["id"], "evidence")
+    failed = library.update_innovation_stage(run["id"], "evidence", {
+        "status": "failed",
+        "outputText": "Partial evidence ledger.",
+        "error": "provider unavailable",
+    })
+    assert failed["status"] == "failed"
+
+    retried = library.retry_innovation_run(run["id"])
+    assert retried["currentStage"] == "evidence"
+    assert retried["stages"][0]["status"] == "completed"
+    assert retried["stages"][0]["outputText"] == "Compressed context with anchors."
+    assert retried["stages"][1]["status"] == "pending"
+    assert retried["stages"][1]["attempt"] == 1
+
+
+def test_innovation_pipeline_marks_active_stage_interrupted_after_restart(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    models = {stage: "model" for stage in ("compression", "evidence", "ideas", "novelty", "critique")}
+    run = library.start_innovation_run({
+        "promptText": "Create a falsifiable hypothesis.",
+        "contextSnapshot": {},
+        "stageModels": models,
+    })
+    library.start_innovation_stage(run["id"], "compression")
+
+    restarted = Library(tmp_path)
+    restarted.initialize()
+    recovered = restarted.list_innovation_runs()[0]
+    assert recovered["status"] == "interrupted"
+    assert recovered["stages"][0]["status"] == "interrupted"
 
 
 def test_reader_translation_is_revisioned_and_persisted(tmp_path: Path) -> None:

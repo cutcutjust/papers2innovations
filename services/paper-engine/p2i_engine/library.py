@@ -96,6 +96,8 @@ DEFAULT_AGENT_PROFILES = (
     },
 )
 
+INNOVATION_STAGES = ("compression", "evidence", "ideas", "novelty", "critique")
+
 
 class Library:
     def __init__(self, root: str | Path, ocr_page: Callable[[dict], dict] | None = None):
@@ -126,6 +128,7 @@ class Library:
         if not self._initialized:
             self._ensure_default_agent_profiles()
             self._recover_interrupted_agent_runs()
+            self._recover_interrupted_innovation_runs()
             recovered = self._recover_interrupted_jobs()
             self._initialized = True
             self._recovered_jobs = recovered
@@ -1869,6 +1872,329 @@ class Library:
                 retry_of=run_id,
             )
         return self._agent_run_contract(record)
+
+    def _recover_interrupted_innovation_runs(self) -> None:
+        now = utc_now()
+        with self.db.connect() as connection:
+            connection.execute(
+                "UPDATE innovation_stages SET status = 'interrupted', "
+                "error = COALESCE(error, 'Stage interrupted by engine restart'), "
+                "finished_at = ?, updated_at = ? WHERE status = 'running'",
+                (now, now),
+            )
+            connection.execute(
+                "UPDATE innovation_runs SET status = 'interrupted', "
+                "error = COALESCE(error, 'Pipeline interrupted by engine restart'), "
+                "finished_at = ?, updated_at = ? WHERE status = 'running'",
+                (now, now),
+            )
+
+    def save_innovation_prompt(
+        self, prompt_text: str, prompt_version: str = "innovation-v1"
+    ) -> dict[str, Any]:
+        self.initialize()
+        prompt_text = prompt_text.strip()
+        prompt_version = prompt_version.strip()
+        if not prompt_text or len(prompt_text) > 100000 or not prompt_version:
+            raise ValueError("Innovation prompt is empty or too large")
+        now = utc_now()
+        with self.db.connect() as connection:
+            revision = connection.execute(
+                "SELECT COALESCE(MAX(revision), 0) + 1 FROM innovation_prompt_revisions "
+                "WHERE prompt_version = ?",
+                (prompt_version,),
+            ).fetchone()[0]
+            record = {
+                "id": str(uuid.uuid4()),
+                "promptText": prompt_text,
+                "promptVersion": prompt_version,
+                "revision": revision,
+                "createdAt": now,
+            }
+            connection.execute(
+                "INSERT INTO innovation_prompt_revisions(id, prompt_text, prompt_version, "
+                "revision, created_at) VALUES (?, ?, ?, ?, ?)",
+                (record["id"], prompt_text, prompt_version, revision, now),
+            )
+        return record
+
+    def get_innovation_prompt(
+        self, prompt_version: str = "innovation-v1"
+    ) -> dict[str, Any] | None:
+        self.initialize()
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM innovation_prompt_revisions WHERE prompt_version = ? "
+                "ORDER BY revision DESC LIMIT 1",
+                (prompt_version,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "promptText": row["prompt_text"],
+            "promptVersion": row["prompt_version"],
+            "revision": row["revision"],
+            "createdAt": row["created_at"],
+        }
+
+    @staticmethod
+    def _innovation_stage_contract(record: Any) -> dict[str, Any]:
+        return {
+            "id": record["id"],
+            "runId": record["run_id"],
+            "stage": record["stage"],
+            "position": record["position"],
+            "status": record["status"],
+            "modelId": record["model_id"],
+            "attempt": record["attempt"],
+            "outputText": record["output_text"],
+            "usage": {
+                "inputTokens": record["input_tokens"],
+                "outputTokens": record["output_tokens"],
+                "durationMs": record["duration_ms"],
+            },
+            "error": record["error"],
+            "startedAt": record["started_at"],
+            "finishedAt": record["finished_at"],
+            "updatedAt": record["updated_at"],
+        }
+
+    @classmethod
+    def _innovation_run_contract(
+        cls, record: Any, stages: list[Any]
+    ) -> dict[str, Any]:
+        return {
+            "id": record["id"],
+            "retryOf": record["retry_of"],
+            "status": record["status"],
+            "currentStage": record["current_stage"],
+            "promptText": record["prompt_text"],
+            "promptVersion": record["prompt_version"],
+            "contextSnapshot": json.loads(record["context_snapshot_json"]),
+            "stageModels": json.loads(record["stage_models_json"]),
+            "stages": [cls._innovation_stage_contract(stage) for stage in stages],
+            "cancelRequested": bool(record["cancel_requested"]),
+            "error": record["error"],
+            "startedAt": record["started_at"],
+            "finishedAt": record["finished_at"],
+            "createdAt": record["created_at"],
+            "updatedAt": record["updated_at"],
+        }
+
+    def _read_innovation_run(self, connection: Any, run_id: str) -> dict[str, Any]:
+        run = connection.execute(
+            "SELECT * FROM innovation_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if not run:
+            raise KeyError(f"Unknown innovation run: {run_id}")
+        stages = connection.execute(
+            "SELECT * FROM innovation_stages WHERE run_id = ? ORDER BY position", (run_id,)
+        ).fetchall()
+        return self._innovation_run_contract(run, list(stages))
+
+    def list_innovation_runs(self, limit: int = 30) -> list[dict[str, Any]]:
+        self.initialize()
+        limit = max(1, min(int(limit), 100))
+        with self.db.connect() as connection:
+            run_ids = [
+                row["id"]
+                for row in connection.execute(
+                    "SELECT id FROM innovation_runs ORDER BY created_at DESC LIMIT ?", (limit,)
+                )
+            ]
+            return [self._read_innovation_run(connection, run_id) for run_id in run_ids]
+
+    def start_innovation_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        prompt_text = str(payload.get("promptText", "")).strip()
+        prompt_version = str(payload.get("promptVersion", "innovation-v1")).strip()
+        context_snapshot = payload.get("contextSnapshot") or {}
+        stage_models = payload.get("stageModels") or {}
+        if not prompt_text or len(prompt_text) > 100000:
+            raise ValueError("Innovation prompt is empty or too large")
+        if not isinstance(context_snapshot, dict) or not isinstance(stage_models, dict):
+            raise ValueError("Innovation context and stage models must be objects")
+        missing_models = [stage for stage in INNOVATION_STAGES if not stage_models.get(stage)]
+        if missing_models:
+            raise ValueError("Missing innovation stage models: " + ", ".join(missing_models))
+        snapshot_json = json.dumps(context_snapshot, ensure_ascii=False, separators=(",", ":"))
+        if len(snapshot_json.encode("utf-8")) > 2 * 1024 * 1024:
+            raise ValueError("Innovation context snapshot exceeds 2 MB")
+        now = utc_now()
+        run_id = str(uuid.uuid4())
+        with self.db.connect() as connection:
+            connection.execute(
+                "INSERT INTO innovation_runs(id, retry_of, status, current_stage, prompt_text, "
+                "prompt_version, context_snapshot_json, stage_models_json, cancel_requested, "
+                "error, started_at, finished_at, created_at, updated_at) "
+                "VALUES (?, NULL, 'running', ?, ?, ?, ?, ?, 0, NULL, ?, NULL, ?, ?)",
+                (
+                    run_id,
+                    INNOVATION_STAGES[0],
+                    prompt_text,
+                    prompt_version,
+                    snapshot_json,
+                    json.dumps(stage_models, separators=(",", ":")),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            for position, stage in enumerate(INNOVATION_STAGES):
+                connection.execute(
+                    "INSERT INTO innovation_stages(id, run_id, stage, position, status, model_id, "
+                    "attempt, output_text, input_tokens, output_tokens, duration_ms, error, "
+                    "started_at, finished_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, 'pending', ?, 0, '', 0, 0, 0, NULL, NULL, NULL, ?)",
+                    (str(uuid.uuid4()), run_id, stage, position, str(stage_models[stage]), now),
+                )
+            return self._read_innovation_run(connection, run_id)
+
+    def start_innovation_stage(self, run_id: str, stage: str) -> dict[str, Any]:
+        self.initialize()
+        if stage not in INNOVATION_STAGES:
+            raise ValueError("Unknown innovation stage")
+        position = INNOVATION_STAGES.index(stage)
+        now = utc_now()
+        with self.db.connect() as connection:
+            run = connection.execute(
+                "SELECT * FROM innovation_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if not run:
+                raise KeyError(f"Unknown innovation run: {run_id}")
+            if run["status"] not in {"running", "interrupted"}:
+                raise ValueError("Innovation run is not active")
+            if position:
+                previous = connection.execute(
+                    "SELECT status FROM innovation_stages WHERE run_id = ? AND position = ?",
+                    (run_id, position - 1),
+                ).fetchone()
+                if not previous or previous["status"] != "completed":
+                    raise ValueError("Previous innovation stage is incomplete")
+            stage_row = connection.execute(
+                "SELECT * FROM innovation_stages WHERE run_id = ? AND stage = ?", (run_id, stage)
+            ).fetchone()
+            if stage_row["status"] == "completed":
+                return self._innovation_stage_contract(stage_row)
+            connection.execute(
+                "UPDATE innovation_stages SET status = 'running', attempt = attempt + 1, "
+                "error = NULL, started_at = ?, finished_at = NULL, updated_at = ? "
+                "WHERE run_id = ? AND stage = ?",
+                (now, now, run_id, stage),
+            )
+            connection.execute(
+                "UPDATE innovation_runs SET status = 'running', current_stage = ?, "
+                "cancel_requested = 0, error = NULL, finished_at = NULL, updated_at = ? WHERE id = ?",
+                (stage, now, run_id),
+            )
+            updated = connection.execute(
+                "SELECT * FROM innovation_stages WHERE run_id = ? AND stage = ?", (run_id, stage)
+            ).fetchone()
+        return self._innovation_stage_contract(updated)
+
+    def update_innovation_stage(
+        self, run_id: str, stage: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.initialize()
+        if stage not in INNOVATION_STAGES:
+            raise ValueError("Unknown innovation stage")
+        status = str(payload.get("status", "running"))
+        if status not in {"running", "completed", "failed", "cancelled"}:
+            raise ValueError("Invalid innovation stage status")
+        output_text = str(payload.get("outputText", ""))
+        if len(output_text) > 2_000_000:
+            raise ValueError("Innovation stage output exceeds 2 million characters")
+        now = utc_now()
+        terminal = status in {"completed", "failed", "cancelled"}
+        error = str(payload.get("error", ""))[:4000] or None
+        with self.db.connect() as connection:
+            current = connection.execute(
+                "SELECT * FROM innovation_stages WHERE run_id = ? AND stage = ?", (run_id, stage)
+            ).fetchone()
+            if not current:
+                raise KeyError(f"Unknown innovation stage: {stage}")
+            if current["status"] == "completed" and status != "completed":
+                raise ValueError("Completed innovation stages are immutable")
+            connection.execute(
+                "UPDATE innovation_stages SET status = ?, output_text = ?, input_tokens = ?, "
+                "output_tokens = ?, duration_ms = ?, error = ?, finished_at = ?, updated_at = ? "
+                "WHERE run_id = ? AND stage = ?",
+                (
+                    status,
+                    output_text,
+                    max(0, int(payload.get("inputTokens", current["input_tokens"]))),
+                    max(0, int(payload.get("outputTokens", current["output_tokens"]))),
+                    max(0, int(payload.get("durationMs", current["duration_ms"]))),
+                    error,
+                    now if terminal else None,
+                    now,
+                    run_id,
+                    stage,
+                ),
+            )
+            if status == "completed":
+                position = INNOVATION_STAGES.index(stage)
+                if position == len(INNOVATION_STAGES) - 1:
+                    connection.execute(
+                        "UPDATE innovation_runs SET status = 'completed', error = NULL, "
+                        "finished_at = ?, updated_at = ? WHERE id = ?",
+                        (now, now, run_id),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE innovation_runs SET current_stage = ?, updated_at = ? WHERE id = ?",
+                        (INNOVATION_STAGES[position + 1], now, run_id),
+                    )
+            elif status in {"failed", "cancelled"}:
+                connection.execute(
+                    "UPDATE innovation_runs SET status = ?, error = ?, cancel_requested = ?, "
+                    "finished_at = ?, updated_at = ? WHERE id = ?",
+                    (status, error, 1 if status == "cancelled" else 0, now, now, run_id),
+                )
+            return self._read_innovation_run(connection, run_id)
+
+    def cancel_innovation_run(self, run_id: str) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            run = connection.execute(
+                "SELECT current_stage FROM innovation_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        if not run:
+            raise KeyError(f"Unknown innovation run: {run_id}")
+        return self.update_innovation_stage(
+            run_id, run["current_stage"], {"status": "cancelled", "error": "Cancelled by user"}
+        )
+
+    def retry_innovation_run(self, run_id: str) -> dict[str, Any]:
+        self.initialize()
+        now = utc_now()
+        with self.db.connect() as connection:
+            run = connection.execute(
+                "SELECT * FROM innovation_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if not run:
+                raise KeyError(f"Unknown innovation run: {run_id}")
+            if run["status"] not in {"failed", "cancelled", "interrupted"}:
+                raise ValueError("Only failed, cancelled, or interrupted pipelines can retry")
+            stages = connection.execute(
+                "SELECT * FROM innovation_stages WHERE run_id = ? ORDER BY position", (run_id,)
+            ).fetchall()
+            resume = next((stage for stage in stages if stage["status"] != "completed"), None)
+            if not resume:
+                raise ValueError("Innovation run has no incomplete stage")
+            connection.execute(
+                "UPDATE innovation_stages SET status = 'pending', output_text = '', error = NULL, "
+                "input_tokens = 0, output_tokens = 0, duration_ms = 0, started_at = NULL, "
+                "finished_at = NULL, updated_at = ? WHERE run_id = ? AND position >= ?",
+                (now, run_id, resume["position"]),
+            )
+            connection.execute(
+                "UPDATE innovation_runs SET status = 'running', current_stage = ?, "
+                "cancel_requested = 0, error = NULL, finished_at = NULL, updated_at = ? WHERE id = ?",
+                (resume["stage"], now, run_id),
+            )
+            return self._read_innovation_run(connection, run_id)
 
     @staticmethod
     def _translation_contract(record: dict[str, Any]) -> dict[str, Any]:

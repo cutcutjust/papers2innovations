@@ -13,9 +13,10 @@
 - `0005_context_compressions.sql` 已实现 AI Context 压缩、精确 active revision、模型与 Prompt 版本缓存、source hash 失效保护、token/耗时 usage，以及原文/压缩模式切换。
 - P2 已完成：真实两层 Citation Graph、结构化引用提取、本地论文解析、环路与重复引用合并、关系分析、`.p2i` fingerprint 缓存，以及 Cytoscape.js 交互画布。
 - P3 Agent Runtime 首条链路已完成：profile CRUD、工具/网络/写入策略、system prompt、共享 Context snapshot、真实模型流、checkpoint、取消、重试、usage、错误和重启中断恢复均持久化到 schema 6。
-- 当前验证：Python `35 passed`、Vitest `10 passed`、TypeScript、Vite production build、Rust fmt/check/clippy 和 `7 passed`；Playwright 覆盖 1440×900、1100×760、720×600，控制台 0 error。
+- P3 Innovate Pipeline 已完成：revisioned prompt、精确 Context snapshot、五阶段独立模型、串行真实模型流、stage checkpoint/usage、取消、失败阶段续跑和重启恢复均持久化到 schema 7。
+- 当前验证：Python `37 passed`、Vitest `10 passed`、TypeScript、Vite production build、Rust fmt/check/clippy 和 `7 passed`；Playwright 覆盖 1440×900、1100×760、720×600，控制台 0 error。
 - 本机安装目录：`E:\Project_papers2innovations\install`；真实论文库：`E:\Papers2Innovations-Library`。
-- 下一优先级：P3 Innovate 五阶段 Pipeline。下文中与本节冲突的“尚未实现”描述属于旧状态。
+- 下一优先级：Reader 公式/定理解释与 Agent Chat，然后实现受限 Tool Registry 的真实工具调用。下文中与本节冲突的“尚未实现”描述属于旧状态。
 
 ## 给下一位 AI 的启动提示词
 
@@ -106,7 +107,7 @@ Python paper engine (services/paper-engine/p2i_engine)
 | Agents | `apps/desktop/src/components/Agents.tsx` | profile CRUD、权限、共享 Context、真实流式运行、取消/重试与 run 历史已接通 |
 | Context | `apps/desktop/src/components/ContextWorkspace.tsx` | 原文/压缩模式和 token UI 完成，未持久化、未真正压缩 |
 | Citation Graph | `apps/desktop/src/components/CitationGraph.tsx` | 真实两层图、引用关系、缓存、重分析、Context 与 Reader 操作已接通 |
-| Innovate | `apps/desktop/src/components/InnovationWorkspace.tsx` | 提示词与模型路由 UI 完成；Run 仍是定时器模拟 |
+| Innovate | `apps/desktop/src/components/InnovationWorkspace.tsx` | revisioned prompt、共享 Context 与五阶段真实模型流水线已接通 |
 | Settings | `apps/desktop/src/components/Settings.tsx` | 自定义模型注册表可用；模型 API Key 尚未实现；OCR Stronghold 已真实实现 |
 | Activity | `apps/desktop/src/components/Activity.tsx` | 使用真实任务 RPC |
 | Zotero Import | `apps/desktop/src/components/ZoteroImport.tsx` | 使用真实 Zotero RPC |
@@ -178,7 +179,8 @@ Python RPC 当前支持：
 ### Agents / Innovate
 
 - Agent Runtime 已使用 `0006_agent_runtime.sql` 持久化 profile 与 run；模型流经 Rust 安全网关，支持 checkpoint、取消、失败/中断重试和 usage。
-- Innovate 的 `Run synthesis` 仍是定时器模拟，没有真正调用模型。
+- Innovate 已使用 `0007_innovation_pipeline.sql` 持久化 prompt/run/stage；五阶段真实串行执行并从失败阶段续跑。
+- Agent profile 的工具权限目前会进入 snapshot/provenance，但尚未执行模型 tool call；真实 Tool Registry 仍待实现。
 - 提示词只保存在 `localStorage`。
 - 阶段模型选择和 Context 模式主要是组件内 state，刷新会丢失。
 
@@ -247,8 +249,8 @@ interface ModelConfig {
 
 1. 持久化 Agent profile、允许工具、网络策略、写入策略和默认模型。（已完成）
 2. 创建统一运行记录：input context snapshot、prompt version、stage model、tool calls、token usage、cost、output、error。（Agent run 已完成；Innovate stage 待接）
-3. Innovate 五个阶段按界面路由：compression、evidence、ideas、novelty、critique。
-4. 每个阶段都必须能取消、重试、切换模型并保留证据引用。
+3. Innovate 五个阶段按界面路由：compression、evidence、ideas、novelty、critique。（已完成）
+4. 每个阶段都必须能取消、重试、切换模型并保留证据引用。（本地证据与续跑已完成；外部 novelty 工具待 Tool Registry）
 5. 输出研究想法时，事实性声明必须附 paper/section/page/block anchor。
 
 ## 8. 桌面端视觉与交互约束
@@ -378,10 +380,10 @@ git diff -- apps/desktop/src
 
 ## 13. 建议下一位 AI 的第一项实现
 
-下一项是 P3 Innovate Pipeline，复用已完成的安全模型网关、共享 Context draft 和 Agent run 状态机：
+下一项是 Reader 深度交互与受限 Tool Registry：
 
-1. 新增 innovation run/stage 契约、migration 与 RPC，持久化 editable prompt、阶段模型、输入 snapshot、输出和 evidence anchors。
-2. 让 compression、evidence、ideas、novelty、critique 五阶段真实串行执行，每阶段可独立取消、失败重试和切换模型。
-3. 删除 `InnovationWorkspace.tsx` 的 `setTimeout` 模拟和 `localStorage` prompt，改为 SQLite revision。
-4. 恢复未完成 run 时从失败阶段继续，不重复调用已完成阶段。
-5. 覆盖 Python/TypeScript/Rust、浏览器 fallback、真实原生 smoke 和三尺寸 Playwright 验收。
+1. 让公式解释、定理解释和 Reader Agent Chat 复用安全模型流，并像翻译一样 revisioned 持久化。
+2. 建立 Tool Registry，只暴露白名单工具；第一批实现 `search_library`、`read_paper`、`read_section`、`read_figure`、`find_evidence`、`get_references`。
+3. 在 Rust 网关规范化 OpenAI-compatible/Anthropic tool call，在 Python 执行受限工具，并把调用/结果写入 run provenance。
+4. Agent Runtime 与 Innovate novelty 阶段接入工具循环；网络策略为 `none` 时拒绝外部工具，`academic` 只允许学术来源。
+5. 覆盖路径越界、权限拒绝、循环上限、取消/重试、证据锚点和三尺寸 Playwright。

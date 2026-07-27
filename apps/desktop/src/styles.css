@@ -698,3 +698,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .agents-page .agent-detail { display: block; width: 300px; flex-basis: 300px; }
   .agents-page .agent-grid { min-width: 250px; }
 }
+
+.innovation-stage-running { box-shadow: inset 3px 0 var(--ai); }
+.innovation-stage-completed { box-shadow: inset 3px 0 var(--green); }
+.innovation-stage-failed, .innovation-stage-interrupted { box-shadow: inset 3px 0 var(--red); }
+.innovation-stage-running .route-number { color: var(--ai); }
+.innovation-stage-completed .route-number { color: var(--green); }
+.innovation-stage-failed .route-number, .innovation-stage-interrupted .route-number { color: var(--red); }
+.innovation-output-panel pre { max-height: 360px; overflow: auto; margin: 0; padding: 13px; color: var(--muted); background: var(--surface-soft); border: 1px solid var(--line); border-radius: 4px; font: 9px/1.65 Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+.innovation-output-panel .workbench-panel-heading > button { margin-left: auto; }

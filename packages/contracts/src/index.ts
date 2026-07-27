@@ -285,6 +285,52 @@ export interface AgentRun {
   updatedAt: string;
 }
 
+export type InnovationStageId = "compression" | "evidence" | "ideas" | "novelty" | "critique";
+export type InnovationRunStatus = "running" | "completed" | "failed" | "cancelled" | "interrupted";
+export type InnovationStageStatus = "pending" | InnovationRunStatus;
+
+export interface InnovationPromptRevision {
+  id: string;
+  promptText: string;
+  promptVersion: string;
+  revision: number;
+  createdAt: string;
+}
+
+export interface InnovationStageRecord {
+  id: string;
+  runId: string;
+  stage: InnovationStageId;
+  position: number;
+  status: InnovationStageStatus;
+  modelId: string;
+  attempt: number;
+  outputText: string;
+  usage: { inputTokens: number; outputTokens: number; durationMs: number };
+  error?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  updatedAt: string;
+}
+
+export interface InnovationRun {
+  id: string;
+  retryOf?: string;
+  status: InnovationRunStatus;
+  currentStage: InnovationStageId;
+  promptText: string;
+  promptVersion: string;
+  contextSnapshot: ContextSnapshot;
+  stageModels: Record<InnovationStageId, string>;
+  stages: InnovationStageRecord[];
+  cancelRequested: boolean;
+  error?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type ContextLoadMode = "full" | "structured" | "compressed" | "retrieval" | "sections";
 
 export interface ContextCompressionSummary {

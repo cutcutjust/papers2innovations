@@ -1,4 +1,4 @@
-import type { AgentProfile, AgentRun, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, JobStage, LibraryPaper, ModelStreamEvent, ModelStreamRequest, PaperDocument, ProgressNotification, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
+import type { AgentProfile, AgentRun, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryPaper, ModelStreamEvent, ModelStreamRequest, PaperDocument, ProgressNotification, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { demoMarkdown, demoPapers } from "../demo";
@@ -422,6 +422,129 @@ export async function retryAgentRun(root: string, runId: string): Promise<AgentR
     return retried;
   }
   return rpc<AgentRun>("agent.run_retry", { root, runId });
+}
+
+let demoInnovationPrompt: InnovationPromptRevision | null = null;
+let demoInnovationRuns: InnovationRun[] = [];
+const innovationStageOrder: InnovationStageId[] = ["compression", "evidence", "ideas", "novelty", "critique"];
+
+export async function getInnovationPrompt(root: string, promptVersion = "innovation-v1"): Promise<InnovationPromptRevision | null> {
+  if (!nativeRuntime) return demoInnovationPrompt?.promptVersion === promptVersion ? demoInnovationPrompt : null;
+  return rpc<InnovationPromptRevision | null>("innovation.prompt_get", { root, promptVersion });
+}
+
+export async function saveInnovationPrompt(root: string, promptText: string, promptVersion = "innovation-v1"): Promise<InnovationPromptRevision> {
+  if (!nativeRuntime) {
+    demoInnovationPrompt = {
+      id: crypto.randomUUID(),
+      promptText,
+      promptVersion,
+      revision: (demoInnovationPrompt?.revision ?? 0) + 1,
+      createdAt: new Date().toISOString(),
+    };
+    return demoInnovationPrompt;
+  }
+  return rpc<InnovationPromptRevision>("innovation.prompt_save", { root, promptText, promptVersion });
+}
+
+export async function listInnovationRuns(root: string): Promise<InnovationRun[]> {
+  if (!nativeRuntime) return demoInnovationRuns;
+  return rpc<InnovationRun[]>("innovation.run_list", { root, limit: 30 });
+}
+
+export async function startInnovationRun(root: string, input: { promptText: string; promptVersion: string; contextSnapshot: ContextSnapshot; stageModels: Record<InnovationStageId, string> }): Promise<InnovationRun> {
+  if (!nativeRuntime) {
+    const now = new Date().toISOString();
+    const id = crypto.randomUUID();
+    const run: InnovationRun = {
+      id,
+      status: "running",
+      currentStage: "compression",
+      promptText: input.promptText,
+      promptVersion: input.promptVersion,
+      contextSnapshot: input.contextSnapshot,
+      stageModels: input.stageModels,
+      stages: innovationStageOrder.map((stage, position) => ({
+        id: crypto.randomUUID(), runId: id, stage, position, status: "pending", modelId: input.stageModels[stage], attempt: 0,
+        outputText: "", usage: { inputTokens: 0, outputTokens: 0, durationMs: 0 }, updatedAt: now,
+      })),
+      cancelRequested: false,
+      startedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    };
+    demoInnovationRuns = [run, ...demoInnovationRuns];
+    return run;
+  }
+  return rpc<InnovationRun>("innovation.run_start", { root, ...input });
+}
+
+export async function startInnovationStage(root: string, runId: string, stage: InnovationStageId): Promise<void> {
+  if (!nativeRuntime) {
+    const run = demoInnovationRuns.find((item) => item.id === runId);
+    const record = run?.stages.find((item) => item.stage === stage);
+    if (run && record) {
+      record.status = "running";
+      record.attempt += 1;
+      record.startedAt = new Date().toISOString();
+      run.currentStage = stage;
+      run.status = "running";
+    }
+    return;
+  }
+  await rpc("innovation.stage_start", { root, runId, stage });
+}
+
+export async function updateInnovationStage(root: string, runId: string, stage: InnovationStageId, input: { status: "running" | "completed" | "failed" | "cancelled"; outputText: string; inputTokens?: number; outputTokens?: number; durationMs?: number; error?: string }): Promise<InnovationRun> {
+  if (!nativeRuntime) {
+    const run = demoInnovationRuns.find((item) => item.id === runId);
+    const record = run?.stages.find((item) => item.stage === stage);
+    if (!run || !record) throw new Error("Unknown innovation stage.");
+    const now = new Date().toISOString();
+    record.status = input.status;
+    record.outputText = input.outputText;
+    record.usage = { inputTokens: input.inputTokens ?? record.usage.inputTokens, outputTokens: input.outputTokens ?? record.usage.outputTokens, durationMs: input.durationMs ?? record.usage.durationMs };
+    record.error = input.error;
+    record.updatedAt = now;
+    if (input.status !== "running") record.finishedAt = now;
+    if (input.status === "completed") {
+      const next = innovationStageOrder[record.position + 1];
+      if (next) run.currentStage = next;
+      else { run.status = "completed"; run.finishedAt = now; }
+    } else if (input.status === "failed" || input.status === "cancelled") {
+      run.status = input.status;
+      run.error = input.error;
+      run.finishedAt = now;
+    }
+    run.updatedAt = now;
+    return run;
+  }
+  return rpc<InnovationRun>("innovation.stage_update", { root, runId, stage, ...input });
+}
+
+export async function cancelInnovationRun(root: string, runId: string): Promise<InnovationRun> {
+  if (!nativeRuntime) {
+    const run = demoInnovationRuns.find((item) => item.id === runId);
+    if (!run) throw new Error("Unknown innovation run.");
+    return updateInnovationStage(root, runId, run.currentStage, { status: "cancelled", outputText: run.stages.find((stage) => stage.stage === run.currentStage)?.outputText ?? "", error: "Cancelled by user" });
+  }
+  return rpc<InnovationRun>("innovation.run_cancel", { root, runId });
+}
+
+export async function retryInnovationRun(root: string, runId: string): Promise<InnovationRun> {
+  if (!nativeRuntime) {
+    const run = demoInnovationRuns.find((item) => item.id === runId);
+    if (!run) throw new Error("Unknown innovation run.");
+    const resume = run.stages.find((stage) => stage.status !== "completed");
+    if (!resume) throw new Error("No incomplete stage.");
+    run.stages.filter((stage) => stage.position >= resume.position).forEach((stage) => { stage.status = "pending"; stage.outputText = ""; stage.error = undefined; });
+    run.status = "running";
+    run.currentStage = resume.stage;
+    run.error = undefined;
+    run.finishedAt = undefined;
+    return run;
+  }
+  return rpc<InnovationRun>("innovation.run_retry", { root, runId });
 }
 
 export interface ModelStreamHandle {
