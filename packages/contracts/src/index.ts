@@ -339,6 +339,60 @@ export interface ContextSnapshot {
   createdAt: string;
 }
 
+export interface CitationReference {
+  id: string;
+  index: number;
+  title: string;
+  authors: string[];
+  year?: number;
+  venue?: string;
+  doi?: string;
+  arxiv?: string;
+  rawCitation: string;
+  resolvedPaperId?: string;
+}
+
+export type CitationRelation = "cites" | "shared_reference" | "coauthor" | "topic_similarity" | "mutual_citation";
+
+export interface CitationGraphNode {
+  id: string;
+  paperId?: string;
+  title: string;
+  authors: string[];
+  year?: number;
+  depth: 0 | 1 | 2;
+  degree: number;
+  resolved: boolean;
+  status: "ready" | "unresolved" | "partial" | "error";
+  doi?: string;
+  arxiv?: string;
+  rawCitation?: string;
+}
+
+export interface CitationGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  relation: CitationRelation;
+  weight: number;
+}
+
+export interface CitationGraphResult {
+  schemaVersion: 1;
+  rootPaperId: string;
+  maxDepth: 1 | 2;
+  status: "ready" | "partial" | "error";
+  nodes: CitationGraphNode[];
+  edges: CitationGraphEdge[];
+  directCount: number;
+  secondLevelCount: number;
+  unresolvedCount: number;
+  warnings: string[];
+  libraryFingerprint: string;
+  generatedAt: string;
+  cacheHit: boolean;
+}
+
 export interface LibraryPaper {
   id: string;
   title: string;

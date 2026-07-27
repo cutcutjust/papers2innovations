@@ -124,7 +124,7 @@ export function App() {
   ) : workspace.view === "context" ? (
     <ContextWorkspace papers={allPapers} root={root} />
   ) : workspace.view === "graph" ? (
-    <CitationGraph papers={allPapers} rootPaper={selected} />
+    <CitationGraph papers={allPapers} rootPaper={selected} root={root} />
   ) : workspace.view === "import" ? (
     <ZoteroImport root={root} />
   ) : workspace.view === "jobs" ? (

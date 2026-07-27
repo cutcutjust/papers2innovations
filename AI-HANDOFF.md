@@ -11,9 +11,10 @@
 - Reader 已读取真实 `document.json`；段落翻译支持流式、取消、重试、revisioned SQLite 保存和重启恢复。
 - `0004_context_draft.sql` 已实现 Reader / Context / Agents / Innovate 共用的持久化 Context draft。
 - `0005_context_compressions.sql` 已实现 AI Context 压缩、精确 active revision、模型与 Prompt 版本缓存、source hash 失效保护、token/耗时 usage，以及原文/压缩模式切换。
-- 当前验证：Python `29 passed`、Vitest `10 passed`、TypeScript、Vite production build、Rust fmt/check/clippy 和 `7 passed`；Playwright 覆盖 1440×900、1100×760、720×600，控制台 0 error。
+- P2 已完成：真实两层 Citation Graph、结构化引用提取、本地论文解析、环路与重复引用合并、关系分析、`.p2i` fingerprint 缓存，以及 Cytoscape.js 交互画布。
+- 当前验证：Python `33 passed`、Vitest `10 passed`、TypeScript、Vite production build、Rust fmt/check/clippy 和 `7 passed`；Playwright 覆盖 1440×900、1100×760、720×600，控制台 0 error。
 - 本机安装目录：`E:\Project_papers2innovations\install`；真实论文库：`E:\Papers2Innovations-Library`。
-- 下一优先级：P2 真实两层 Citation Graph，然后是 Agent Runtime 与 Innovate Pipeline。下文中与本节冲突的“尚未实现”描述属于旧状态。
+- 下一优先级：P3 Agent Runtime 与 Innovate Pipeline。下文中与本节冲突的“尚未实现”描述属于旧状态。
 
 ## 给下一位 AI 的启动提示词
 
@@ -103,7 +104,7 @@ Python paper engine (services/paper-engine/p2i_engine)
 | Reader | `apps/desktop/src/components/Reader.tsx` | Markdown/PDF/图片真实；翻译、解释、Context 操作仍是前端状态 |
 | Agents | `apps/desktop/src/components/Agents.tsx` | 界面完成，Agent 配置与运行是假数据 |
 | Context | `apps/desktop/src/components/ContextWorkspace.tsx` | 原文/压缩模式和 token UI 完成，未持久化、未真正压缩 |
-| Citation Graph | `apps/desktop/src/components/CitationGraph.tsx` | 根论文来自本地；引用节点、边、解析按钮仍为演示数据 |
+| Citation Graph | `apps/desktop/src/components/CitationGraph.tsx` | 真实两层图、引用关系、缓存、重分析、Context 与 Reader 操作已接通 |
 | Innovate | `apps/desktop/src/components/InnovationWorkspace.tsx` | 提示词与模型路由 UI 完成；Run 仍是定时器模拟 |
 | Settings | `apps/desktop/src/components/Settings.tsx` | 自定义模型注册表可用；模型 API Key 尚未实现；OCR Stronghold 已真实实现 |
 | Activity | `apps/desktop/src/components/Activity.tsx` | 使用真实任务 RPC |
@@ -140,6 +141,9 @@ Python RPC 当前支持：
 - `job.retry`
 - `paper.reparse`
 - `paper.read_markdown`
+- `paper.read_document`
+- `paper.read_references`
+- `graph.build`
 - `zotero.inspect`
 - `zotero.preview_import`
 - `zotero.import`
@@ -163,12 +167,12 @@ Python RPC 当前支持：
 - AI compressed 没有生成或缓存压缩结果。
 - Clear、Add papers、Filter sources 还未接行为。
 
-### Graph
+### Graph（已完成）
 
-- `CitationGraph.tsx` 顶部的 `refs` 与 `edges` 是静态数组。
-- 根论文选择是真实的，但所有引用、中心度和关系仍是演示值。
-- Python 引擎现在会创建空的 `references.json`，没有对外读取引用的 RPC。
-- “Analyze citations”只是约 950ms 的定时器。
+- 解析流程写入结构化 `references.json`，并可修复旧的空引用产物。
+- `graph.build` 强制最大深度为 2，处理环、重复引用、共享引用、共同作者、互引和主题相似关系。
+- 图结果按本地论文库 fingerprint 缓存在 `.p2i/cache/graphs/`；强制重分析会绕过缓存。
+- UI 使用动态加载的 Cytoscape.js，节点大小来自图内 degree，并接通 Reader、Context 和引用检查操作。
 
 ### Agents / Innovate
 
@@ -228,7 +232,7 @@ interface ModelConfig {
 6. Context 操作统一写入一个全局 `ContextSnapshot`/draft，而不是 Reader 与 Context 各自维护状态。
 7. 使用模型 tokenizer 或可靠近似值计算实时 Context，占用必须包含 system/tools/conversation/papers/output reserve/safety buffer。
 
-### P2：真实两层 Citation Graph
+### P2：真实两层 Citation Graph（已完成）
 
 1. 让解析器写入结构化 `references.json`，至少包含 title、authors、year、venue、doi/arXiv、raw citation、resolved ID。
 2. 新增 `paper.read_document`、`paper.read_references`、`graph.build` RPC。
@@ -373,12 +377,10 @@ git diff -- apps/desktop/src
 
 ## 13. 建议下一位 AI 的第一项实现
 
-建议先完成“通用 Provider + Stronghold 凭证 + 流式 Chat gateway”这一条垂直链路，然后只接通 Reader 的段落翻译：
+下一项是 P3 Agent Runtime 与 Innovate Pipeline，复用已完成的安全模型网关和共享 Context draft：
 
-1. Settings 新增 provider credential 保存与连接测试。
-2. Rust gateway 支持 OpenAI-compatible 与 Anthropic request/stream normalization。
-3. Reader Translate 调用真实 gateway，显示 token stream、cancel、retry。
-4. 翻译结果写入 SQLite，并在 Reader 重开后恢复。
-5. 添加 Rust/TypeScript/Playwright 测试。
-
-这条链路完成后，公式解释、定理解释、Context 压缩、Agent Chat 和 Innovate 都可以复用同一个安全模型网关，避免每个页面各写一套 API 调用。
+1. 新增 migration 和 RPC，持久化 Agent profile、工具/网络/写入策略和默认模型。
+2. 建立统一 run/stage 记录，保存 input context snapshot、prompt revision、model、usage、output、error 与 evidence anchors。
+3. 接通 Agent CRUD、运行、取消、重试和重启恢复，移除 Agents 页静态数组。
+4. 让 Innovate 的 compression、evidence、ideas、novelty、critique 五阶段真实串行执行，每阶段可独立选模型、取消和重试。
+5. 同步覆盖 contracts、Python/Rust bridge、React UI、浏览器 fallback、测试与三尺寸 Playwright 验收。

@@ -1,46 +1,146 @@
-import type { LibraryPaper } from "@p2i/contracts";
-import { BookOpen, FileText, Layers3, Network, RefreshCw, Search } from "lucide-react";
-import { useMemo, useState } from "react";
+import type { CitationGraphNode, CitationGraphResult, LibraryPaper } from "@p2i/contracts";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import type { Core } from "cytoscape";
+import { BookOpen, FileText, Layers3, Network, RefreshCw, Search, TriangleAlert } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { addPaperToContext, buildCitationGraph } from "../lib/bridge";
 import { useWorkspace } from "../store";
 
-type Node = { id: string; title: string; short: string; depth: 0 | 1 | 2; x: number; y: number; links: number; year: number; color: string; topic: string; relation: string };
-type Edge = { from: string; to: string; kind: "root" | "citation" | "relationship" };
+const relationLabel: Record<string, string> = {
+  cites: "Citation",
+  shared_reference: "Shared references",
+  coauthor: "Common authors",
+  topic_similarity: "Topic similarity",
+  mutual_citation: "Mutual citation",
+};
 
-const refs = [
-  ["seq", "Sequence to Sequence Learning", "Seq2Seq", 1, 25, 38, 18, 2014, "#7357d8", "Sequence"], ["align", "Neural Machine Translation by Jointly Learning to Align", "Joint Alignment", 1, 34, 62, 21, 2015, "#7357d8", "Attention"],
-  ["local", "Effective Approaches to Attention-based NMT", "Local Attention", 1, 48, 73, 15, 2015, "#7357d8", "Attention"], ["gnmt", "Google's Neural Machine Translation System", "GNMT", 1, 63, 67, 19, 2016, "#7357d8", "Translation"],
-  ["conv", "Convolutional Sequence to Sequence Learning", "ConvS2S", 1, 72, 49, 16, 2017, "#7357d8", "Convolution"], ["memory", "End-to-End Memory Networks", "Memory Networks", 1, 63, 31, 13, 2015, "#7357d8", "Memory"],
-  ["lstm", "Long Short-Term Memory", "LSTM", 2, 14, 22, 11, 1997, "#77989a", "Sequence"], ["gru", "Properties of Neural Machine Translation", "GRU Analysis", 2, 27, 15, 10, 2014, "#77989a", "Sequence"],
-  ["word2vec", "Distributed Representations of Words and Phrases", "Word2Vec", 2, 42, 12, 7, 2013, "#8c9aad", "Representation"], ["bleu", "BLEU: Automatic Evaluation of Machine Translation", "BLEU", 2, 57, 12, 14, 2002, "#8c9aad", "Evaluation"],
-  ["adam", "Adam: A Method for Stochastic Optimization", "Adam", 2, 82, 22, 15, 2015, "#a08b70", "Optimization"], ["layer", "Layer Normalization", "LayerNorm", 2, 87, 42, 13, 2016, "#a08b70", "Optimization"],
-  ["resnet", "Deep Residual Learning for Image Recognition", "Residual Learning", 2, 83, 68, 8, 2016, "#7d91a6", "Architecture"], ["batch", "Batch Normalization", "BatchNorm", 2, 70, 83, 10, 2015, "#a08b70", "Optimization"],
-  ["pointer", "Pointer Networks", "Pointer Networks", 2, 48, 87, 6, 2015, "#8178a6", "Attention"], ["highway", "Highway Networks", "Highway Networks", 2, 27, 82, 7, 2015, "#7d91a6", "Architecture"],
-] as const;
-
-const edges: Edge[] = [
-  ...["seq", "align", "local", "gnmt", "conv", "memory"].map((to) => ({ from: "root", to, kind: "root" as const })),
-  { from: "seq", to: "lstm", kind: "citation" }, { from: "seq", to: "bleu", kind: "citation" }, { from: "align", to: "gru", kind: "citation" }, { from: "align", to: "word2vec", kind: "citation" },
-  { from: "local", to: "adam", kind: "citation" }, { from: "gnmt", to: "layer", kind: "citation" }, { from: "gnmt", to: "resnet", kind: "citation" }, { from: "conv", to: "batch", kind: "citation" },
-  { from: "conv", to: "pointer", kind: "citation" }, { from: "memory", to: "highway", kind: "citation" }, { from: "seq", to: "align", kind: "relationship" }, { from: "align", to: "local", kind: "relationship" },
-  { from: "local", to: "gnmt", kind: "relationship" }, { from: "gnmt", to: "conv", kind: "relationship" }, { from: "conv", to: "memory", kind: "relationship" }, { from: "memory", to: "seq", kind: "relationship" },
-];
-
-export function CitationGraph({ papers, rootPaper }: { papers: LibraryPaper[]; rootPaper?: LibraryPaper }) {
+export function CitationGraph({ papers, rootPaper, root }: { papers: LibraryPaper[]; rootPaper?: LibraryPaper; root: string }) {
   const { selectedPaperId, selectPaper, openReader } = useWorkspace();
-  const root = rootPaper ?? papers[0];
-  const nodes = useMemo<Node[]>(() => [{ id: "root", title: root?.title ?? "Choose a paper", short: "Paper A", depth: 0, x: 50, y: 44, links: 24, year: new Date().getFullYear(), color: "#4f6bed", topic: "Root paper", relation: "Selected root paper A" }, ...refs.map((item) => ({ id: item[0], title: item[1], short: item[2], depth: item[3], x: item[4], y: item[5], links: item[6], year: item[7], color: item[8], topic: item[9], relation: item[3] === 1 ? "Direct reference of paper A" : "Reference cited by one or more direct references" }))], [root]);
-  const [selectedId, setSelectedId] = useState("root");
+  const queryClient = useQueryClient();
+  const selectedRoot = rootPaper ?? papers[0];
+  const [selectedId, setSelectedId] = useState("");
   const [depth, setDepth] = useState<1 | 2>(1);
-  const [parsing, setParsing] = useState(false);
-  const selected = nodes.find((node) => node.id === selectedId) ?? nodes[0];
-  const nodeMap = Object.fromEntries(nodes.map((node) => [node.id, node]));
-  const chooseRoot = (value: string) => { selectPaper(value); setSelectedId("root"); };
-  const analyze = () => { setParsing(true); window.setTimeout(() => setParsing(false), 950); };
+  const [forceRevision, setForceRevision] = useState(0);
+  const [contextBusy, setContextBusy] = useState(false);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const cyRef = useRef<Core | null>(null);
+  const graphQuery = useQuery({
+    queryKey: ["citation-graph", root, selectedRoot?.id, forceRevision],
+    queryFn: () => buildCitationGraph(root, selectedRoot!.id, forceRevision > 0),
+    enabled: Boolean(root && selectedRoot?.id),
+    retry: false,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  const graph = graphQuery.data;
+  const selected = graph?.nodes.find((node) => node.id === selectedId)
+    ?? graph?.nodes.find((node) => node.id === graph.rootPaperId)
+    ?? graph?.nodes[0];
+
+  useEffect(() => {
+    setSelectedId(selectedRoot?.id ?? "");
+  }, [selectedRoot?.id]);
+
+  useEffect(() => {
+    if (!canvasRef.current || !graph?.nodes.length) return;
+    let disposed = false;
+    let instance: Core | undefined;
+    void import("cytoscape").then(({ default: cytoscape }) => {
+      if (disposed || !canvasRef.current) return;
+      instance = cytoscape({
+        container: canvasRef.current,
+        elements: [
+          ...graph.nodes.map((node) => ({ data: { ...node, label: node.title } })),
+          ...graph.edges.map((edge) => ({ data: { ...edge, label: relationLabel[edge.relation] ?? edge.relation } })),
+        ],
+        style: [
+          {
+            selector: "node",
+            style: {
+              width: "mapData(degree, 0, 12, 24, 58)",
+              height: "mapData(degree, 0, 12, 24, 58)",
+              "background-color": "#ffffff",
+              "border-width": "2px",
+              "border-color": "#8c9aad",
+              label: "data(label)",
+              color: "#394150",
+              "font-size": "8px",
+              "text-max-width": "110px",
+              "text-wrap": "ellipsis",
+              "text-valign": "bottom",
+              "text-margin-y": 8,
+            },
+          },
+          { selector: "node[depth = 0]", style: { "border-color": "#4f6bed", "background-color": "#e9edff", width: "62px", height: "62px", "font-weight": "bold" } },
+          { selector: "node[depth = 1]", style: { "border-color": "#7357d8", "background-color": "#f0ecff" } },
+          { selector: "node[!resolved]", style: { "border-style": "dashed", "border-color": "#a08b70", "background-color": "#fffaf0" } },
+          { selector: "node:selected", style: { "border-width": 4, "border-color": "#4f6bed" } },
+          { selector: "edge", style: { width: "mapData(weight, 1, 8, 1, 4)", "line-color": "#aeb8c4", "target-arrow-color": "#aeb8c4", "target-arrow-shape": "triangle", "curve-style": "bezier", opacity: 0.6 } },
+          { selector: "edge[relation != 'cites']", style: { "line-style": "dashed", "target-arrow-shape": "none", "line-color": "#7357d8" } },
+        ],
+        layout: { name: "cose", animate: false, randomize: true, fit: true, padding: 70, nodeRepulsion: () => 6500, idealEdgeLength: () => 95 },
+        minZoom: 0.3,
+        maxZoom: 2.5,
+      });
+      instance.on("tap", "node", (event) => setSelectedId(String(event.target.id())));
+      cyRef.current = instance;
+    });
+    return () => {
+      disposed = true;
+      instance?.destroy();
+      if (cyRef.current === instance) cyRef.current = null;
+    };
+  }, [graph]);
+
+  const directNodes = useMemo(() => graph?.nodes.filter((node) => node.depth === 1) ?? [], [graph]);
+  const secondNodes = useMemo(() => graph?.nodes.filter((node) => node.depth === 2) ?? [], [graph]);
+  const visibleNodes = depth === 1 ? directNodes : secondNodes;
+  const selectedRelations = graph?.edges.filter((edge) => edge.source === selected?.id || edge.target === selected?.id) ?? [];
+  const selectedPaper = selected?.paperId ? papers.find((paper) => paper.id === selected.paperId) : undefined;
+
+  const chooseRoot = (paperId: string) => {
+    selectPaper(paperId);
+    setSelectedId(paperId);
+    setForceRevision(0);
+  };
+
+  const addSelectedToContext = async () => {
+    if (!selectedPaper) return;
+    setContextBusy(true);
+    try {
+      const draft = await addPaperToContext(root, selectedPaper.id, "full");
+      queryClient.setQueryData(["context-draft", root], draft);
+    } finally {
+      setContextBusy(false);
+    }
+  };
+
   return <div className="citation-page">
-    <div className="graph-toolbar"><span>Root paper A</span><label><Search size={12} /><select value={selectedPaperId ?? root?.id ?? ""} onChange={(event) => chooseRoot(event.target.value)}>{papers.map((paper) => <option value={paper.id} key={paper.id}>{paper.title}</option>)}</select></label><span className="tag tag-success">Root parsed</span><span className="tag tag-primary">Depth 1 · 6 references</span><span className="tag tag-ai">Depth 2 · 10 references</span><small>Stops after references of references</small><button className="primary-button compact" onClick={analyze}><RefreshCw size={13} className={parsing ? "spin" : ""} /> {parsing ? "Parsing network" : "Analyze citations"}</button></div>
-    <div className="graph-layout"><aside className="graph-list-panel"><header><span className="tag tag-primary">ROOT A</span><b>24 local links</b><h2>{root?.title ?? "Choose a paper"}</h2><p>Local paper · {root?.pageCount || "—"} pages</p><dl><div><dd>6</dd><dt>Direct refs</dt></div><div><dd>10</dd><dt>Second level</dt></div><div><dd>{edges.length}</dd><dt>Relationships</dt></div></dl></header><div className="graph-depth-tabs"><button className={depth === 1 ? "active" : ""} onClick={() => setDepth(1)}>Direct refs · 6</button><button className={depth === 2 ? "active" : ""} onClick={() => setDepth(2)}>Second level · 10</button></div><div className="graph-reference-list">{nodes.filter((node) => node.depth === depth).map((node) => <button key={node.id} className={selectedId === node.id ? "active" : ""} onClick={() => setSelectedId(node.id)}><i style={{ background: node.color, width: Math.min(15, 7 + node.links / 2), height: Math.min(15, 7 + node.links / 2) }} /><span><strong>{node.title}</strong><small>{node.year} · {node.topic}</small></span><b>{node.links} links</b></button>)}</div></aside>
-      <main className="graph-canvas"><div className="graph-canvas-title"><strong>Two-level citation network</strong><span>{edges.length} relationships</span></div><div className="graph-legend"><span><i className="root" /> Root A</span><span><i className="direct" /> Direct</span><span><i className="second" /> Second level</span><b>Node size = linked papers</b></div><svg>{edges.map((edge, index) => { const from = nodeMap[edge.from]; const to = nodeMap[edge.to]; return <line key={`${edge.from}-${edge.to}-${index}`} x1={`${from.x}%`} y1={`${from.y}%`} x2={`${to.x}%`} y2={`${to.y}%`} className={edge.kind} />; })}</svg>{nodes.map((node) => { const size = node.depth === 0 ? 62 : Math.min(node.depth === 1 ? 46 : 32, (node.depth === 1 ? 22 : 14) + node.links * 1.2); return <button key={node.id} className={`graph-node depth-${node.depth} ${selectedId === node.id ? "active" : ""}`} style={{ left: `${node.x}%`, top: `${node.y}%` }} onClick={() => setSelectedId(node.id)}><span style={{ width: size, height: size, borderColor: selectedId === node.id ? "#4f6bed" : node.color, color: node.color }}><FileText size={node.depth === 0 ? 17 : node.depth === 1 ? 12 : 9} /></span><b>{node.short}</b><small>{node.year} · {node.links}</small></button>; })}<div className="graph-controls"><button>Fit</button><button onClick={() => setSelectedId("root")}>Recenter A</button><button>100%</button></div></main>
-      <aside className="graph-inspector"><div><span className={`tag ${selected.depth === 0 ? "tag-primary" : selected.depth === 1 ? "tag-ai" : "tag-warning"}`}>{selected.depth === 0 ? "ROOT PAPER A" : `DEPTH ${selected.depth}`}</span><span className="tag tag-topic">{selected.topic}</span><h2>{selected.title}</h2><p>{selected.year} · {selected.topic}</p><blockquote><b>Relationship to A</b><br />{selected.relation}</blockquote><dl><div><dt>Linked papers</dt><dd>{selected.links}</dd></div><div><dt>Local centrality</dt><dd>{(0.38 + selected.links / 42).toFixed(2)}</dd></div><div><dt>Graph depth</dt><dd>{selected.depth}</dd></div><div><dt>Shared references</dt><dd>{Math.max(1, Math.round(selected.links / 3))}</dd></div></dl></div><section><h3>Analysis scope</h3><p><span className="tag tag-success">A parsed</span><span className="tag tag-primary">References parsed</span><span className="tag tag-ai">Second level parsed</span></p><aside className={selected.depth === 2 ? "warning" : ""}><Network size={14} /><div><b>{selected.depth === 2 ? "Depth limit reached" : "Two-level boundary"}</b><p>{selected.depth === 2 ? "Further expansion is disabled. This graph stops after references of references." : "Direct references of A are compared using shared citations and bibliographic links."}</p></div></aside></section><footer><button className="primary-button compact" onClick={() => root && openReader(root.id)}><BookOpen size={13} /> Open paper</button><button className="secondary-button"><Layers3 size={13} /> Add to context</button><button className="secondary-button" disabled={selected.depth === 2}><RefreshCw size={13} /> {selected.depth === 2 ? "Expansion disabled at depth 2" : "Inspect references"}</button></footer></aside>
+    <div className="graph-toolbar">
+      <span>Root paper A</span>
+      <label><Search size={12} /><select value={selectedPaperId ?? selectedRoot?.id ?? ""} onChange={(event) => chooseRoot(event.target.value)}>{papers.map((paper) => <option value={paper.id} key={paper.id}>{paper.title}</option>)}</select></label>
+      <span className={`tag ${graph?.status === "ready" ? "tag-success" : "tag-warning"}`}>{graphQuery.isLoading ? "Parsing" : graph?.status ?? "Not built"}</span>
+      <span className="tag tag-primary">Depth 1 · {graph?.directCount ?? 0}</span>
+      <span className="tag tag-ai">Depth 2 · {graph?.secondLevelCount ?? 0}</span>
+      <small>{graph?.cacheHit ? "Local graph cache" : "Stops after references of references"}</small>
+      <button className="primary-button compact" disabled={!selectedRoot || graphQuery.isFetching} onClick={() => setForceRevision((value) => value + 1)}><RefreshCw size={13} className={graphQuery.isFetching ? "spin" : ""} /> {graphQuery.isFetching ? "Parsing network" : "Analyze citations"}</button>
+    </div>
+    {graphQuery.error && <div className="settings-status error"><TriangleAlert size={14} /> {graphQuery.error instanceof Error ? graphQuery.error.message : String(graphQuery.error)}</div>}
+    <div className="graph-layout">
+      <aside className="graph-list-panel">
+        <header><span className="tag tag-primary">ROOT A</span><b>{graph?.edges.length ?? 0} local links</b><h2>{selectedRoot?.title ?? "Choose a paper"}</h2><p>Local paper · {selectedRoot?.pageCount || "—"} pages</p><dl><div><dd>{graph?.directCount ?? 0}</dd><dt>Direct refs</dt></div><div><dd>{graph?.secondLevelCount ?? 0}</dd><dt>Second level</dt></div><div><dd>{graph?.unresolvedCount ?? 0}</dd><dt>Unresolved</dt></div></dl></header>
+        <div className="graph-depth-tabs"><button className={depth === 1 ? "active" : ""} onClick={() => setDepth(1)}>Direct refs · {directNodes.length}</button><button className={depth === 2 ? "active" : ""} onClick={() => setDepth(2)}>Second level · {secondNodes.length}</button></div>
+        <div className="graph-reference-list">{visibleNodes.length ? visibleNodes.map((node) => <GraphListItem key={node.id} node={node} selected={selected?.id === node.id} onSelect={() => { setSelectedId(node.id); cyRef.current?.getElementById(node.id).select(); }} />) : <div className="graph-empty"><FileText size={22} /><p>{graphQuery.isFetching ? "Extracting structured references…" : "No references were extracted at this depth."}</p></div>}</div>
+      </aside>
+      <main className="graph-canvas"><div className="graph-canvas-title"><strong>Two-level citation network</strong><span>{graph?.edges.length ?? 0} relationships</span></div><div className="graph-legend"><span><i className="root" /> Root A</span><span><i className="direct" /> Direct</span><span><i className="second" /> Second level</span><b>Node size = graph degree</b></div><div className="cytoscape-host" ref={canvasRef} /><div className="graph-controls"><button onClick={() => cyRef.current?.fit(undefined, 45)}>Fit</button><button onClick={() => { const node = cyRef.current?.getElementById(graph?.rootPaperId ?? ""); if (node?.length) { cyRef.current?.center(node); node.select(); } }}>Recenter A</button><button onClick={() => cyRef.current?.zoom(1)}>100%</button></div></main>
+      <aside className="graph-inspector">
+        {selected ? <><div><span className={`tag ${selected.depth === 0 ? "tag-primary" : selected.depth === 1 ? "tag-ai" : "tag-warning"}`}>{selected.depth === 0 ? "ROOT PAPER A" : `DEPTH ${selected.depth}`}</span><span className={`tag ${selected.resolved ? "tag-success" : "tag-warning"}`}>{selected.resolved ? "Local paper" : "Unresolved"}</span><h2>{selected.title}</h2><p>{selected.year ?? "Year unknown"} · {selected.authors.slice(0, 3).join(", ") || "Authors unavailable"}</p><blockquote><b>Graph provenance</b><br />{selected.depth === 0 ? "Selected root paper A." : selected.depth === 1 ? "Directly cited by paper A." : "Cited by one or more direct references of A."}</blockquote><dl><div><dt>Linked papers</dt><dd>{selected.degree}</dd></div><div><dt>Relations</dt><dd>{selectedRelations.length}</dd></div><div><dt>Graph depth</dt><dd>{selected.depth}</dd></div><div><dt>Resolution</dt><dd>{selected.status}</dd></div></dl></div><section><h3>Relationships</h3>{selectedRelations.slice(0, 6).map((edge) => <p className="graph-relation" key={edge.id}><Network size={11} /><span>{relationLabel[edge.relation]} · weight {edge.weight}</span></p>)}{selected.depth === 2 && <aside className="warning"><Network size={14} /><div><b>Depth limit reached</b><p>Further expansion is disabled. The engine enforces maxDepth 2.</p></div></aside>}</section><footer><button className="primary-button compact" disabled={!selectedPaper} onClick={() => selectedPaper && openReader(selectedPaper.id)}><BookOpen size={13} /> Open paper</button><button className="secondary-button" disabled={!selectedPaper || contextBusy} onClick={() => void addSelectedToContext()}><Layers3 size={13} /> Add to context</button><button className="secondary-button" disabled={selected.depth === 2 || !selected.resolved}><RefreshCw size={13} /> {selected.depth === 2 ? "Expansion disabled at depth 2" : "Inspect references"}</button></footer></> : <div className="graph-empty"><Network size={25} /><p>Build the graph to inspect citation provenance.</p></div>}
+      </aside>
     </div>
   </div>;
+}
+
+function GraphListItem({ node, selected, onSelect }: { node: CitationGraphNode; selected: boolean; onSelect: () => void }) {
+  const color = node.depth === 1 ? "#7357d8" : node.resolved ? "#77989a" : "#a08b70";
+  const size = Math.min(16, 8 + node.degree * 1.5);
+  return <button className={selected ? "active" : ""} onClick={onSelect}><i style={{ background: color, width: size, height: size }} /><span><strong>{node.title}</strong><small>{node.year ?? "Year unknown"} · {node.resolved ? "Local" : "Unresolved"}</small></span><b>{node.degree} links</b></button>;
 }

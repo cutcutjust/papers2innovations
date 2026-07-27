@@ -121,6 +121,12 @@ class RpcServer:
             }
         if method == "paper.read_document":
             return self.library(params["root"]).read_document(params["paperId"])
+        if method == "paper.read_references":
+            return self.library(params["root"]).read_references(params["paperId"])
+        if method == "graph.build":
+            return self.library(params["root"]).build_citation_graph(
+                params["paperId"], int(params.get("maxDepth", 2)), bool(params.get("force", False))
+            )
         if method == "translation.list":
             return self.library(params["root"]).list_translations(params["paperId"])
         if method == "translation.save":

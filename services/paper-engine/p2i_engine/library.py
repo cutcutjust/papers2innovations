@@ -12,6 +12,7 @@ from typing import Any, Iterable
 import fitz
 
 from .database import Database
+from .citations import GRAPH_SCHEMA_VERSION, build_two_level_graph, extract_references
 from .ingestion import FileEventQueue
 from .models import CancelledError, JobStatus, ProgressEvent, utc_now
 from .parsing import parse_pdf
@@ -328,8 +329,19 @@ class Library:
                 ),
                 encoding="utf-8",
             )
-            references_path.write_text("[]\n", encoding="utf-8")
-            self._progress(callback, job_id, paper_id, JobStatus.PARSING_REFERENCES, 0.77, "Reference stage recorded", request_id)
+            references = extract_references(result.document.model_dump(by_alias=True))
+            references_path.write_text(
+                json.dumps(references, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            self._progress(
+                callback,
+                job_id,
+                paper_id,
+                JobStatus.PARSING_REFERENCES,
+                0.77,
+                f"Extracted {len(references)} references",
+                request_id,
+            )
             self._progress(callback, job_id, paper_id, JobStatus.RESOLVING_METADATA, 0.84, "Embedded metadata saved", request_id)
             self._progress(callback, job_id, paper_id, JobStatus.INDEXING, 0.92, "Indexing sections", request_id)
             now = utc_now()
@@ -953,6 +965,77 @@ class Library:
         if not row or not row["document_path"]:
             raise FileNotFoundError(f"No structured document exists for paper {paper_id}")
         return json.loads(Path(row["document_path"]).read_text(encoding="utf-8"))
+
+    def read_references(self, paper_id: str) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT document_path FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Unknown paper: {paper_id}")
+        document_path = Path(row["document_path"]) if row["document_path"] else None
+        references_path = document_path.with_name("references.json") if document_path else None
+        if references_path and references_path.is_file():
+            references = json.loads(references_path.read_text(encoding="utf-8"))
+            if references:
+                return references
+        if not document_path:
+            return []
+        if not document_path.is_file():
+            return []
+        references = extract_references(json.loads(document_path.read_text(encoding="utf-8")))
+        if references_path:
+            temporary = references_path.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(references, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            temporary.replace(references_path)
+        return references
+
+    def build_citation_graph(
+        self, paper_id: str, max_depth: int = 2, force: bool = False
+    ) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            papers = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT id, title, canonical_sha256, updated_at, document_path "
+                    "FROM papers ORDER BY id"
+                )
+            ]
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                [
+                    (paper["id"], paper["canonical_sha256"], paper["updated_at"])
+                    for paper in papers
+                ],
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        cache_dir = self.internal_dir / "cache" / "graphs"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / f"{paper_id}-depth-{max_depth}.json"
+        if not force and cache_path.is_file():
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if (
+                cached.get("schemaVersion") == GRAPH_SCHEMA_VERSION
+                and cached.get("libraryFingerprint") == fingerprint
+            ):
+                return {**cached, "cacheHit": True}
+        graph = build_two_level_graph(paper_id, papers, self.read_references, max_depth)
+        graph.update(
+            {
+                "libraryFingerprint": fingerprint,
+                "generatedAt": utc_now(),
+                "cacheHit": False,
+            }
+        )
+        temporary = cache_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(cache_path)
+        return graph
 
     def list_translations(self, paper_id: str) -> list[dict[str, Any]]:
         self.initialize()

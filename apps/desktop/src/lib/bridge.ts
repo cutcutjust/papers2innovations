@@ -1,4 +1,4 @@
-import type { ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSourceItem, JobStage, LibraryPaper, ModelStreamEvent, ModelStreamRequest, PaperDocument, ProgressNotification, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
+import type { CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSourceItem, JobStage, LibraryPaper, ModelStreamEvent, ModelStreamRequest, PaperDocument, ProgressNotification, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { demoMarkdown, demoPapers } from "../demo";
@@ -56,6 +56,42 @@ export async function readDocument(root: string, paperId: string): Promise<Paper
     };
   }
   return rpc<PaperDocument>("paper.read_document", { root, paperId });
+}
+
+export async function readReferences(root: string, paperId: string): Promise<CitationReference[]> {
+  if (!nativeRuntime) return [];
+  return rpc<CitationReference[]>("paper.read_references", { root, paperId });
+}
+
+export async function buildCitationGraph(root: string, paperId: string, force = false): Promise<CitationGraphResult> {
+  if (!nativeRuntime) {
+    const paper = demoPapers.find((candidate) => candidate.id === paperId) ?? demoPapers[0];
+    const direct = demoPapers.filter((candidate) => candidate.id !== paper.id).slice(0, 2);
+    const nodes: CitationGraphResult["nodes"] = [
+      { id: paper.id, paperId: paper.id, title: paper.title, authors: [], depth: 0, degree: direct.length, resolved: true, status: "ready" },
+      ...direct.map((candidate, index) => ({ id: candidate.id, paperId: candidate.id, title: candidate.title, authors: [], depth: 1 as const, degree: 1, resolved: true, status: "ready" as const, year: 2025 + index })),
+      { id: "demo-unresolved-reference", title: "Unresolved second-level scientific reference", authors: ["Local fixture"], depth: 2, degree: 1, resolved: false, status: "unresolved", year: 2024 },
+    ];
+    return {
+      schemaVersion: 1,
+      rootPaperId: paper.id,
+      maxDepth: 2,
+      status: "partial",
+      nodes,
+      edges: [
+        ...direct.map((candidate) => ({ id: `cites:${paper.id}:${candidate.id}`, source: paper.id, target: candidate.id, relation: "cites" as const, weight: 1 })),
+        { id: `cites:${direct[0]?.id}:demo-unresolved-reference`, source: direct[0]?.id ?? paper.id, target: "demo-unresolved-reference", relation: "cites", weight: 1 },
+      ],
+      directCount: direct.length,
+      secondLevelCount: 1,
+      unresolvedCount: 1,
+      warnings: ["One second-level reference is unresolved in the browser fixture."],
+      libraryFingerprint: "demo-library",
+      generatedAt: new Date().toISOString(),
+      cacheHit: false,
+    };
+  }
+  return rpc<CitationGraphResult>("graph.build", { root, paperId, maxDepth: 2, force });
 }
 
 export async function listTranslations(root: string, paperId: string): Promise<TranslationRecord[]> {

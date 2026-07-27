@@ -156,6 +156,34 @@ def test_context_compression_is_cached_revisioned_and_source_bound(tmp_path: Pat
         library.save_context_compression({**payload, "sourceHash": "stale-hash"})
 
 
+def test_citation_graph_repairs_empty_reference_artifacts_and_caches(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    make_pdf(library.papers_dir / "citation-root.pdf")
+    library.scan()
+    paper = library.list_papers()[0]
+    document_path = Path(paper["documentPath"])
+    document = json.loads(document_path.read_text(encoding="utf-8"))
+    document["sections"] = [{
+        "id": "references",
+        "title": "References",
+        "level": 1,
+        "order": 0,
+        "markdown": "REFERENCES\n[1] A. Author, “An Unresolved Scientific Work,” Journal, 2024.",
+        "anchors": [],
+    }]
+    document_path.write_text(json.dumps(document), encoding="utf-8")
+
+    first = library.build_citation_graph(paper["id"])
+    second = library.build_citation_graph(paper["id"])
+
+    assert first["cacheHit"] is False
+    assert first["directCount"] == 1
+    assert first["unresolvedCount"] == 1
+    assert second["cacheHit"] is True
+    assert library.read_references(paper["id"])[0]["title"] == "An Unresolved Scientific Work"
+
+
 def test_scan_parses_and_persists_generated_artifacts(tmp_path: Path) -> None:
     library = Library(tmp_path)
     library.initialize()
