@@ -1,4 +1,4 @@
-import type { AgentProfile, AgentRun, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryPaper, ModelStreamEvent, ModelStreamRequest, PaperDocument, ProgressNotification, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, ReaderConversation, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
+import type { AgentProfile, AgentRun, AgentToolCallRecord, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryPaper, ModelStreamEvent, ModelStreamRequest, ModelToolDefinition, PaperDocument, ProgressNotification, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, ReaderConversation, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { demoMarkdown, demoPapers } from "../demo";
@@ -468,6 +468,7 @@ export async function startAgentRun(root: string, input: { agentProfileId: strin
       startedAt: now,
       createdAt: now,
       updatedAt: now,
+      toolCalls: [],
     };
     demoAgentRuns = [run, ...demoAgentRuns];
     return run;
@@ -519,6 +520,48 @@ export async function retryAgentRun(root: string, runId: string): Promise<AgentR
     return retried;
   }
   return rpc<AgentRun>("agent.run_retry", { root, runId });
+}
+
+const demoToolDefinitions: ModelToolDefinition[] = [
+  { name: "search_library", description: "Search local paper titles.", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
+  { name: "read_paper", description: "Read one local paper.", inputSchema: { type: "object", properties: { paperId: { type: "string" } }, required: ["paperId"] } },
+  { name: "read_section", description: "Read one structured section.", inputSchema: { type: "object", properties: { paperId: { type: "string" }, sectionId: { type: "string" } }, required: ["paperId", "sectionId"] } },
+  { name: "read_figure", description: "Read extracted figure metadata.", inputSchema: { type: "object", properties: { paperId: { type: "string" }, figureId: { type: "string" } }, required: ["paperId"] } },
+  { name: "find_evidence", description: "Find grounded local evidence.", inputSchema: { type: "object", properties: { query: { type: "string" }, paperId: { type: "string" } }, required: ["query"] } },
+  { name: "get_references", description: "Read structured references.", inputSchema: { type: "object", properties: { paperId: { type: "string" } }, required: ["paperId"] } },
+];
+
+export async function listAgentTools(root: string, agentProfileId: string): Promise<ModelToolDefinition[]> {
+  if (!nativeRuntime) {
+    const allowed = new Set(demoAgentProfiles.find((profile) => profile.id === agentProfileId)?.allowedTools ?? []);
+    return demoToolDefinitions.filter((tool) => allowed.has(tool.name));
+  }
+  return rpc<ModelToolDefinition[]>("agent.tool_registry", { root, agentProfileId });
+}
+
+export async function executeAgentTool(root: string, input: { runId: string; toolCallId: string; toolName: string; arguments: Record<string, unknown>; iteration: number }): Promise<AgentToolCallRecord> {
+  if (!nativeRuntime) {
+    const run = demoAgentRuns.find((item) => item.id === input.runId);
+    const profile = demoAgentProfiles.find((item) => item.id === run?.agentProfileId);
+    if (!run || !profile) throw new Error("Unknown agent run.");
+    const existing = run.toolCalls.find((item) => item.toolCallId === input.toolCallId);
+    if (existing) return existing;
+    const now = new Date().toISOString();
+    const allowed = profile.allowedTools.includes(input.toolName) && demoToolDefinitions.some((tool) => tool.name === input.toolName);
+    const result = input.toolName === "find_evidence"
+      ? [{ paperId: demoPapers[0]?.id, paperTitle: demoPapers[0]?.title, sectionId: "demo-section", snippet: "Local evidence preview for browser acceptance." }]
+      : { ok: true, preview: true };
+    const record: AgentToolCallRecord = {
+      id: crypto.randomUUID(), runId: run.id, toolCallId: input.toolCallId, iteration: input.iteration,
+      position: run.toolCalls.filter((item) => item.iteration === input.iteration).length + 1,
+      toolName: input.toolName, arguments: input.arguments, status: allowed ? "completed" : "denied",
+      result: allowed ? result : undefined, error: allowed ? undefined : `Tool ${input.toolName} is not allowed for this agent`,
+      startedAt: now, finishedAt: now, createdAt: now, updatedAt: now,
+    };
+    run.toolCalls = [...run.toolCalls, record];
+    return record;
+  }
+  return rpc<AgentToolCallRecord>("agent.tool_execute", { root, ...input });
 }
 
 let demoInnovationPrompt: InnovationPromptRevision | null = null;
@@ -653,6 +696,11 @@ export async function startModelStream(input: ModelStreamRequest, onEvent: (even
   const safeInput = { ...input, provider: sanitizeProviderConfig(input.provider) };
   if (!nativeRuntime) {
     onEvent({ requestId: safeInput.requestId, kind: "started" });
+    const tool = safeInput.messages.some((message) => message.role === "tool") ? undefined : safeInput.tools?.find((candidate) => candidate.name === "find_evidence");
+    if (tool) {
+      onEvent({ requestId: safeInput.requestId, kind: "tool_calls", toolCalls: [{ id: crypto.randomUUID(), name: tool.name, arguments: { query: "evidence" } }], usage: { inputTokens: 0, outputTokens: 0 } });
+      return { cancel: async () => undefined, dispose: () => undefined };
+    }
     onEvent({ requestId: safeInput.requestId, kind: "delta", text: `Preview response: ${safeInput.messages.at(-1)?.content ?? ""}` });
     onEvent({ requestId: safeInput.requestId, kind: "done", usage: { inputTokens: 0, outputTokens: 0 } });
     return { cancel: async () => undefined, dispose: () => undefined };

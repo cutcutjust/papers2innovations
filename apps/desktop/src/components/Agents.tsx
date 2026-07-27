@@ -1,4 +1,4 @@
-import type { AgentProfile, AgentRun, ContextSnapshot, ModelStreamEvent } from "@p2i/contracts";
+import type { AgentProfile, AgentRun, ContextSnapshot, ModelMessage, ModelStreamEvent, ModelToolCall } from "@p2i/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bot,
@@ -20,10 +20,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   cancelAgentRun,
   deleteAgentProfile,
+  executeAgentTool,
   getContextCompression,
   getContextDraft,
   listAgentProfiles,
   listAgentRuns,
+  listAgentTools,
   nativeRuntime,
   readContextItem,
   retryAgentRun,
@@ -302,9 +304,16 @@ export function Agents() {
       userPrompt: prompt,
       contextSnapshot: assembled.snapshot,
     });
+    const tools = await listAgentTools(root, profile.id);
     const started = performance.now();
     let output = "";
     let terminal = false;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    const messages: ModelMessage[] = [
+      { role: "system", content: profile.systemPrompt },
+      { role: "user", content: `Task:\n${prompt}\n\nResearch context:\n${assembled.contextText}` },
+    ];
     setActiveRunId(run.id);
     activeRunIdRef.current = run.id;
     setLiveOutput("");
@@ -323,8 +332,8 @@ export function Agents() {
       await updateAgentRun(root, run.id, {
         status,
         outputText: output,
-        inputTokens: event?.usage?.inputTokens,
-        outputTokens: event?.usage?.outputTokens,
+        inputTokens,
+        outputTokens,
         durationMs: Math.round(performance.now() - started),
         error: event?.error,
       });
@@ -335,35 +344,89 @@ export function Agents() {
       setNotice(status === "completed" ? "Agent run completed and persisted." : status === "cancelled" ? "Agent run cancelled." : event?.error ?? "Agent run failed.");
       await invalidate();
     };
-    const onEvent = (event: ModelStreamEvent) => {
-      if (event.kind === "delta" && event.text) {
-        output += event.text;
-        setLiveOutput(output);
-        checkpoint();
-      } else if (event.kind === "done") {
-        void finish("completed", event);
-      } else if (event.kind === "cancelled") {
-        void finish("cancelled", event);
-      } else if (event.kind === "error") {
-        void finish("failed", event);
+    const runRound = async (iteration: number): Promise<void> => {
+      if (terminal || activeRunIdRef.current !== run.id) return;
+      let roundText = "";
+      let roundTerminal = false;
+      const requestId = `${run.id}:round:${iteration}`;
+      const accountUsage = (event: ModelStreamEvent) => {
+        inputTokens += event.usage?.inputTokens ?? 0;
+        outputTokens += event.usage?.outputTokens ?? 0;
+      };
+      const handleToolCalls = async (calls: ModelToolCall[], event: ModelStreamEvent) => {
+        accountUsage(event);
+        if (!calls.length) {
+          await finish("failed", { ...event, kind: "error", error: "Provider returned an empty tool call batch." });
+          return;
+        }
+        if (iteration >= 6) {
+          await finish("failed", { ...event, kind: "error", error: "Agent tool loop exceeded the six-round safety limit." });
+          return;
+        }
+        messages.push({ role: "assistant", content: roundText, toolCalls: calls });
+        try {
+          for (const call of calls.slice(0, 8)) {
+            if (activeRunIdRef.current !== run.id) {
+              terminal = true;
+              return;
+            }
+            const record = await executeAgentTool(root, {
+              runId: run.id,
+              toolCallId: call.id,
+              toolName: call.name,
+              arguments: call.arguments,
+              iteration,
+            });
+            messages.push({
+              role: "tool",
+              toolCallId: call.id,
+              content: JSON.stringify({ status: record.status, result: record.result, error: record.error }),
+            });
+          }
+          if (activeRunIdRef.current !== run.id) {
+            terminal = true;
+            return;
+          }
+          await invalidate();
+          setNotice(`Completed ${calls.length} tool call${calls.length === 1 ? "" : "s"}; continuing model round ${iteration + 1}.`);
+          await runRound(iteration + 1);
+        } catch (error) {
+          await finish("failed", { requestId, kind: "error", error: error instanceof Error ? error.message : String(error) });
+        }
+      };
+      const onEvent = (event: ModelStreamEvent) => {
+        if (event.kind === "delta" && event.text) {
+          roundText += event.text;
+          output += event.text;
+          setLiveOutput(output);
+          checkpoint();
+        } else if (event.kind === "tool_calls") {
+          roundTerminal = true;
+          streamHandle.current?.dispose();
+          streamHandle.current = null;
+          void handleToolCalls(event.toolCalls ?? [], event);
+        } else if (event.kind === "done") {
+          roundTerminal = true;
+          accountUsage(event);
+          void finish("completed", event);
+        } else if (event.kind === "cancelled") {
+          roundTerminal = true;
+          accountUsage(event);
+          void finish("cancelled", event);
+        } else if (event.kind === "error") {
+          roundTerminal = true;
+          void finish("failed", event);
+        }
+      };
+      try {
+        const handle = await startModelStream({ requestId, provider, model, temperature: profile.temperature, messages, tools }, onEvent);
+        if (roundTerminal || terminal) handle.dispose();
+        else streamHandle.current = handle;
+      } catch (error) {
+        await finish("failed", { requestId, kind: "error", error: error instanceof Error ? error.message : String(error) });
       }
     };
-    try {
-      const handle = await startModelStream({
-        requestId: run.id,
-        provider,
-        model,
-        temperature: profile.temperature,
-        messages: [
-          { role: "system", content: profile.systemPrompt },
-          { role: "user", content: `Task:\n${prompt}\n\nResearch context:\n${assembled.contextText}` },
-        ],
-      }, onEvent);
-      if (terminal) handle.dispose();
-      else streamHandle.current = handle;
-    } catch (error) {
-      await finish("failed", { requestId: run.id, kind: "error", error: error instanceof Error ? error.message : String(error) });
-    }
+    await runRound(1);
   };
 
   const start = async () => {
@@ -441,7 +504,7 @@ export function Agents() {
         <div className="agent-detail-section"><h3>Enabled tools</h3>{selected.allowedTools.map((tool) => <p className="tool-permission" key={tool}><CheckCircle2 size={13} /> {AVAILABLE_TOOLS.find(([id]) => id === tool)?.[1] ?? tool}</p>)}</div>
         <div className="agent-detail-section agent-run-compose"><h3>Run agent</h3><textarea value={task} onChange={(event) => setTask(event.target.value)} aria-label="Agent task" disabled={running} /><small>Uses the current shared Context draft and persists a revisioned run.</small>{liveOutput && <pre>{liveOutput}</pre>}</div>
         <div className="agent-detail-actions">{!selectedConfigured ? <button className="primary-button compact" onClick={() => setView("settings")}><KeyRound size={13} /> Configure API</button> : running ? <button className="danger-button" onClick={() => void cancel()}><Square size={13} /> Stop run</button> : <button className="primary-button compact" onClick={() => void start()} disabled={busy || !selected.enabled}>{busy ? <LoaderCircle className="spin" size={13} /> : <Play size={13} />} Start Agent</button>}<button className="secondary-button" onClick={() => beginEdit(selected)} disabled={running}><Pencil size={13} /> Edit profile</button><button className="secondary-button" onClick={() => void removeProfile()} disabled={running || busy}><Trash2 size={13} /> Delete profile</button></div>
-        <div className="agent-detail-section agent-run-history"><h3>Recent runs</h3>{runs.length === 0 ? <p className="agent-empty-run">No persisted runs yet.</p> : runs.slice(0, 6).map((run) => <article key={run.id} className={`agent-run-row ${run.status}`}><div><strong>{runStatusCopy(run)}</strong><small>{new Date(run.createdAt).toLocaleString()}</small></div><p>{run.outputText || run.error || run.userPrompt}</p><footer><span>{run.usage.inputTokens + run.usage.outputTokens} tokens / {(run.usage.durationMs / 1000).toFixed(1)}s</span>{["failed", "cancelled", "interrupted"].includes(run.status) && <button title="Retry run" onClick={() => void retry(run)} disabled={running || busy}><RotateCcw size={12} /></button>}</footer></article>)}</div>
+        <div className="agent-detail-section agent-run-history"><h3>Recent runs</h3>{runs.length === 0 ? <p className="agent-empty-run">No persisted runs yet.</p> : runs.slice(0, 6).map((run) => <article key={run.id} className={`agent-run-row ${run.status}`}><div><strong>{runStatusCopy(run)}</strong><small>{new Date(run.createdAt).toLocaleString()}</small></div><p>{run.outputText || run.error || run.userPrompt}</p>{run.toolCalls.length > 0 && <div className="agent-run-tools">{run.toolCalls.map((call) => <span className={call.status} key={call.id}><Sparkles size={9} /> {call.toolName}<b>{call.status}</b></span>)}</div>}<footer><span>{run.usage.inputTokens + run.usage.outputTokens} tokens / {(run.usage.durationMs / 1000).toFixed(1)}s · {run.toolCalls.length} tools</span>{["failed", "cancelled", "interrupted"].includes(run.status) && <button title="Retry run" onClick={() => void retry(run)} disabled={running || busy}><RotateCcw size={12} /></button>}</footer></article>)}</div>
       </> : <div className="agent-loading">No agent profiles.</div>}
       {notice && <div className="agent-runtime-notice">{notice}</div>}
       </aside>

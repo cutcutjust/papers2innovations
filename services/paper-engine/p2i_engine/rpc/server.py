@@ -191,6 +191,10 @@ class RpcServer:
             return self.library(params["root"]).cancel_agent_run(params["runId"])
         if method == "agent.run_retry":
             return self.library(params["root"]).retry_agent_run(params["runId"])
+        if method == "agent.tool_registry":
+            return self.library(params["root"]).list_agent_tools(params["agentProfileId"])
+        if method == "agent.tool_execute":
+            return self.library(params["root"]).execute_agent_tool(params)
         if method == "innovation.prompt_get":
             return self.library(params["root"]).get_innovation_prompt(
                 params.get("promptVersion", "innovation-v1")

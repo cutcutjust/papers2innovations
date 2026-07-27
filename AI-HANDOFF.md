@@ -14,10 +14,11 @@
 - `0005_context_compressions.sql` 已实现 AI Context 压缩、精确 active revision、模型与 Prompt 版本缓存、source hash 失效保护、token/耗时 usage，以及原文/压缩模式切换。
 - P2 已完成：真实两层 Citation Graph、结构化引用提取、本地论文解析、环路与重复引用合并、关系分析、`.p2i` fingerprint 缓存，以及 Cytoscape.js 交互画布。
 - P3 Agent Runtime 首条链路已完成：profile CRUD、工具/网络/写入策略、system prompt、共享 Context snapshot、真实模型流、checkpoint、取消、重试、usage、错误和重启中断恢复均持久化到 schema 6。
+- `0009_agent_tool_registry.sql` 已实现 Agent tool-call provenance；Rust 已规范化 OpenAI-compatible/Anthropic 流式工具调用，Python 仅执行 profile 与 run snapshot 同时允许的白名单工具，React 支持最多 6 轮模型/工具循环。
 - P3 Innovate Pipeline 已完成：revisioned prompt、精确 Context snapshot、五阶段独立模型、串行真实模型流、stage checkpoint/usage、取消、失败阶段续跑和重启恢复均持久化到 schema 7。
-- 当前验证：Python `38 passed`、Vitest `10 passed`、TypeScript、Vite production build、Rust fmt/check/clippy 和 `7 passed`；Playwright 已走通 Explain → Save 与 Chat → History，并覆盖 1440×900、720×600，控制台 0 error/0 warning。
+- 当前验证：Python `39 passed`、Vitest `10 passed`、TypeScript、Vite production build、Rust fmt/check/clippy 和 `8 passed`；Playwright 已走通 Explain → Save、Chat → History 及 Agent → find_evidence → final answer，覆盖 1440×900、720×600，控制台 0 error/0 warning。
 - 本机安装目录：`E:\Project_papers2innovations\install`；真实论文库：`E:\Papers2Innovations-Library`。
-- 下一优先级：实现受限 Tool Registry 的真实工具调用。下文中与本节冲突的“尚未实现”描述属于旧状态。
+- 下一优先级：将工具循环接入 Innovate novelty 阶段，再实现受确认控制的写工具与 academic 网络工具。下文中与本节冲突的“尚未实现”描述属于旧状态。
 
 ## 给下一位 AI 的启动提示词
 
@@ -156,6 +157,8 @@ Python RPC 当前支持：
 - `reader.chat_get`
 - `reader.chat_save`
 - `reader.chat_clear`
+- `agent.tool_registry`
+- `agent.tool_execute`
 
 ## 6. 当前仍是演示或临时实现的部分
 
@@ -184,7 +187,8 @@ Python RPC 当前支持：
 
 - Agent Runtime 已使用 `0006_agent_runtime.sql` 持久化 profile 与 run；模型流经 Rust 安全网关，支持 checkpoint、取消、失败/中断重试和 usage。
 - Innovate 已使用 `0007_innovation_pipeline.sql` 持久化 prompt/run/stage；五阶段真实串行执行并从失败阶段续跑。
-- Agent profile 的工具权限目前会进入 snapshot/provenance，但尚未执行模型 tool call；真实 Tool Registry 仍待实现。
+- Agent Runtime 已执行原生模型 tool call；首批只读工具为 `search_library`、`read_paper`、`read_section`、`read_figure`、`find_evidence`、`get_references`，每次调用均持久化参数、结果、状态和错误。
+- `create_note`、`update_context`、外部 academic 搜索以及 Innovate novelty 工具循环仍待实现。
 - 提示词只保存在 `localStorage`。
 - 阶段模型选择和 Context 模式主要是组件内 state，刷新会丢失。
 
@@ -384,9 +388,9 @@ git diff -- apps/desktop/src
 
 ## 13. 建议下一位 AI 的第一项实现
 
-下一项是受限 Tool Registry：
+下一项是 Innovate 与受控写入/网络工具：
 
-1. 建立 Tool Registry，只暴露白名单工具；第一批实现 `search_library`、`read_paper`、`read_section`、`read_figure`、`find_evidence`、`get_references`。
-2. 在 Rust 网关规范化 OpenAI-compatible/Anthropic tool call，在 Python 执行受限工具，并把调用/结果写入 run provenance。
-3. Agent Runtime 与 Innovate novelty 阶段接入工具循环；网络策略为 `none` 时拒绝外部工具，`academic` 只允许学术来源。
-4. 覆盖路径越界、权限拒绝、循环上限、取消/重试、证据锚点和三尺寸 Playwright。
+1. 复用现有 Tool Registry，把工具循环接入 Innovate novelty 阶段，并在 stage provenance 中记录调用。
+2. 实现 `create_note`、`update_context` 的逐次确认；只有 `trusted-write` 才允许免确认写入。
+3. 实现 academic 网络工具的域名白名单、来源记录、超时与结果缓存；`networkPolicy=none` 必须硬拒绝。
+4. 覆盖写权限确认、网络拒绝、循环上限、取消/重试、证据锚点和三尺寸 Playwright。

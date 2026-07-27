@@ -33,6 +33,39 @@ AGENT_TOOLS = {
     "update_context",
 }
 
+AGENT_TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
+    "search_library": {
+        "name": "search_library",
+        "description": "Search titles in the local Papers2Innovations library.",
+        "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}, "required": ["query"], "additionalProperties": False},
+    },
+    "read_paper": {
+        "name": "read_paper",
+        "description": "Read the parsed Markdown for one local paper.",
+        "inputSchema": {"type": "object", "properties": {"paperId": {"type": "string"}, "maxCharacters": {"type": "integer", "minimum": 1000, "maximum": 100000}}, "required": ["paperId"], "additionalProperties": False},
+    },
+    "read_section": {
+        "name": "read_section",
+        "description": "Read a structured section from one local paper.",
+        "inputSchema": {"type": "object", "properties": {"paperId": {"type": "string"}, "sectionId": {"type": "string"}}, "required": ["paperId", "sectionId"], "additionalProperties": False},
+    },
+    "read_figure": {
+        "name": "read_figure",
+        "description": "Read extracted figure metadata, caption, page, and bounding box.",
+        "inputSchema": {"type": "object", "properties": {"paperId": {"type": "string"}, "figureId": {"type": "string"}}, "required": ["paperId"], "additionalProperties": False},
+    },
+    "find_evidence": {
+        "name": "find_evidence",
+        "description": "Find grounded snippets in parsed local paper sections.",
+        "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "paperId": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}, "required": ["query"], "additionalProperties": False},
+    },
+    "get_references": {
+        "name": "get_references",
+        "description": "Read structured references extracted from a local paper.",
+        "inputSchema": {"type": "object", "properties": {"paperId": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, "required": ["paperId"], "additionalProperties": False},
+    },
+}
+
 DEFAULT_AGENT_PROFILES = (
     {
         "id": "paper-analyst",
@@ -1916,8 +1949,12 @@ class Library:
             cursor = connection.execute("DELETE FROM agent_profiles WHERE id = ?", (profile_id,))
         return bool(cursor.rowcount)
 
-    @staticmethod
-    def _agent_run_contract(record: Any) -> dict[str, Any]:
+    def _agent_run_contract(self, record: Any) -> dict[str, Any]:
+        with self.db.connect() as connection:
+            tool_rows = connection.execute(
+                "SELECT * FROM agent_tool_calls WHERE run_id = ? ORDER BY iteration, position",
+                (record["id"],),
+            ).fetchall()
         return {
             "id": record["id"],
             "agentProfileId": record["agent_profile_id"],
@@ -1940,7 +1977,186 @@ class Library:
             "finishedAt": record["finished_at"],
             "createdAt": record["created_at"],
             "updatedAt": record["updated_at"],
+            "toolCalls": [self._agent_tool_call_contract(row) for row in tool_rows],
         }
+
+    @staticmethod
+    def _agent_tool_call_contract(record: Any) -> dict[str, Any]:
+        return {
+            "id": record["id"],
+            "runId": record["run_id"],
+            "toolCallId": record["tool_call_id"],
+            "iteration": record["iteration"],
+            "position": record["position"],
+            "toolName": record["tool_name"],
+            "arguments": json.loads(record["arguments_json"]),
+            "status": record["status"],
+            "result": json.loads(record["result_json"]) if record["result_json"] else None,
+            "error": record["error"],
+            "startedAt": record["started_at"],
+            "finishedAt": record["finished_at"],
+            "createdAt": record["created_at"],
+            "updatedAt": record["updated_at"],
+        }
+
+    def list_agent_tools(self, profile_id: str) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.db.connect() as connection:
+            profile = connection.execute(
+                "SELECT allowed_tools_json FROM agent_profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+        if not profile:
+            raise KeyError(f"Unknown agent profile: {profile_id}")
+        allowed = json.loads(profile["allowed_tools_json"])
+        return [AGENT_TOOL_DEFINITIONS[name] for name in allowed if name in AGENT_TOOL_DEFINITIONS]
+
+    @staticmethod
+    def _require_tool_string(arguments: dict[str, Any], name: str) -> str:
+        value = str(arguments.get(name, "")).strip()
+        if not value or len(value) > 1000:
+            raise ValueError(f"Tool argument {name} is required and must be at most 1000 characters")
+        return value
+
+    def _run_agent_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+        if tool_name == "search_library":
+            query = self._require_tool_string(arguments, "query").casefold()
+            limit = max(1, min(int(arguments.get("limit", 10)), 20))
+            matches = [paper for paper in self.list_papers() if query in paper["title"].casefold()]
+            return [{"paperId": paper["id"], "title": paper["title"], "status": paper["status"], "pageCount": paper["pageCount"]} for paper in matches[:limit]]
+        if tool_name == "read_paper":
+            paper_id = self._require_tool_string(arguments, "paperId")
+            maximum = max(1000, min(int(arguments.get("maxCharacters", 60000)), 100000))
+            markdown = self.read_markdown(paper_id)
+            return {"paperId": paper_id, "markdown": markdown[:maximum], "truncated": len(markdown) > maximum}
+        if tool_name == "read_section":
+            paper_id = self._require_tool_string(arguments, "paperId")
+            section_id = self._require_tool_string(arguments, "sectionId")
+            document = self.read_document(paper_id)
+            section = next((item for item in document.get("sections", []) if str(item.get("id")) == section_id or str(item.get("title", "")).casefold() == section_id.casefold()), None)
+            if not section:
+                raise KeyError(f"Unknown section {section_id} in paper {paper_id}")
+            return {"paperId": paper_id, "sectionId": section.get("id"), "title": section.get("title"), "pageStart": section.get("page_start"), "pageEnd": section.get("page_end"), "markdown": str(section.get("markdown", ""))[:80000], "anchors": section.get("anchors", [])[:100]}
+        if tool_name == "read_figure":
+            paper_id = self._require_tool_string(arguments, "paperId")
+            figure_id = str(arguments.get("figureId", "")).strip()
+            paper = next((item for item in self.list_papers() if item["id"] == paper_id), None)
+            if not paper:
+                raise KeyError(f"Unknown paper: {paper_id}")
+            figures = paper["figures"]
+            if figure_id:
+                figures = [figure for figure in figures if figure["id"] == figure_id]
+                if not figures:
+                    raise KeyError(f"Unknown figure {figure_id} in paper {paper_id}")
+            return {"paperId": paper_id, "figures": [{key: value for key, value in figure.items() if key not in {"relativePath", "thumbnailPath"}} for figure in figures[:50]]}
+        if tool_name == "find_evidence":
+            query = self._require_tool_string(arguments, "query")
+            terms = [term.casefold() for term in query.split() if len(term) > 1][:8]
+            if not terms:
+                raise ValueError("Evidence query must contain searchable terms")
+            requested_paper = str(arguments.get("paperId", "")).strip()
+            limit = max(1, min(int(arguments.get("limit", 10)), 20))
+            results = []
+            for paper in self.list_papers():
+                if requested_paper and paper["id"] != requested_paper:
+                    continue
+                try:
+                    sections = self.read_document(paper["id"]).get("sections", [])
+                except (FileNotFoundError, json.JSONDecodeError):
+                    continue
+                for section in sections:
+                    text = str(section.get("markdown", ""))
+                    folded = text.casefold()
+                    positions = [folded.find(term) for term in terms]
+                    positions = [position for position in positions if position >= 0]
+                    if not positions:
+                        continue
+                    position = min(positions)
+                    start = max(0, position - 180)
+                    end = min(len(text), position + 420)
+                    results.append({"paperId": paper["id"], "paperTitle": paper["title"], "sectionId": section.get("id"), "sectionTitle": section.get("title"), "page": section.get("page_start"), "snippet": text[start:end].strip()})
+                    if len(results) >= limit:
+                        return results
+            return results
+        if tool_name == "get_references":
+            paper_id = self._require_tool_string(arguments, "paperId")
+            limit = max(1, min(int(arguments.get("limit", 100)), 200))
+            return {"paperId": paper_id, "references": self.read_references(paper_id)[:limit]}
+        raise ValueError(f"Tool {tool_name} is not available in the read-only registry")
+
+    def execute_agent_tool(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        run_id = str(payload.get("runId", "")).strip()
+        tool_call_id = str(payload.get("toolCallId", "")).strip()
+        tool_name = str(payload.get("toolName", "")).strip()
+        arguments = payload.get("arguments") or {}
+        iteration = int(payload.get("iteration", 1))
+        if not run_id or not tool_call_id or not tool_name or not isinstance(arguments, dict):
+            raise ValueError("Agent tool run, call ID, name, and object arguments are required")
+        if len(tool_call_id) > 200 or len(tool_name) > 120 or not 1 <= iteration <= 6:
+            raise ValueError("Agent tool call metadata is invalid")
+        arguments_json = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+        if len(arguments_json.encode("utf-8")) > 128 * 1024:
+            raise ValueError("Agent tool arguments exceed 128 KB")
+        now = utc_now()
+        with self.db.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM agent_tool_calls WHERE run_id = ? AND tool_call_id = ?",
+                (run_id, tool_call_id),
+            ).fetchone()
+            if existing:
+                return self._agent_tool_call_contract(existing)
+            run = connection.execute(
+                "SELECT ar.status, ar.context_snapshot_json, ap.allowed_tools_json FROM agent_runs ar JOIN agent_profiles ap ON ap.id = ar.agent_profile_id WHERE ar.id = ?",
+                (run_id,),
+            ).fetchone()
+            if not run:
+                raise KeyError(f"Unknown agent run: {run_id}")
+            if run["status"] != "running":
+                raise ValueError("Agent tools can only execute for an active run")
+            allowed_tools = set(json.loads(run["allowed_tools_json"]))
+            snapshot = json.loads(run["context_snapshot_json"])
+            snapshot_tools = set((snapshot.get("toolVersions") or {}).keys())
+            if snapshot_tools:
+                allowed_tools &= snapshot_tools
+            if tool_name not in allowed_tools or tool_name not in AGENT_TOOL_DEFINITIONS:
+                status = "denied"
+                error = f"Tool {tool_name} is not allowed for this agent"
+            else:
+                status = "running"
+                error = None
+            position = connection.execute(
+                "SELECT COUNT(*) + 1 FROM agent_tool_calls WHERE run_id = ? AND iteration = ?",
+                (run_id, iteration),
+            ).fetchone()[0]
+            if position > 8:
+                raise ValueError("Agent tool call limit exceeded for this iteration")
+            record_id = str(uuid.uuid4())
+            connection.execute(
+                "INSERT INTO agent_tool_calls(id, run_id, tool_call_id, iteration, position, tool_name, arguments_json, status, error, started_at, finished_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (record_id, run_id, tool_call_id, iteration, position, tool_name, arguments_json, status, error, now, now if status == "denied" else None, now, now),
+            )
+        if status == "denied":
+            with self.db.connect() as connection:
+                return self._agent_tool_call_contract(connection.execute("SELECT * FROM agent_tool_calls WHERE id = ?", (record_id,)).fetchone())
+        try:
+            result = self._run_agent_tool(tool_name, arguments)
+            result_json = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+            if len(result_json.encode("utf-8")) > 512 * 1024:
+                raise ValueError("Agent tool result exceeds 512 KB")
+            final_status = "completed"
+            error = None
+        except Exception as tool_error:
+            result_json = None
+            final_status = "failed"
+            error = f"{type(tool_error).__name__}: {tool_error}"[:4000]
+        finished = utc_now()
+        with self.db.connect() as connection:
+            connection.execute(
+                "UPDATE agent_tool_calls SET status = ?, result_json = ?, error = ?, finished_at = ?, updated_at = ? WHERE id = ?",
+                (final_status, result_json, error, finished, finished, record_id),
+            )
+            record = connection.execute("SELECT * FROM agent_tool_calls WHERE id = ?", (record_id,)).fetchone()
+        return self._agent_tool_call_contract(record)
 
     def list_agent_runs(
         self, profile_id: str | None = None, limit: int = 50

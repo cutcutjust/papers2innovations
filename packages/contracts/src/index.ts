@@ -198,8 +198,22 @@ export interface CredentialSummary {
 }
 
 export interface ModelMessage {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  toolCallId?: string;
+  toolCalls?: ModelToolCall[];
+}
+
+export interface ModelToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+export interface ModelToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
 }
 
 export interface ModelStreamRequest {
@@ -207,13 +221,15 @@ export interface ModelStreamRequest {
   provider: ProviderConfig;
   model: ModelConfig;
   messages: ModelMessage[];
+  tools?: ModelToolDefinition[];
   temperature?: number;
 }
 
 export interface ModelStreamEvent {
   requestId: string;
-  kind: "started" | "delta" | "done" | "cancelled" | "error";
+  kind: "started" | "delta" | "tool_calls" | "done" | "cancelled" | "error";
   text?: string;
+  toolCalls?: ModelToolCall[];
   error?: string;
   usage?: { inputTokens: number; outputTokens: number };
 }
@@ -330,6 +346,24 @@ export interface AgentRun {
   error?: string;
   cancelRequested: boolean;
   startedAt?: string;
+  finishedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  toolCalls: AgentToolCallRecord[];
+}
+
+export interface AgentToolCallRecord {
+  id: string;
+  runId: string;
+  toolCallId: string;
+  iteration: number;
+  position: number;
+  toolName: string;
+  arguments: Record<string, unknown>;
+  status: "running" | "completed" | "failed" | "denied";
+  result?: unknown;
+  error?: string;
+  startedAt: string;
   finishedAt?: string;
   createdAt: string;
   updatedAt: string;

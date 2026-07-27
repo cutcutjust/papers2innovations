@@ -36,7 +36,7 @@ def test_initializes_versioned_library_layout(tmp_path: Path) -> None:
 
     with sqlite3.connect(result["database"]) as connection:
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-    assert version == 8
+    assert version == 9
 
 
 def test_agent_profiles_runs_retry_and_restart_recovery_are_persistent(tmp_path: Path) -> None:
@@ -103,7 +103,7 @@ def test_agent_profiles_runs_retry_and_restart_recovery_are_persistent(tmp_path:
 def test_agent_profile_rejects_unknown_tool_and_protects_run_history(tmp_path: Path) -> None:
     library = Library(tmp_path)
     library.initialize()
-    profile = library.list_agent_profiles()[0]
+    profile = next(item for item in library.list_agent_profiles() if item["id"] == "paper-analyst")
     with pytest.raises(ValueError, match="Unknown agent tools"):
         library.upsert_agent_profile({**profile, "allowedTools": ["shell"]})
 
@@ -114,6 +114,48 @@ def test_agent_profile_rejects_unknown_tool_and_protects_run_history(tmp_path: P
     })
     with pytest.raises(ValueError, match="run history"):
         library.delete_agent_profile(profile["id"])
+
+
+def test_agent_tool_registry_enforces_permissions_and_persists_provenance(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    make_pdf(library.papers_dir / "tool-paper.pdf")
+    library.scan()
+    paper = library.list_papers()[0]
+    profile = next(item for item in library.list_agent_profiles() if item["id"] == "paper-analyst")
+    tools = library.list_agent_tools(profile["id"])
+    assert {tool["name"] for tool in tools} == {"read_paper", "read_section", "find_evidence"}
+    run = library.start_agent_run({
+        "agentProfileId": profile["id"],
+        "userPrompt": "Read local evidence.",
+        "contextSnapshot": {"toolVersions": {tool["name"]: "1" for tool in tools}},
+    })
+    call = library.execute_agent_tool({
+        "runId": run["id"],
+        "toolCallId": "call-read-paper",
+        "toolName": "read_paper",
+        "arguments": {"paperId": paper["id"]},
+        "iteration": 1,
+    })
+    assert call["status"] == "completed"
+    assert call["result"]["paperId"] == paper["id"]
+    assert library.execute_agent_tool({
+        "runId": run["id"],
+        "toolCallId": "call-read-paper",
+        "toolName": "read_paper",
+        "arguments": {"paperId": "different"},
+        "iteration": 1,
+    })["id"] == call["id"]
+    denied = library.execute_agent_tool({
+        "runId": run["id"],
+        "toolCallId": "call-create-note",
+        "toolName": "create_note",
+        "arguments": {"text": "must not write"},
+        "iteration": 1,
+    })
+    assert denied["status"] == "denied"
+    restored = Library(tmp_path).list_agent_runs(profile["id"])[0]
+    assert [item["status"] for item in restored["toolCalls"]] == ["completed", "denied"]
 
 
 def test_innovation_pipeline_resumes_from_failed_stage_without_repeating_completed(tmp_path: Path) -> None:

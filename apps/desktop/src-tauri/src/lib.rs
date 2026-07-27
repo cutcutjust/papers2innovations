@@ -126,9 +126,29 @@ struct ModelConfigInput {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ModelMessageInput {
     role: String,
     content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<ModelToolCallInput>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct ModelToolCallInput {
+    id: String,
+    name: String,
+    arguments: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelToolDefinitionInput {
+    name: String,
+    description: String,
+    input_schema: Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -138,6 +158,8 @@ struct ModelStreamInput {
     provider: ProviderConfigInput,
     model: ModelConfigInput,
     messages: Vec<ModelMessageInput>,
+    #[serde(default)]
+    tools: Vec<ModelToolDefinitionInput>,
     #[serde(default)]
     temperature: Option<f64>,
 }
@@ -155,6 +177,8 @@ struct ModelStreamEvent {
     kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<ModelToolCallInput>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -662,7 +686,10 @@ async fn provider_test_connection(
         messages: vec![ModelMessageInput {
             role: "user".into(),
             content: "Reply with OK.".into(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
         }],
+        tools: Vec::new(),
         temperature: Some(0.0),
     };
     let response = send_model_request(&request, &api_key, false, 1).await?;
@@ -881,29 +908,83 @@ fn model_request_body(input: &ModelStreamInput, stream: bool, max_tokens: u64) -
             .map(|message| message.content.as_str())
             .collect::<Vec<_>>()
             .join("\n\n");
-        let messages = input
+        let mut messages: Vec<Value> = Vec::new();
+        for message in input
             .messages
             .iter()
             .filter(|message| message.role != "system")
-            .map(|message| json!({"role": message.role, "content": message.content}))
-            .collect::<Vec<_>>();
-        json!({
+        {
+            if message.role == "tool" {
+                let block = json!({"type":"tool_result", "tool_use_id":message.tool_call_id, "content":message.content});
+                let append_to_user = messages
+                    .last()
+                    .and_then(|value| value.get("role"))
+                    .and_then(Value::as_str)
+                    == Some("user")
+                    && messages
+                        .last()
+                        .and_then(|value| value.get("content"))
+                        .is_some_and(Value::is_array);
+                if append_to_user {
+                    if let Some(content) = messages
+                        .last_mut()
+                        .and_then(|value| value.get_mut("content"))
+                        .and_then(Value::as_array_mut)
+                    {
+                        content.push(block);
+                    }
+                } else {
+                    messages.push(json!({"role":"user", "content":[block]}));
+                }
+            } else if message.role == "assistant" && !message.tool_calls.is_empty() {
+                let mut content = Vec::new();
+                if !message.content.is_empty() {
+                    content.push(json!({"type":"text", "text":message.content}));
+                }
+                content.extend(message.tool_calls.iter().map(|call| json!({"type":"tool_use", "id":call.id, "name":call.name, "input":call.arguments})));
+                messages.push(json!({"role":"assistant", "content":content}));
+            } else {
+                messages.push(json!({"role": message.role, "content": message.content}));
+            }
+        }
+        let tools = input.tools.iter().map(|tool| json!({"name":tool.name, "description":tool.description, "input_schema":tool.input_schema})).collect::<Vec<_>>();
+        let mut body = json!({
             "model": input.model.model,
             "system": system,
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": input.temperature.unwrap_or(0.2),
-            "stream": stream
-        })
+            "stream": stream,
+            "tools": tools
+        });
+        if tools.is_empty() {
+            body.as_object_mut().expect("model body").remove("tools");
+        }
+        body
     } else {
-        json!({
+        let messages = input.messages.iter().map(|message| {
+            if message.role == "tool" {
+                json!({"role":"tool", "tool_call_id":message.tool_call_id, "content":message.content})
+            } else if message.role == "assistant" && !message.tool_calls.is_empty() {
+                json!({"role":"assistant", "content":if message.content.is_empty() { Value::Null } else { Value::String(message.content.clone()) }, "tool_calls":message.tool_calls.iter().map(|call| json!({"id":call.id, "type":"function", "function":{"name":call.name, "arguments":call.arguments.to_string()}})).collect::<Vec<_>>()})
+            } else {
+                json!({"role":message.role, "content":message.content})
+            }
+        }).collect::<Vec<_>>();
+        let tools = input.tools.iter().map(|tool| json!({"type":"function", "function":{"name":tool.name, "description":tool.description, "parameters":tool.input_schema}})).collect::<Vec<_>>();
+        let mut body = json!({
             "model": input.model.model,
-            "messages": input.messages,
+            "messages": messages,
             "max_tokens": max_tokens,
             "temperature": input.temperature.unwrap_or(0.2),
             "stream": stream,
-            "stream_options": if stream { json!({"include_usage": true}) } else { Value::Null }
-        })
+            "stream_options": if stream { json!({"include_usage": true}) } else { Value::Null },
+            "tools": tools
+        });
+        if tools.is_empty() {
+            body.as_object_mut().expect("model body").remove("tools");
+        }
+        body
     }
 }
 
@@ -989,6 +1070,7 @@ fn emit_model_event(
     request_id: &str,
     kind: &str,
     text: Option<String>,
+    tool_calls: Option<Vec<ModelToolCallInput>>,
     error: Option<String>,
     usage: Option<Value>,
 ) {
@@ -998,10 +1080,60 @@ fn emit_model_event(
             request_id: request_id.to_owned(),
             kind: kind.to_owned(),
             text,
+            tool_calls,
             error,
             usage,
         },
     );
+}
+
+#[derive(Default)]
+struct ToolCallAccumulator {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+fn accumulate_tool_calls(format: &str, value: &Value, calls: &mut Vec<ToolCallAccumulator>) {
+    if format == "anthropic" {
+        let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+        if value.get("type").and_then(Value::as_str) == Some("content_block_start")
+            && value.pointer("/content_block/type").and_then(Value::as_str) == Some("tool_use")
+        {
+            calls.resize_with(index + 1, ToolCallAccumulator::default);
+            calls[index].id = value
+                .pointer("/content_block/id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            calls[index].name = value
+                .pointer("/content_block/name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+        }
+        if let Some(partial) = value.pointer("/delta/partial_json").and_then(Value::as_str) {
+            calls.resize_with(index + 1, ToolCallAccumulator::default);
+            calls[index].arguments.push_str(partial);
+        }
+    } else if let Some(deltas) = value
+        .pointer("/choices/0/delta/tool_calls")
+        .and_then(Value::as_array)
+    {
+        for delta in deltas {
+            let index = delta.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+            calls.resize_with(index + 1, ToolCallAccumulator::default);
+            if let Some(id) = delta.get("id").and_then(Value::as_str) {
+                calls[index].id = id.to_owned();
+            }
+            if let Some(name) = delta.pointer("/function/name").and_then(Value::as_str) {
+                calls[index].name.push_str(name);
+            }
+            if let Some(arguments) = delta.pointer("/function/arguments").and_then(Value::as_str) {
+                calls[index].arguments.push_str(arguments);
+            }
+        }
+    }
 }
 
 async fn consume_model_stream<F>(
@@ -1009,16 +1141,17 @@ async fn consume_model_stream<F>(
     format: &str,
     cancelled: &AtomicBool,
     mut on_delta: F,
-) -> Result<(&'static str, Option<Value>), String>
+) -> Result<(&'static str, Option<Value>, Vec<ModelToolCallInput>), String>
 where
     F: FnMut(String),
 {
     let mut bytes = response.bytes_stream();
     let mut pending = String::new();
     let mut usage = None;
+    let mut tool_calls = Vec::new();
     while let Some(chunk) = bytes.next().await {
         if cancelled.load(Ordering::Relaxed) {
-            return Ok(("cancelled", usage));
+            return Ok(("cancelled", usage, Vec::new()));
         }
         let chunk = chunk.map_err(|error| format!("Provider stream failed: {error}"))?;
         pending.push_str(&String::from_utf8_lossy(&chunk));
@@ -1039,9 +1172,38 @@ where
             if let Some(event_usage) = stream_usage(format, &value) {
                 usage = Some(event_usage);
             }
+            accumulate_tool_calls(format, &value, &mut tool_calls);
         }
     }
-    Ok(("done", usage))
+    let tool_calls = tool_calls
+        .into_iter()
+        .filter(|call| !call.name.is_empty())
+        .map(|call| {
+            let arguments = if call.arguments.trim().is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str(&call.arguments)
+                    .map_err(|error| format!("Invalid tool arguments for {}: {error}", call.name))?
+            };
+            if call.id.is_empty() {
+                return Err(format!(
+                    "Provider tool call {} did not include an ID",
+                    call.name
+                ));
+            }
+            Ok(ModelToolCallInput {
+                id: call.id,
+                name: call.name,
+                arguments,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let kind = if tool_calls.is_empty() {
+        "done"
+    } else {
+        "tool_calls"
+    };
+    Ok((kind, usage, tool_calls))
 }
 
 async fn run_model_stream(
@@ -1051,7 +1213,7 @@ async fn run_model_stream(
     api_key: String,
     cancelled: Arc<AtomicBool>,
 ) {
-    emit_model_event(&app, &input.request_id, "started", None, None, None);
+    emit_model_event(&app, &input.request_id, "started", None, None, None, None);
     let outcome = async {
         let response = send_model_request(
             &input,
@@ -1061,14 +1223,38 @@ async fn run_model_stream(
         )
         .await?;
         consume_model_stream(response, &input.provider.format, &cancelled, |delta| {
-            emit_model_event(&app, &input.request_id, "delta", Some(delta), None, None)
+            emit_model_event(
+                &app,
+                &input.request_id,
+                "delta",
+                Some(delta),
+                None,
+                None,
+                None,
+            )
         })
         .await
     }
     .await;
     match outcome {
-        Ok((kind, usage)) => emit_model_event(&app, &input.request_id, kind, None, None, usage),
-        Err(error) => emit_model_event(&app, &input.request_id, "error", None, Some(error), None),
+        Ok((kind, usage, tool_calls)) => emit_model_event(
+            &app,
+            &input.request_id,
+            kind,
+            None,
+            (!tool_calls.is_empty()).then_some(tool_calls),
+            None,
+            usage,
+        ),
+        Err(error) => emit_model_event(
+            &app,
+            &input.request_id,
+            "error",
+            None,
+            None,
+            Some(error),
+            None,
+        ),
     }
     if let Ok(mut requests) = engine.0.model_cancellations.lock() {
         requests.remove(&input.request_id);
@@ -1284,7 +1470,10 @@ mod tests {
             messages: vec![ModelMessageInput {
                 role: "user".into(),
                 content: "test".into(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
             }],
+            tools: Vec::new(),
             temperature: Some(0.0),
         }
     }
@@ -1414,7 +1603,7 @@ mod tests {
                 .await
                 .expect("OpenAI mock request");
             let mut deltas = Vec::new();
-            let (kind, usage) =
+            let (kind, usage, tool_calls) =
                 consume_model_stream(response, "openai", &AtomicBool::new(false), |delta| {
                     deltas.push(delta)
                 })
@@ -1423,6 +1612,7 @@ mod tests {
             assert_eq!(kind, "done");
             assert_eq!(deltas, ["hello"]);
             assert_eq!(usage.unwrap()["inputTokens"], 3);
+            assert!(tool_calls.is_empty());
 
             let anthropic_body = concat!(
                 "data: {\"delta\":{\"type\":\"text_delta\",\"text\":\"world\"}}\n\n",
@@ -1434,13 +1624,55 @@ mod tests {
                 .await
                 .expect("Anthropic mock request");
             let cancelled = AtomicBool::new(true);
-            let (kind, usage) = consume_model_stream(response, "anthropic", &cancelled, |_| {
-                panic!("cancelled stream emitted a delta")
-            })
-            .await
-            .expect("cancelled mock stream");
+            let (kind, usage, tool_calls) =
+                consume_model_stream(response, "anthropic", &cancelled, |_| {
+                    panic!("cancelled stream emitted a delta")
+                })
+                .await
+                .expect("cancelled mock stream");
             assert_eq!(kind, "cancelled");
             assert!(usage.is_none());
+            assert!(tool_calls.is_empty());
+        });
+    }
+
+    #[test]
+    fn local_mock_normalizes_openai_and_anthropic_tool_calls() {
+        tauri::async_runtime::block_on(async {
+            let openai_body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"find_evidence\",\"arguments\":\"{\\\"query\\\":\"}}]}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"budget\\\"}\"}}]}}]}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let openai_url = mock_http_server("200 OK", "text/event-stream", openai_body);
+            let openai = model_request(openai_url, "openai");
+            let response = send_model_request(&openai, "secret", true, 64)
+                .await
+                .unwrap();
+            let (kind, _, calls) =
+                consume_model_stream(response, "openai", &AtomicBool::new(false), |_| {})
+                    .await
+                    .unwrap();
+            assert_eq!(kind, "tool_calls");
+            assert_eq!(calls[0].name, "find_evidence");
+            assert_eq!(calls[0].arguments["query"], "budget");
+
+            let anthropic_body = concat!(
+                "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"read_paper\",\"input\":{}}}\n\n",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"paperId\\\":\\\"paper-1\\\"}\"}}\n\n"
+            );
+            let anthropic_url = mock_http_server("200 OK", "text/event-stream", anthropic_body);
+            let anthropic = model_request(anthropic_url, "anthropic");
+            let response = send_model_request(&anthropic, "secret", true, 64)
+                .await
+                .unwrap();
+            let (kind, _, calls) =
+                consume_model_stream(response, "anthropic", &AtomicBool::new(false), |_| {})
+                    .await
+                    .unwrap();
+            assert_eq!(kind, "tool_calls");
+            assert_eq!(calls[0].name, "read_paper");
+            assert_eq!(calls[0].arguments["paperId"], "paper-1");
         });
     }
 

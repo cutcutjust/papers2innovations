@@ -695,6 +695,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .agent-run-row strong { font-size: 8px; }
 .agent-run-row small, .agent-run-row footer { color: var(--faint); font-size: 7px; }
 .agent-run-row p { display: -webkit-box; overflow: hidden; margin: 0; color: var(--muted); font-size: 8px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.agent-run-tools { display: flex !important; flex-wrap: wrap; justify-content: flex-start !important; gap: 4px !important; }.agent-run-tools span { display: inline-flex; align-items: center; gap: 3px; padding: 3px 5px; color: var(--ai); background: var(--ai-soft); border-radius: 3px; font-size: 7px; }.agent-run-tools span.completed { color: var(--green); background: var(--green-soft); }.agent-run-tools span.failed, .agent-run-tools span.denied { color: var(--red); background: #fff3f1; }.agent-run-tools b { font-size: 6px; font-weight: 600; text-transform: uppercase; }
 .agent-run-row footer button { display: grid; width: 22px; height: 22px; place-items: center; padding: 0; color: var(--muted); background: #fff; border: 1px solid var(--line); border-radius: 3px; }
 .agent-runtime-notice { position: sticky; bottom: 0; padding: 9px 12px; color: var(--muted); background: #fff; border-top: 1px solid var(--line); font-size: 8px; line-height: 1.5; }
 
