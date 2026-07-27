@@ -122,7 +122,7 @@ export function App() {
   ) : workspace.view === "agents" ? (
     <Agents />
   ) : workspace.view === "context" ? (
-    <ContextWorkspace papers={allPapers} />
+    <ContextWorkspace papers={allPapers} root={root} />
   ) : workspace.view === "graph" ? (
     <CitationGraph papers={allPapers} rootPaper={selected} />
   ) : workspace.view === "import" ? (

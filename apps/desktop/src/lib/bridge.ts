@@ -1,4 +1,4 @@
-import type { JobStage, LibraryPaper, ModelStreamEvent, ModelStreamRequest, PaperDocument, ProgressNotification, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
+import type { ContextDraft, ContextDraftItem, ContextLoadMode, JobStage, LibraryPaper, ModelStreamEvent, ModelStreamRequest, PaperDocument, ProgressNotification, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { demoMarkdown, demoPapers } from "../demo";
@@ -69,6 +69,96 @@ export async function saveTranslation(root: string, input: Omit<TranslationRecor
     return { ...input, id: crypto.randomUUID(), sourceHash: "demo-source-hash", revision: 1, createdAt: now, updatedAt: now };
   }
   return rpc<TranslationRecord>("translation.save", { root, ...input });
+}
+
+let demoContextItems: ContextDraftItem[] = [];
+
+function demoContextDraft(): ContextDraft {
+  return {
+    items: demoContextItems,
+    tokenBreakdown: {
+      systemPrompt: 4200,
+      tools: 7800,
+      conversation: 0,
+      papers: demoContextItems.reduce((total, item) => total + item.estimatedTokens, 0),
+      figures: 0,
+      outputReserve: 16000,
+      safetyBuffer: 8000,
+    },
+    updatedAt: demoContextItems.at(-1)?.updatedAt,
+  };
+}
+
+export async function getContextDraft(root: string): Promise<ContextDraft> {
+  if (!nativeRuntime) return demoContextDraft();
+  return rpc<ContextDraft>("context.get", { root });
+}
+
+export async function addPaperToContext(root: string, paperId: string, mode: Extract<ContextLoadMode, "full" | "structured"> = "full"): Promise<ContextDraft> {
+  if (!nativeRuntime) {
+    const paper = demoPapers.find((item) => item.id === paperId);
+    if (!paper) throw new Error("Unknown paper.");
+    const now = new Date().toISOString();
+    demoContextItems = [
+      ...demoContextItems.filter((item) => item.paperId !== paperId || item.sectionId || item.blockId),
+      {
+        id: `demo-context-${paperId}`,
+        paperId,
+        paperTitle: paper.title,
+        mode,
+        sourceHash: paper.id,
+        sourcePreview: demoMarkdown.slice(0, 240),
+        estimatedTokens: Math.ceil(new TextEncoder().encode(demoMarkdown).length / 4),
+        createdAt: now,
+        updatedAt: now,
+      },
+    ];
+    return demoContextDraft();
+  }
+  return rpc<ContextDraft>("context.add_paper", { root, paperId, mode });
+}
+
+export async function addSelectionToContext(root: string, input: { paperId: string; sectionId: string; blockId?: string; sourceText: string }): Promise<ContextDraft> {
+  if (!nativeRuntime) {
+    const paper = demoPapers.find((item) => item.id === input.paperId);
+    if (!paper) throw new Error("Unknown paper.");
+    const now = new Date().toISOString();
+    const itemId = `${input.paperId}:${input.sectionId}:${input.blockId ?? ""}`;
+    demoContextItems = [
+      ...demoContextItems.filter((item) => item.id !== itemId),
+      {
+        id: itemId,
+        paperId: input.paperId,
+        paperTitle: paper.title,
+        sectionId: input.sectionId,
+        blockId: input.blockId,
+        mode: "sections",
+        sourceHash: paper.id,
+        sourcePreview: input.sourceText.slice(0, 240),
+        estimatedTokens: Math.ceil(new TextEncoder().encode(input.sourceText).length / 4),
+        createdAt: now,
+        updatedAt: now,
+      },
+    ];
+    return demoContextDraft();
+  }
+  return rpc<ContextDraft>("context.add_selection", { root, ...input });
+}
+
+export async function removePaperFromContext(root: string, paperId: string): Promise<ContextDraft> {
+  if (!nativeRuntime) {
+    demoContextItems = demoContextItems.filter((item) => item.paperId !== paperId);
+    return demoContextDraft();
+  }
+  return rpc<ContextDraft>("context.remove_paper", { root, paperId });
+}
+
+export async function clearContext(root: string): Promise<ContextDraft> {
+  if (!nativeRuntime) {
+    demoContextItems = [];
+    return demoContextDraft();
+  }
+  return rpc<ContextDraft>("context.clear", { root });
 }
 
 export interface ModelStreamHandle {

@@ -1013,6 +1013,148 @@ class Library:
         return self._translation_contract(record)
 
     @staticmethod
+    def _estimate_context_tokens(text: str) -> int:
+        return max(1, (len(text.encode("utf-8")) + 3) // 4)
+
+    def get_context_draft(self) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                "SELECT ci.*, p.title FROM context_items ci "
+                "JOIN papers p ON p.id = ci.paper_id ORDER BY ci.created_at, ci.id"
+            ).fetchall()
+        items = [
+            {
+                "id": row["id"],
+                "paperId": row["paper_id"],
+                "paperTitle": row["title"],
+                "sectionId": row["section_id"] or None,
+                "blockId": row["block_id"] or None,
+                "mode": row["mode"],
+                "sourceHash": row["source_hash"],
+                "sourcePreview": row["source_text"][:240],
+                "estimatedTokens": row["estimated_tokens"],
+                "createdAt": row["created_at"],
+                "updatedAt": row["updated_at"],
+            }
+            for row in rows
+        ]
+        paper_tokens = sum(item["estimatedTokens"] for item in items)
+        return {
+            "items": items,
+            "tokenBreakdown": {
+                "systemPrompt": 4200,
+                "tools": 7800,
+                "conversation": 0,
+                "papers": paper_tokens,
+                "figures": 0,
+                "outputReserve": 16000,
+                "safetyBuffer": 8000,
+            },
+            "updatedAt": max((item["updatedAt"] for item in items), default=None),
+        }
+
+    def add_paper_to_context(self, paper_id: str, mode: str = "full") -> dict[str, Any]:
+        self.initialize()
+        if mode not in {"full", "structured"}:
+            raise ValueError("Context mode must be full or structured")
+        with self.db.connect() as connection:
+            paper = connection.execute(
+                "SELECT title, canonical_sha256, document_path FROM papers WHERE id = ?",
+                (paper_id,),
+            ).fetchone()
+        if not paper:
+            raise KeyError(f"Unknown paper: {paper_id}")
+        if not paper["document_path"]:
+            raise FileNotFoundError(f"No structured document exists for paper {paper_id}")
+        document = json.loads(Path(paper["document_path"]).read_text(encoding="utf-8"))
+        sections = sorted(document.get("sections", []), key=lambda item: item.get("order", 0))
+        source_text = "\n\n".join(
+            str(section.get("markdown", "")).strip() for section in sections
+            if str(section.get("markdown", "")).strip()
+        )
+        return self._upsert_context_item(
+            paper_id=paper_id,
+            section_id="",
+            block_id="",
+            source_text=source_text,
+            mode=mode,
+            source_hash=paper["canonical_sha256"],
+        )
+
+    def add_selection_to_context(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        paper_id = str(payload.get("paperId", "")).strip()
+        section_id = str(payload.get("sectionId", "")).strip()
+        block_id = str(payload.get("blockId", "")).strip()
+        source_text = str(payload.get("sourceText", "")).strip()
+        if not paper_id or not section_id or not source_text:
+            raise ValueError("paperId, sectionId and sourceText are required")
+        with self.db.connect() as connection:
+            paper = connection.execute(
+                "SELECT canonical_sha256 FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone()
+        if not paper:
+            raise KeyError(f"Unknown paper: {paper_id}")
+        return self._upsert_context_item(
+            paper_id=paper_id,
+            section_id=section_id,
+            block_id=block_id,
+            source_text=source_text,
+            mode="sections",
+            source_hash=paper["canonical_sha256"],
+        )
+
+    def _upsert_context_item(
+        self,
+        *,
+        paper_id: str,
+        section_id: str,
+        block_id: str,
+        source_text: str,
+        mode: str,
+        source_hash: str,
+    ) -> dict[str, Any]:
+        if not source_text:
+            raise ValueError("Context source text is empty")
+        now = utc_now()
+        item_id = str(uuid.uuid4())
+        estimated_tokens = self._estimate_context_tokens(source_text)
+        with self.db.connect() as connection:
+            existing = connection.execute(
+                "SELECT id, created_at FROM context_items "
+                "WHERE paper_id = ? AND section_id = ? AND block_id = ?",
+                (paper_id, section_id, block_id),
+            ).fetchone()
+            if existing:
+                item_id = existing["id"]
+                created_at = existing["created_at"]
+            else:
+                created_at = now
+            connection.execute(
+                "INSERT INTO context_items(id, paper_id, section_id, block_id, mode, source_hash, "
+                "source_text, estimated_tokens, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(paper_id, section_id, block_id) DO UPDATE SET mode = excluded.mode, "
+                "source_hash = excluded.source_hash, source_text = excluded.source_text, "
+                "estimated_tokens = excluded.estimated_tokens, updated_at = excluded.updated_at",
+                (item_id, paper_id, section_id, block_id, mode, source_hash, source_text,
+                 estimated_tokens, created_at, now),
+            )
+        return self.get_context_draft()
+
+    def remove_paper_from_context(self, paper_id: str) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            connection.execute("DELETE FROM context_items WHERE paper_id = ?", (paper_id,))
+        return self.get_context_draft()
+
+    def clear_context(self) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            connection.execute("DELETE FROM context_items")
+        return self.get_context_draft()
+
+    @staticmethod
     def _translation_contract(record: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": record["id"],

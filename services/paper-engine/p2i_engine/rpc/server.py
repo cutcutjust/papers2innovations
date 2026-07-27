@@ -125,6 +125,18 @@ class RpcServer:
             return self.library(params["root"]).list_translations(params["paperId"])
         if method == "translation.save":
             return self.library(params["root"]).save_translation(params)
+        if method == "context.get":
+            return self.library(params["root"]).get_context_draft()
+        if method == "context.add_paper":
+            return self.library(params["root"]).add_paper_to_context(
+                params["paperId"], params.get("mode", "full")
+            )
+        if method == "context.add_selection":
+            return self.library(params["root"]).add_selection_to_context(params)
+        if method == "context.remove_paper":
+            return self.library(params["root"]).remove_paper_from_context(params["paperId"])
+        if method == "context.clear":
+            return self.library(params["root"]).clear_context()
         if method == "zotero.inspect":
             from ..zotero import ZoteroImporter
 

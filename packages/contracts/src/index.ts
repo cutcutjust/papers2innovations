@@ -259,6 +259,36 @@ export interface AgentProfile {
 
 export type ContextLoadMode = "full" | "structured" | "retrieval" | "sections";
 
+export interface ContextDraftItem {
+  id: string;
+  paperId: string;
+  paperTitle: string;
+  sectionId?: string;
+  blockId?: string;
+  mode: ContextLoadMode;
+  sourceHash: string;
+  sourcePreview: string;
+  estimatedTokens: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ContextTokenBreakdown {
+  systemPrompt: number;
+  tools: number;
+  conversation: number;
+  papers: number;
+  figures: number;
+  outputReserve: number;
+  safetyBuffer: number;
+}
+
+export interface ContextDraft {
+  items: ContextDraftItem[];
+  tokenBreakdown: ContextTokenBreakdown;
+  updatedAt?: string;
+}
+
 export interface ContextSnapshot {
   id: string;
   agentProfileId: string;
@@ -271,15 +301,7 @@ export interface ContextSnapshot {
     figureIds: string[];
     estimatedTokens: number;
   }>;
-  tokenBreakdown: {
-    systemPrompt: number;
-    tools: number;
-    conversation: number;
-    papers: number;
-    figures: number;
-    outputReserve: number;
-    safetyBuffer: number;
-  };
+  tokenBreakdown: ContextTokenBreakdown;
   promptVersion: string;
   toolVersions: Record<string, string>;
   retrievalQueries: string[];

@@ -36,7 +36,7 @@ def test_initializes_versioned_library_layout(tmp_path: Path) -> None:
 
     with sqlite3.connect(result["database"]) as connection:
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-    assert version == 3
+    assert version == 4
 
 
 def test_reader_translation_is_revisioned_and_persisted(tmp_path: Path) -> None:
@@ -69,6 +69,34 @@ def test_reader_translation_is_revisioned_and_persisted(tmp_path: Path) -> None:
     assert len(restored) == 1
     assert restored[0]["translatedText"] == "修订后的译文。"
     assert restored[0]["sourceHash"]
+
+
+def test_context_draft_is_shared_persistent_and_deduplicated(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    make_pdf(library.papers_dir / "context.pdf")
+    library.scan()
+    paper = library.list_papers()[0]
+
+    first = library.add_selection_to_context({
+        "paperId": paper["id"],
+        "sectionId": "page-1",
+        "blockId": "page-1:block-1",
+        "sourceText": "Grounded context paragraph.",
+    })
+    second = library.add_selection_to_context({
+        "paperId": paper["id"],
+        "sectionId": "page-1",
+        "blockId": "page-1:block-1",
+        "sourceText": "Updated grounded context paragraph.",
+    })
+
+    assert len(first["items"]) == 1
+    assert len(second["items"]) == 1
+    assert second["tokenBreakdown"]["papers"] > 0
+    restored = Library(tmp_path).get_context_draft()
+    assert restored["items"][0]["sourcePreview"].startswith("Updated grounded")
+    assert library.remove_paper_from_context(paper["id"])["items"] == []
 
 
 def test_scan_parses_and_persists_generated_artifacts(tmp_path: Path) -> None:
