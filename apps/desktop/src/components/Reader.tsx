@@ -8,11 +8,12 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { assetUrl, listTranslations, readDocument, readMarkdown, saveTranslation, startModelStream, type ModelStreamHandle } from "../lib/bridge";
 import { hydrateProviderCredentials } from "../lib/credentials";
+import { buildReaderBlocks, type ReaderDocumentBlock } from "../lib/documentBlocks";
 import { useWorkspace } from "../store";
 
 type ReaderMode = "integrated" | "pdf" | "figures";
 type Analysis = "formula" | "theorem" | null;
-type ReaderBlock = { id: string; sectionId: string; text: string; page?: number };
+type ReaderBlock = ReaderDocumentBlock;
 type ReaderSection = { id: string; title: string; blocks: ReaderBlock[] };
 type SelectionSource = ReaderBlock & { start: number; end: number };
 type TranslationState = {
@@ -24,14 +25,6 @@ type TranslationState = {
 
 const TRANSLATION_PROMPT_VERSION = "reader-translate-v1";
 
-function sectionBlocks(sectionId: string, markdown: string, page?: number): ReaderBlock[] {
-  return markdown
-    .split(/\n{2,}/)
-    .map((text) => text.trim())
-    .filter((text) => text && !/^#{1,6}\s/.test(text))
-    .map((text, index) => ({ id: `${sectionId}:block-${index + 1}`, sectionId, text, page }));
-}
-
 function documentSections(document: PaperDocument | undefined, markdown: string): ReaderSection[] {
   if (document?.sections.length) {
     return [...document.sections]
@@ -39,10 +32,10 @@ function documentSections(document: PaperDocument | undefined, markdown: string)
       .map((section) => ({
         id: section.id,
         title: section.title,
-        blocks: sectionBlocks(section.id, section.markdown, section.anchors[0]?.page ?? section.page_start),
+        blocks: buildReaderBlocks(section.id, section.markdown, section.anchors[0]?.page ?? section.page_start),
       }));
   }
-  const blocks = sectionBlocks("paper", markdown);
+  const blocks = buildReaderBlocks("paper", markdown);
   return [{ id: "paper", title: "Paper", blocks }];
 }
 
