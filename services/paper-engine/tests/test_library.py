@@ -460,7 +460,8 @@ def test_scan_parses_and_persists_generated_artifacts(tmp_path: Path) -> None:
     assert document["schema_version"] == "1.0"
     assert document["partial"] is True
     assert document["warnings"] == ["Docling disabled; pypdf fallback was used"]
-    assert len(document["sections"]) == 2
+    assert len(document["sections"]) == 1
+    assert document["sections"][0]["title"] == "Document"
     with library.db.connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM page_maps").fetchone()[0] == 2
 

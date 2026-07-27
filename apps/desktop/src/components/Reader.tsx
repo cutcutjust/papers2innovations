@@ -1,4 +1,4 @@
-import type { ContextSnapshot, LibraryPaper, ModelStreamEvent, PaperDocument, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, TranslationRecord } from "@p2i/contracts";
+import type { ContextSnapshot, LibraryPaper, ModelStreamEvent, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, TranslationRecord } from "@p2i/contracts";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { BookOpen, Bot, Check, ChevronLeft, FileImage, FileText, Languages, Layers3, LoaderCircle, MessageSquareText, RefreshCw, Search, Send, Sparkles, Square, Trash2, TriangleAlert } from "lucide-react";
@@ -8,12 +8,12 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { addPaperToContext, addSelectionToContext, assetUrl, clearReaderConversation, getContextCompression, getContextDraft, getReaderConversation, listReaderAnalyses, listTranslations, nativeRuntime, readContextItem, readDocument, readMarkdown, removePaperFromContext, saveReaderAnalysis, saveReaderChatTurn, saveTranslation, startModelStream, type ModelStreamHandle } from "../lib/bridge";
 import { hydrateProviderCredentials } from "../lib/credentials";
-import { buildReaderBlocks, type ReaderDocumentBlock } from "../lib/documentBlocks";
+import { buildReaderSections, type ReaderDisplaySection, type ReaderDocumentBlock } from "../lib/documentBlocks";
 import { useWorkspace } from "../store";
 
 type ReaderMode = "integrated" | "pdf" | "figures";
 type ReaderBlock = ReaderDocumentBlock;
-type ReaderSection = { id: string; title: string; blocks: ReaderBlock[] };
+type ReaderSection = ReaderDisplaySection;
 type SelectionSource = ReaderBlock & { start: number; end: number };
 type TranslationState = {
   status: "streaming" | "unsaved" | "saved" | "cancelled" | "error";
@@ -35,20 +35,6 @@ const ANALYSIS_PROMPT_VERSION = "reader-analysis-v1";
 const CHAT_PROMPT_VERSION = "reader-chat-v1";
 const analysisKey = (blockId: string, type: ReaderAnalysisType) => `${blockId}:${type}`;
 
-function documentSections(document: PaperDocument | undefined, markdown: string): ReaderSection[] {
-  if (document?.sections.length) {
-    return [...document.sections]
-      .sort((left, right) => left.order - right.order)
-      .map((section) => ({
-        id: section.id,
-        title: section.title,
-        blocks: buildReaderBlocks(section.id, section.markdown, section.anchors[0]?.page ?? section.page_start),
-      }));
-  }
-  const blocks = buildReaderBlocks("paper", markdown);
-  return [{ id: "paper", title: "Paper", blocks }];
-}
-
 function MarkdownBlock({ value }: { value: string }) {
   return <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{value}</ReactMarkdown>;
 }
@@ -62,6 +48,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const [analysisStates, setAnalysisStates] = useState<Record<string, AnalysisState>>({});
   const [activeAnalysis, setActiveAnalysis] = useState<{ blockId: string; type: ReaderAnalysisType } | null>(null);
   const [activeBlock, setActiveBlock] = useState("");
+  const [activeSection, setActiveSection] = useState("");
   const [contextBusy, setContextBusy] = useState("");
   const [agentModel, setAgentModel] = useState(customModels[0]?.id ?? "");
   const [chatInput, setChatInput] = useState("");
@@ -72,6 +59,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const [agentOpen, setAgentOpen] = useState(false);
   const streamHandles = useRef(new Map<string, ModelStreamHandle>());
   const chatHandle = useRef<ModelStreamHandle | null>(null);
+  const readerCanvas = useRef<HTMLElement | null>(null);
   const readable = Boolean(paper?.id && paper && ["READY", "PARTIAL"].includes(paper.status));
   const markdownQuery = useQuery({
     queryKey: ["paper-markdown", root, paper?.id],
@@ -113,7 +101,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     retry: false,
   });
   const sections = useMemo(
-    () => documentSections(documentQuery.data, markdownQuery.data ?? ""),
+    () => buildReaderSections(documentQuery.data, markdownQuery.data ?? ""),
     [documentQuery.data, markdownQuery.data],
   );
   const persistedTranslations = useMemo(
@@ -145,6 +133,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     setAnalysisStates({});
     setSelection(null);
     setActiveBlock("");
+    setActiveSection("");
     setActiveAnalysis(null);
     setChatInput("");
     setChatLive("");
@@ -160,6 +149,21 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       chatHandle.current = null;
     }
   }, [paper?.id]);
+
+  useEffect(() => {
+    if (mode !== "integrated" || !sections.length) return;
+    setActiveSection((current) => current || sections[0].id);
+    const root = readerCanvas.current;
+    if (!root || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver((entries) => {
+      const visible = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((left, right) => left.boundingClientRect.top - right.boundingClientRect.top);
+      if (visible[0]) setActiveSection(visible[0].target.getAttribute("data-section-id") ?? "");
+    }, { root, rootMargin: "-10% 0px -72% 0px", threshold: [0, 0.05] });
+    root.querySelectorAll<HTMLElement>("[data-section-id]").forEach((element) => observer.observe(element));
+    return () => observer.disconnect();
+  }, [mode, sections]);
 
   useEffect(() => () => {
     for (const handle of streamHandles.current.values()) {
@@ -569,13 +573,13 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       <button><Search size={13} /> Find</button><button className={fullText ? "active" : ""} disabled={contextBusy === "paper"} onClick={() => void togglePaperContext()}><Layers3 size={13} /> {fullText ? `Paper Context · ${contextPercent}%` : "Load Full Text"}</button><button className="reader-agent-toggle" onClick={() => setAgentOpen(true)}><Bot size={13} /> Ask AI</button>
     </div>
     <div className="reader-main">
-      <aside className="reader-outline"><span>Outline</span>{sections.map((section, index) => <button key={section.id} className={index === 0 ? "active" : ""}>{section.title}<small>{section.blocks.length}</small></button>)}</aside>
-      <main className="reader-canvas">
+      <aside className="reader-outline"><span>Sections</span>{sections.map((section, index) => <button key={section.id} className={activeSection === section.id ? "active" : ""} style={{ paddingLeft: `${10 + Math.max(0, section.level - 1) * 12}px` }} onClick={() => { setActiveSection(section.id); document.getElementById(`reader-section-${section.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" }); }}><b>{String(index + 1).padStart(2, "0")}</b><span>{section.title}</span><small>{section.pageStart ? section.pageStart === section.pageEnd ? `p. ${section.pageStart}` : `pp. ${section.pageStart}-${section.pageEnd}` : `${section.blocks.length}`}</small></button>)}</aside>
+      <main className="reader-canvas" ref={readerCanvas}>
         {mode === "integrated" && <article className="integrated-paper">
           <header className="paper-reading-header"><span className="tag tag-primary">STRUCTURED DOCUMENT</span><h1>{paper.title}</h1><p>Local document · {paper.pageCount || "—"} pages · Updated {new Date(paper.updatedAt).toLocaleDateString()}</p></header>
           {selection && <div className="selection-toolbar"><span className="tag tag-ai">Selected {selection.start}:{selection.end}</span><strong>“{selection.text.slice(0, 64)}”</strong><button onClick={() => void translate(selection)}><Languages size={12} /> Translate word</button><button onClick={() => void explain("theorem", selection)}><Sparkles size={12} /> Explain</button><button onClick={() => setSelection(null)}>Close</button></div>}
-          {markdownQuery.isLoading || documentQuery.isLoading ? <div className="document-loading">Loading structured document…</div> : sections.map((section, sectionIndex) => <section className={`reading-section ${sectionIndex === 0 ? "active" : ""}`} key={section.id}>
-            <header><div><h2>{section.title}</h2><span>{section.blocks.length} paragraphs · structured source</span></div><button disabled={contextBusy === section.id} onClick={() => void addContext(section.id, undefined, section.blocks.map((block) => block.text).join("\n\n"))}><Layers3 size={12} /> {contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.sectionId === section.id && !item.blockId) ? "Added" : "Add Section"}</button></header>
+          {markdownQuery.isLoading || documentQuery.isLoading ? <div className="document-loading">Loading structured document…</div> : sections.map((section, sectionIndex) => <section id={`reader-section-${section.id}`} data-section-id={section.id} className={`reading-section ${activeSection === section.id ? "active" : ""}`} key={section.id}>
+            <header><div className="section-heading"><span className="section-kicker">Section {String(sectionIndex + 1).padStart(2, "0")}</span><h2>{section.title}</h2><span>{section.blocks.length} paragraphs{section.pageStart ? ` · ${section.pageStart === section.pageEnd ? `page ${section.pageStart}` : `pages ${section.pageStart}-${section.pageEnd}`}` : ""}</span></div><button disabled={contextBusy === section.id} onClick={() => void addContext(section.id, undefined, section.blocks.map((block) => block.text).join("\n\n"))}><Layers3 size={12} /> {contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.sectionId === section.id && !item.blockId) ? "Added" : "Add Section"}</button></header>
             <div className="paragraph-stack">{section.blocks.map((block, blockIndex) => {
               const state = translations[block.id] ?? persistedTranslations[block.id];
               const hasFormula = /\$|\\\[|\\begin\{equation/.test(block.text);
