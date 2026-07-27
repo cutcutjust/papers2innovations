@@ -4,6 +4,17 @@
 工作目录：`E:\Project_papers2innovations`
 目标平台：Windows 桌面应用（Tauri 2），Web/Vite 仅用于前端快速预览。
 
+## 0. 最新状态（2026-07-27，以本节为准）
+
+- 公开仓库：`cutcutjust/papers2innovations`；开发分支：`codex/native-import-release`；Draft PR：`#1`。
+- P0 已完成：OpenAI-compatible / Anthropic Provider、Stronghold 凭证、Rust 安全流式网关、取消、超时、usage 和错误脱敏。
+- Reader 已读取真实 `document.json`；段落翻译支持流式、取消、重试、revisioned SQLite 保存和重启恢复。
+- `0004_context_draft.sql` 已实现 Reader / Context / Agents / Innovate 共用的持久化 Context draft。
+- `0005_context_compressions.sql` 已实现 AI Context 压缩、精确 active revision、模型与 Prompt 版本缓存、source hash 失效保护、token/耗时 usage，以及原文/压缩模式切换。
+- 当前验证：Python `29 passed`、Vitest `10 passed`、TypeScript、Vite production build、Rust fmt/check/clippy 和 `7 passed`；Playwright 覆盖 1440×900、1100×760、720×600，控制台 0 error。
+- 本机安装目录：`E:\Project_papers2innovations\install`；真实论文库：`E:\Papers2Innovations-Library`。
+- 下一优先级：P2 真实两层 Citation Graph，然后是 Agent Runtime 与 Innovate Pipeline。下文中与本节冲突的“尚未实现”描述属于旧状态。
+
 ## 给下一位 AI 的启动提示词
 
 ```text

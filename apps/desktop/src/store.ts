@@ -29,6 +29,7 @@ interface WorkspaceState {
   pdfPage: number;
   providers: ProviderConfig[];
   customModels: ModelConfig[];
+  contextCompressionModelId: string;
   setRoot: (root: string) => void;
   selectPaper: (paperId: string) => void;
   openReader: (paperId?: string) => void;
@@ -39,6 +40,7 @@ interface WorkspaceState {
   openPdfAt: (page: number) => void;
   addCustomModel: (provider: ProviderConfig, model: ModelConfig) => void;
   removeCustomModel: (modelId: string) => void;
+  setContextCompressionModelId: (modelId: string) => void;
 }
 
 const savedRoot = localStorage.getItem("p2i.libraryRoot") ?? "";
@@ -95,6 +97,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   pdfPage: 1,
   providers: initialRegistry.providers,
   customModels: initialRegistry.models,
+  contextCompressionModelId: localStorage.getItem("p2i.contextCompressionModelId") ?? initialRegistry.models[0]?.id ?? "",
   setRoot: (root) => {
     localStorage.setItem("p2i.libraryRoot", root);
     set({ root });
@@ -120,4 +123,8 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
     persistModelRegistry(providers, customModels);
     return { providers, customModels };
   }),
+  setContextCompressionModelId: (contextCompressionModelId) => {
+    localStorage.setItem("p2i.contextCompressionModelId", contextCompressionModelId);
+    set({ contextCompressionModelId });
+  },
 }));

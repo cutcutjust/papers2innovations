@@ -257,7 +257,36 @@ export interface AgentProfile {
   promptVersion: string;
 }
 
-export type ContextLoadMode = "full" | "structured" | "retrieval" | "sections";
+export type ContextLoadMode = "full" | "structured" | "compressed" | "retrieval" | "sections";
+
+export interface ContextCompressionSummary {
+  id: string;
+  modelId: string;
+  promptVersion: string;
+  revision: number;
+  estimatedTokens: number;
+  usage: { inputTokens: number; outputTokens: number; durationMs: number };
+  preview: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ContextCompressionRecord extends ContextCompressionSummary {
+  itemId: string;
+  sourceHash: string;
+  compressedText: string;
+}
+
+export interface ContextSourceItem {
+  id: string;
+  paperId: string;
+  paperTitle: string;
+  sectionId?: string;
+  blockId?: string;
+  sourceHash: string;
+  sourceText: string;
+  estimatedTokens: number;
+}
 
 export interface ContextDraftItem {
   id: string;
@@ -269,6 +298,7 @@ export interface ContextDraftItem {
   sourceHash: string;
   sourcePreview: string;
   estimatedTokens: number;
+  compression?: ContextCompressionSummary;
   createdAt: string;
   updatedAt: string;
 }

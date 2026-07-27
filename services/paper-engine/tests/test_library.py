@@ -36,7 +36,7 @@ def test_initializes_versioned_library_layout(tmp_path: Path) -> None:
 
     with sqlite3.connect(result["database"]) as connection:
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-    assert version == 4
+    assert version == 5
 
 
 def test_reader_translation_is_revisioned_and_persisted(tmp_path: Path) -> None:
@@ -97,6 +97,63 @@ def test_context_draft_is_shared_persistent_and_deduplicated(tmp_path: Path) -> 
     restored = Library(tmp_path).get_context_draft()
     assert restored["items"][0]["sourcePreview"].startswith("Updated grounded")
     assert library.remove_paper_from_context(paper["id"])["items"] == []
+
+
+def test_context_compression_is_cached_revisioned_and_source_bound(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    make_pdf(library.papers_dir / "context-compression.pdf")
+    library.scan()
+    paper = library.list_papers()[0]
+    draft = library.add_selection_to_context({
+        "paperId": paper["id"],
+        "sectionId": "page-1",
+        "blockId": "page-1:block-1",
+        "sourceText": "A long grounded source paragraph for compression.",
+    })
+    item = draft["items"][0]
+    payload = {
+        "itemId": item["id"],
+        "sourceHash": item["sourceHash"],
+        "compressedText": "Grounded compressed evidence.",
+        "modelId": "test-model",
+        "promptVersion": "context-compress-v1",
+        "inputTokens": 42,
+        "outputTokens": 9,
+        "durationMs": 1200,
+    }
+
+    first = library.save_context_compression(payload)
+    second = library.save_context_compression({
+        **payload, "compressedText": "Revised compressed evidence."
+    })
+
+    assert first["revision"] == 1
+    assert second["revision"] == 2
+    cached = Library(tmp_path).get_context_compression(
+        item["id"], "test-model", "context-compress-v1"
+    )
+    assert cached and cached["compressedText"] == "Revised compressed evidence."
+    restored = Library(tmp_path).get_context_draft()
+    assert restored["items"][0]["mode"] == "compressed"
+    assert restored["items"][0]["compression"]["revision"] == 2
+    assert restored["items"][0]["compression"]["usage"]["inputTokens"] == 42
+    assert restored["tokenBreakdown"]["papers"] == second["estimatedTokens"]
+
+    alternate = library.save_context_compression({
+        **payload,
+        "modelId": "alternate-model",
+        "compressedText": "Alternate model result.",
+    })
+    library.activate_context_compression(
+        item["id"], "test-model", "context-compress-v1"
+    )
+    active = library.get_context_draft()["items"][0]["compression"]
+    assert active["id"] == second["id"]
+    assert active["id"] != alternate["id"]
+
+    with pytest.raises(ValueError, match="source changed"):
+        library.save_context_compression({**payload, "sourceHash": "stale-hash"})
 
 
 def test_scan_parses_and_persists_generated_artifacts(tmp_path: Path) -> None:

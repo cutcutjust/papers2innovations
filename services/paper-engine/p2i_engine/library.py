@@ -1023,8 +1023,17 @@ class Library:
                 "SELECT ci.*, p.title FROM context_items ci "
                 "JOIN papers p ON p.id = ci.paper_id ORDER BY ci.created_at, ci.id"
             ).fetchall()
-        items = [
-            {
+            compression_rows = connection.execute(
+                "SELECT cc.* FROM context_compressions cc "
+                "JOIN context_items ci ON ci.active_compression_id = cc.id"
+            ).fetchall()
+        compressions = {
+            row["context_item_id"]: self._context_compression_summary(row)
+            for row in compression_rows
+        }
+        items = []
+        for row in rows:
+            item = {
                 "id": row["id"],
                 "paperId": row["paper_id"],
                 "paperTitle": row["title"],
@@ -1037,8 +1046,10 @@ class Library:
                 "createdAt": row["created_at"],
                 "updatedAt": row["updated_at"],
             }
-            for row in rows
-        ]
+            compression = compressions.get(row["id"])
+            if compression and row["mode"] == "compressed":
+                item["compression"] = compression
+            items.append(item)
         paper_tokens = sum(item["estimatedTokens"] for item in items)
         return {
             "items": items,
@@ -1052,6 +1063,145 @@ class Library:
                 "safetyBuffer": 8000,
             },
             "updatedAt": max((item["updatedAt"] for item in items), default=None),
+        }
+
+    def read_context_item(self, item_id: str) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT ci.*, p.title FROM context_items ci "
+                "JOIN papers p ON p.id = ci.paper_id WHERE ci.id = ?",
+                (item_id,),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Unknown context item: {item_id}")
+        return {
+            "id": row["id"],
+            "paperId": row["paper_id"],
+            "paperTitle": row["title"],
+            "sectionId": row["section_id"] or None,
+            "blockId": row["block_id"] or None,
+            "sourceHash": row["source_hash"],
+            "sourceText": row["source_text"],
+            "estimatedTokens": self._estimate_context_tokens(row["source_text"]),
+        }
+
+    def get_context_compression(
+        self, item_id: str, model_id: str, prompt_version: str
+    ) -> dict[str, Any] | None:
+        self.initialize()
+        with self.db.connect() as connection:
+            item = connection.execute(
+                "SELECT source_hash FROM context_items WHERE id = ?", (item_id,)
+            ).fetchone()
+            if not item:
+                raise KeyError(f"Unknown context item: {item_id}")
+            row = connection.execute(
+                "SELECT * FROM context_compressions WHERE context_item_id = ? "
+                "AND source_hash = ? AND model_id = ? AND prompt_version = ? "
+                "ORDER BY revision DESC LIMIT 1",
+                (item_id, item["source_hash"], model_id, prompt_version),
+            ).fetchone()
+        return self._context_compression_contract(row) if row else None
+
+    def activate_context_compression(
+        self, item_id: str, model_id: str, prompt_version: str
+    ) -> dict[str, Any]:
+        compression = self.get_context_compression(item_id, model_id, prompt_version)
+        if not compression:
+            raise KeyError("No cached compression matches the current source and model")
+        with self.db.connect() as connection:
+            connection.execute(
+                "UPDATE context_items SET mode = 'compressed', estimated_tokens = ?, "
+                "active_compression_id = ?, updated_at = ? WHERE id = ?",
+                (compression["estimatedTokens"], compression["id"], utc_now(), item_id),
+            )
+        return self.get_context_draft()
+
+    def save_context_compression(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        required = ("itemId", "sourceHash", "compressedText", "modelId", "promptVersion")
+        missing = [key for key in required if not str(payload.get(key, "")).strip()]
+        if missing:
+            raise ValueError("Missing context compression fields: " + ", ".join(missing))
+        item_id = str(payload["itemId"])
+        source_hash = str(payload["sourceHash"])
+        compressed_text = str(payload["compressedText"]).strip()
+        model_id = str(payload["modelId"])
+        prompt_version = str(payload["promptVersion"])
+        input_tokens = max(0, int(payload.get("inputTokens", 0)))
+        output_tokens = max(0, int(payload.get("outputTokens", 0)))
+        duration_ms = max(0, int(payload.get("durationMs", 0)))
+        now = utc_now()
+        estimated_tokens = self._estimate_context_tokens(compressed_text)
+        with self.db.connect() as connection:
+            item = connection.execute(
+                "SELECT source_hash FROM context_items WHERE id = ?", (item_id,)
+            ).fetchone()
+            if not item:
+                raise KeyError(f"Unknown context item: {item_id}")
+            if item["source_hash"] != source_hash:
+                raise ValueError("Context source changed while compression was running")
+            revision = connection.execute(
+                "SELECT COALESCE(MAX(revision), 0) + 1 FROM context_compressions "
+                "WHERE context_item_id = ? AND source_hash = ? AND model_id = ? "
+                "AND prompt_version = ?",
+                (item_id, source_hash, model_id, prompt_version),
+            ).fetchone()[0]
+            record = {
+                "id": str(uuid.uuid4()),
+                "context_item_id": item_id,
+                "source_hash": source_hash,
+                "compressed_text": compressed_text,
+                "estimated_tokens": estimated_tokens,
+                "model_id": model_id,
+                "prompt_version": prompt_version,
+                "revision": revision,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "duration_ms": duration_ms,
+                "created_at": now,
+                "updated_at": now,
+            }
+            connection.execute(
+                "INSERT INTO context_compressions(id, context_item_id, source_hash, "
+                "compressed_text, estimated_tokens, model_id, prompt_version, revision, "
+                "input_tokens, output_tokens, duration_ms, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(record.values()),
+            )
+            connection.execute(
+                "UPDATE context_items SET mode = 'compressed', estimated_tokens = ?, "
+                "active_compression_id = ?, updated_at = ? WHERE id = ?",
+                (estimated_tokens, record["id"], now, item_id),
+            )
+        return self._context_compression_contract(record)
+
+    @staticmethod
+    def _context_compression_summary(record: Any) -> dict[str, Any]:
+        return {
+            "id": record["id"],
+            "modelId": record["model_id"],
+            "promptVersion": record["prompt_version"],
+            "revision": record["revision"],
+            "estimatedTokens": record["estimated_tokens"],
+            "usage": {
+                "inputTokens": record["input_tokens"],
+                "outputTokens": record["output_tokens"],
+                "durationMs": record["duration_ms"],
+            },
+            "preview": record["compressed_text"][:240],
+            "createdAt": record["created_at"],
+            "updatedAt": record["updated_at"],
+        }
+
+    @classmethod
+    def _context_compression_contract(cls, record: Any) -> dict[str, Any]:
+        return {
+            **cls._context_compression_summary(record),
+            "itemId": record["context_item_id"],
+            "sourceHash": record["source_hash"],
+            "compressedText": record["compressed_text"],
         }
 
     def add_paper_to_context(self, paper_id: str, mode: str = "full") -> dict[str, Any]:
@@ -1136,7 +1286,8 @@ class Library:
                 "source_text, estimated_tokens, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(paper_id, section_id, block_id) DO UPDATE SET mode = excluded.mode, "
                 "source_hash = excluded.source_hash, source_text = excluded.source_text, "
-                "estimated_tokens = excluded.estimated_tokens, updated_at = excluded.updated_at",
+                "estimated_tokens = excluded.estimated_tokens, active_compression_id = NULL, "
+                "updated_at = excluded.updated_at",
                 (item_id, paper_id, section_id, block_id, mode, source_hash, source_text,
                  estimated_tokens, created_at, now),
             )

@@ -1,4 +1,4 @@
-import type { ContextDraft, ContextDraftItem, ContextLoadMode, JobStage, LibraryPaper, ModelStreamEvent, ModelStreamRequest, PaperDocument, ProgressNotification, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
+import type { ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSourceItem, JobStage, LibraryPaper, ModelStreamEvent, ModelStreamRequest, PaperDocument, ProgressNotification, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { demoMarkdown, demoPapers } from "../demo";
@@ -72,6 +72,8 @@ export async function saveTranslation(root: string, input: Omit<TranslationRecor
 }
 
 let demoContextItems: ContextDraftItem[] = [];
+const demoContextCompressions = new Map<string, ContextCompressionRecord>();
+const demoCompressionKey = (itemId: string, modelId: string, promptVersion: string) => `${itemId}:${modelId}:${promptVersion}`;
 
 function demoContextDraft(): ContextDraft {
   return {
@@ -143,6 +145,74 @@ export async function addSelectionToContext(root: string, input: { paperId: stri
     return demoContextDraft();
   }
   return rpc<ContextDraft>("context.add_selection", { root, ...input });
+}
+
+export async function readContextItem(root: string, itemId: string): Promise<ContextSourceItem> {
+  if (!nativeRuntime) {
+    const item = demoContextItems.find((candidate) => candidate.id === itemId);
+    if (!item) throw new Error("Unknown context item.");
+    return {
+      id: item.id,
+      paperId: item.paperId,
+      paperTitle: item.paperTitle,
+      sectionId: item.sectionId,
+      blockId: item.blockId,
+      sourceHash: item.sourceHash,
+      sourceText: item.sourcePreview,
+      estimatedTokens: item.estimatedTokens,
+    };
+  }
+  return rpc<ContextSourceItem>("context.read_item", { root, itemId });
+}
+
+export async function getContextCompression(root: string, itemId: string, modelId: string, promptVersion: string): Promise<ContextCompressionRecord | null> {
+  if (!nativeRuntime) return demoContextCompressions.get(demoCompressionKey(itemId, modelId, promptVersion)) ?? null;
+  return rpc<ContextCompressionRecord | null>("context.get_compression", { root, itemId, modelId, promptVersion });
+}
+
+export async function activateContextCompression(root: string, itemId: string, modelId: string, promptVersion: string): Promise<ContextDraft> {
+  if (!nativeRuntime) {
+    const record = demoContextCompressions.get(demoCompressionKey(itemId, modelId, promptVersion));
+    if (!record) throw new Error("No cached compression matches the current source and model.");
+    demoContextItems = demoContextItems.map((item) => item.id === itemId ? {
+      ...item,
+      mode: "compressed",
+      estimatedTokens: record.estimatedTokens,
+      compression: record,
+    } : item);
+    return demoContextDraft();
+  }
+  return rpc<ContextDraft>("context.activate_compression", { root, itemId, modelId, promptVersion });
+}
+
+export async function saveContextCompression(root: string, input: { itemId: string; sourceHash: string; compressedText: string; modelId: string; promptVersion: string; inputTokens?: number; outputTokens?: number; durationMs?: number }): Promise<ContextCompressionRecord> {
+  if (!nativeRuntime) {
+    const now = new Date().toISOString();
+    const record: ContextCompressionRecord = {
+      id: crypto.randomUUID(),
+      ...input,
+      revision: 1,
+      estimatedTokens: Math.ceil(new TextEncoder().encode(input.compressedText).length / 4),
+      usage: {
+        inputTokens: input.inputTokens ?? 0,
+        outputTokens: input.outputTokens ?? 0,
+        durationMs: input.durationMs ?? 0,
+      },
+      preview: input.compressedText.slice(0, 240),
+      createdAt: now,
+      updatedAt: now,
+    };
+    demoContextCompressions.set(demoCompressionKey(input.itemId, input.modelId, input.promptVersion), record);
+    demoContextItems = demoContextItems.map((item) => item.id === input.itemId ? {
+      ...item,
+      mode: "compressed",
+      estimatedTokens: record.estimatedTokens,
+      compression: record,
+      updatedAt: now,
+    } : item);
+    return record;
+  }
+  return rpc<ContextCompressionRecord>("context.save_compression", { root, ...input });
 }
 
 export async function removePaperFromContext(root: string, paperId: string): Promise<ContextDraft> {

@@ -133,6 +133,18 @@ class RpcServer:
             )
         if method == "context.add_selection":
             return self.library(params["root"]).add_selection_to_context(params)
+        if method == "context.read_item":
+            return self.library(params["root"]).read_context_item(params["itemId"])
+        if method == "context.get_compression":
+            return self.library(params["root"]).get_context_compression(
+                params["itemId"], params["modelId"], params["promptVersion"]
+            )
+        if method == "context.activate_compression":
+            return self.library(params["root"]).activate_context_compression(
+                params["itemId"], params["modelId"], params["promptVersion"]
+            )
+        if method == "context.save_compression":
+            return self.library(params["root"]).save_context_compression(params)
         if method == "context.remove_paper":
             return self.library(params["root"]).remove_paper_from_context(params["paperId"])
         if method == "context.clear":
