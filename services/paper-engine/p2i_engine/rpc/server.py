@@ -119,6 +119,12 @@ class RpcServer:
             return {
                 "markdown": self.library(params["root"]).read_markdown(params["paperId"])
             }
+        if method == "paper.read_document":
+            return self.library(params["root"]).read_document(params["paperId"])
+        if method == "translation.list":
+            return self.library(params["root"]).list_translations(params["paperId"])
+        if method == "translation.save":
+            return self.library(params["root"]).save_translation(params)
         if method == "zotero.inspect":
             from ..zotero import ZoteroImporter
 

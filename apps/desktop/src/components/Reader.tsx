@@ -1,30 +1,49 @@
-import type { LibraryPaper } from "@p2i/contracts";
-import { useMemo, useState } from "react";
+import type { LibraryPaper, ModelStreamEvent, PaperDocument, TranslationRecord } from "@p2i/contracts";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { BookOpen, Bot, Check, ChevronLeft, FileImage, FileText, Languages, Layers3, MessageSquareText, RefreshCw, Search, Send, Sigma, Sparkles } from "lucide-react";
+import { BookOpen, Bot, Check, ChevronLeft, FileImage, FileText, Languages, Layers3, LoaderCircle, MessageSquareText, RefreshCw, Search, Send, Sigma, Sparkles, Square, TriangleAlert } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import { assetUrl, readMarkdown } from "../lib/bridge";
+import { assetUrl, listTranslations, readDocument, readMarkdown, saveTranslation, startModelStream, type ModelStreamHandle } from "../lib/bridge";
+import { hydrateProviderCredentials } from "../lib/credentials";
 import { useWorkspace } from "../store";
 
 type ReaderMode = "integrated" | "pdf" | "figures";
-type Analysis = "translation" | "formula" | "theorem" | null;
-type Section = { title: string; blocks: string[] };
+type Analysis = "formula" | "theorem" | null;
+type ReaderBlock = { id: string; sectionId: string; text: string; page?: number };
+type ReaderSection = { id: string; title: string; blocks: ReaderBlock[] };
+type SelectionSource = ReaderBlock & { start: number; end: number };
+type TranslationState = {
+  status: "streaming" | "unsaved" | "saved" | "cancelled" | "error";
+  text: string;
+  error?: string;
+  record?: TranslationRecord;
+};
 
-function parseSections(markdown: string): Section[] {
-  const sections: Section[] = [];
-  let current: Section = { title: "Paper", blocks: [] };
-  for (const chunk of markdown.split(/\n(?=#{1,3}\s)|\n{2,}/).map((item) => item.trim()).filter(Boolean)) {
-    const heading = chunk.match(/^#{1,3}\s+(.+)$/);
-    if (heading) {
-      if (current.blocks.length) sections.push(current);
-      current = { title: heading[1], blocks: [] };
-    } else current.blocks.push(chunk);
+const TRANSLATION_PROMPT_VERSION = "reader-translate-v1";
+
+function sectionBlocks(sectionId: string, markdown: string, page?: number): ReaderBlock[] {
+  return markdown
+    .split(/\n{2,}/)
+    .map((text) => text.trim())
+    .filter((text) => text && !/^#{1,6}\s/.test(text))
+    .map((text, index) => ({ id: `${sectionId}:block-${index + 1}`, sectionId, text, page }));
+}
+
+function documentSections(document: PaperDocument | undefined, markdown: string): ReaderSection[] {
+  if (document?.sections.length) {
+    return [...document.sections]
+      .sort((left, right) => left.order - right.order)
+      .map((section) => ({
+        id: section.id,
+        title: section.title,
+        blocks: sectionBlocks(section.id, section.markdown, section.anchors[0]?.page ?? section.page_start),
+      }));
   }
-  if (current.blocks.length || !sections.length) sections.push(current);
-  return sections;
+  const blocks = sectionBlocks("paper", markdown);
+  return [{ id: "paper", title: "Paper", blocks }];
 }
 
 function MarkdownBlock({ value }: { value: string }) {
@@ -32,29 +51,159 @@ function MarkdownBlock({ value }: { value: string }) {
 }
 
 export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) {
-  const { setView, customModels } = useWorkspace();
+  const { setView, customModels, providers } = useWorkspace();
   const [mode, setMode] = useState<ReaderMode>("integrated");
   const [fullText, setFullText] = useState(false);
-  const [selectedText, setSelectedText] = useState("");
-  const [translated, setTranslated] = useState<Record<string, number>>({});
-  const [saved, setSaved] = useState<Record<string, boolean>>({});
+  const [selection, setSelection] = useState<SelectionSource | null>(null);
+  const [translations, setTranslations] = useState<Record<string, TranslationState>>({});
   const [analysis, setAnalysis] = useState<Analysis>(null);
   const [activeBlock, setActiveBlock] = useState("");
   const [agentModel, setAgentModel] = useState(customModels[0]?.id ?? "");
+  const streamHandles = useRef(new Map<string, ModelStreamHandle>());
+  const readable = Boolean(paper?.id && paper && ["READY", "PARTIAL"].includes(paper.status));
   const markdownQuery = useQuery({
     queryKey: ["paper-markdown", root, paper?.id],
     queryFn: () => readMarkdown(root, paper!.id),
-    enabled: Boolean(paper?.id && paper && ["READY", "PARTIAL"].includes(paper.status)),
+    enabled: readable,
   });
-  const sections = useMemo(() => parseSections(markdownQuery.data ?? ""), [markdownQuery.data]);
+  const documentQuery = useQuery({
+    queryKey: ["paper-document", root, paper?.id],
+    queryFn: () => readDocument(root, paper!.id),
+    enabled: readable,
+    retry: false,
+  });
+  const translationQuery = useQuery({
+    queryKey: ["paper-translations", root, paper?.id],
+    queryFn: () => listTranslations(root, paper!.id),
+    enabled: readable,
+    retry: false,
+  });
+  const providerCredentialQuery = useQuery({
+    queryKey: ["provider-credentials", providers.map((provider) => provider.credentialId).sort().join(":")],
+    queryFn: () => hydrateProviderCredentials(providers),
+    retry: false,
+  });
+  const sections = useMemo(
+    () => documentSections(documentQuery.data, markdownQuery.data ?? ""),
+    [documentQuery.data, markdownQuery.data],
+  );
+  const persistedTranslations = useMemo(
+    () => Object.fromEntries((translationQuery.data ?? []).map((record) => [record.blockId, { status: "saved", text: record.translatedText, record } satisfies TranslationState])),
+    [translationQuery.data],
+  );
   const contextUsed = fullText ? 99840 : 46080;
   const contextPercent = Math.round(contextUsed / 128000 * 100);
 
+  useEffect(() => {
+    setTranslations({});
+    setSelection(null);
+    setActiveBlock("");
+    for (const handle of streamHandles.current.values()) void handle.cancel();
+    streamHandles.current.clear();
+  }, [paper?.id]);
+
+  useEffect(() => () => {
+    for (const handle of streamHandles.current.values()) {
+      handle.dispose();
+      void handle.cancel();
+    }
+  }, []);
+
   if (!paper) return <main className="reader-empty"><BookOpen size={34} /><h2>No paper selected</h2><p>Choose a paper in Library, then open it in Reader.</p><button className="primary-button compact" onClick={() => setView("library")}>Open Library</button></main>;
 
-  const translate = (id: string) => { setTranslated((state) => ({ ...state, [id]: state[id] || 1 })); setSaved((state) => ({ ...state, [id]: false })); setActiveBlock(id); setAnalysis("translation"); };
+  const selectedModel = customModels.find((model) => model.id === agentModel) ?? customModels[0];
+  const selectedProvider = providers.find((provider) => provider.id === selectedModel?.providerId);
+  const credentialReady = Boolean(selectedProvider && providerCredentialQuery.data?.some(
+    (summary) => summary.credentialId === selectedProvider.credentialId && summary.configured,
+  ));
+
+  const updateTranslation = (blockId: string, update: (current: TranslationState) => TranslationState) => {
+    setTranslations((current) => ({
+      ...current,
+      [blockId]: update(current[blockId] ?? { status: "streaming", text: "" }),
+    }));
+  };
+
+  const translate = async (block: ReaderBlock) => {
+    if (!selectedModel || !selectedProvider || !credentialReady) {
+      setTranslations((current) => ({ ...current, [block.id]: { status: "error", text: "", error: "Configure this model's API key in Settings before starting translation." } }));
+      return;
+    }
+    const existing = streamHandles.current.get(block.id);
+    if (existing) {
+      await existing.cancel();
+      existing.dispose();
+      streamHandles.current.delete(block.id);
+    }
+    setActiveBlock(block.id);
+    setAnalysis(null);
+    setTranslations((current) => ({ ...current, [block.id]: { status: "streaming", text: "" } }));
+    const requestId = crypto.randomUUID();
+    const onEvent = (event: ModelStreamEvent) => {
+      if (event.kind === "delta" && event.text) {
+        updateTranslation(block.id, (current) => ({ ...current, status: "streaming", text: current.text + event.text }));
+      } else if (event.kind === "done") {
+        updateTranslation(block.id, (current) => ({ ...current, status: "unsaved" }));
+      } else if (event.kind === "cancelled") {
+        updateTranslation(block.id, (current) => ({ ...current, status: "cancelled" }));
+      } else if (event.kind === "error") {
+        updateTranslation(block.id, (current) => ({ ...current, status: "error", error: event.error ?? "Model request failed." }));
+      }
+      if (["done", "cancelled", "error"].includes(event.kind)) {
+        streamHandles.current.get(block.id)?.dispose();
+        streamHandles.current.delete(block.id);
+      }
+    };
+    try {
+      const handle = await startModelStream({
+        requestId,
+        provider: selectedProvider,
+        model: selectedModel,
+        temperature: 0.1,
+        messages: [
+          { role: "system", content: "Translate scientific prose faithfully into Simplified Chinese. Preserve Markdown, LaTeX, terminology, citations, numbers, and uncertainty. Return only the translation." },
+          { role: "user", content: block.text },
+        ],
+      }, onEvent);
+      streamHandles.current.set(block.id, handle);
+    } catch (error) {
+      updateTranslation(block.id, (current) => ({ ...current, status: "error", error: error instanceof Error ? error.message : String(error) }));
+    }
+  };
+
+  const cancelTranslation = async (blockId: string) => {
+    await streamHandles.current.get(blockId)?.cancel();
+  };
+
+  const persistTranslation = async (block: ReaderBlock, state: TranslationState) => {
+    if (!selectedModel || !state.text.trim()) return;
+    try {
+      const record = await saveTranslation(root, {
+        paperId: paper.id,
+        sectionId: block.sectionId,
+        blockId: block.id,
+        sourceText: block.text,
+        translatedText: state.text,
+        targetLanguage: "zh-CN",
+        modelId: selectedModel.id,
+        promptVersion: TRANSLATION_PROMPT_VERSION,
+      });
+      setTranslations((current) => ({ ...current, [block.id]: { status: "saved", text: record.translatedText, record } }));
+      await translationQuery.refetch();
+    } catch (error) {
+      updateTranslation(block.id, (current) => ({ ...current, status: "error", error: error instanceof Error ? error.message : String(error) }));
+    }
+  };
+
   const explain = (type: "formula" | "theorem", id: string) => { setActiveBlock(id); setAnalysis(type); };
-  const captureSelection = () => { const text = window.getSelection()?.toString().trim(); if (text) setSelectedText(text.slice(0, 64)); };
+  const captureSelection = (block: ReaderBlock) => {
+    const selected = window.getSelection();
+    const text = selected?.toString().trim();
+    if (!text) return;
+    const start = Math.min(selected?.anchorOffset ?? 0, selected?.focusOffset ?? 0);
+    const end = Math.max(selected?.anchorOffset ?? text.length, selected?.focusOffset ?? text.length);
+    setSelection({ ...block, id: `${block.id}:selection-${start}-${end}`, text: text.slice(0, 500), start, end });
+  };
 
   return <div className="reader-workspace">
     <div className="reader-toolbar">
@@ -64,20 +213,20 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       <button><Search size={13} /> Find</button><button className={fullText ? "active" : ""} onClick={() => setFullText(!fullText)}><Layers3 size={13} /> {fullText ? `Full Text · ${contextPercent}%` : "Load Full Text"}</button>
     </div>
     <div className="reader-main">
-      <aside className="reader-outline"><span>Outline</span>{sections.map((section, index) => <button key={`${section.title}-${index}`} className={index === 2 ? "active" : ""}>{section.title}<small>{section.blocks.length}</small></button>)}</aside>
+      <aside className="reader-outline"><span>Outline</span>{sections.map((section, index) => <button key={section.id} className={index === 0 ? "active" : ""}>{section.title}<small>{section.blocks.length}</small></button>)}</aside>
       <main className="reader-canvas">
         {mode === "integrated" && <article className="integrated-paper">
-          <header className="paper-reading-header"><span className="tag tag-primary">STRUCTURED MARKDOWN</span><h1>{paper.title}</h1><p>Local document · {paper.pageCount || "—"} pages · Updated {new Date(paper.updatedAt).toLocaleDateString()}</p></header>
-          {selectedText && <div className="selection-toolbar"><span className="tag tag-ai">Selected</span><strong>“{selectedText}”</strong><button onClick={() => translate("selection")}><Languages size={12} /> Translate word</button><button onClick={() => explain("theorem", "selection")}><Sparkles size={12} /> Explain</button><button onClick={() => setSelectedText("")}>Close</button></div>}
-          {markdownQuery.isLoading ? <div className="document-loading">Loading generated Markdown…</div> : sections.map((section, sectionIndex) => <section className={`reading-section ${sectionIndex === 0 ? "active" : ""}`} key={`${section.title}-${sectionIndex}`}>
+          <header className="paper-reading-header"><span className="tag tag-primary">STRUCTURED DOCUMENT</span><h1>{paper.title}</h1><p>Local document · {paper.pageCount || "—"} pages · Updated {new Date(paper.updatedAt).toLocaleDateString()}</p></header>
+          {selection && <div className="selection-toolbar"><span className="tag tag-ai">Selected {selection.start}:{selection.end}</span><strong>“{selection.text.slice(0, 64)}”</strong><button onClick={() => void translate(selection)}><Languages size={12} /> Translate word</button><button onClick={() => explain("theorem", selection.id)}><Sparkles size={12} /> Explain</button><button onClick={() => setSelection(null)}>Close</button></div>}
+          {markdownQuery.isLoading || documentQuery.isLoading ? <div className="document-loading">Loading structured document…</div> : sections.map((section, sectionIndex) => <section className={`reading-section ${sectionIndex === 0 ? "active" : ""}`} key={section.id}>
             <header><div><h2>{section.title}</h2><span>{section.blocks.length} paragraphs · structured source</span></div><button><Layers3 size={12} /> Add Section</button></header>
             <div className="paragraph-stack">{section.blocks.map((block, blockIndex) => {
-              const id = `${sectionIndex}-${blockIndex}`;
-              const hasFormula = /\$|\\\[|\\begin\{equation/.test(block);
-              return <div className={`paragraph-card ${activeBlock === id ? "active" : ""}`} key={id} onMouseUp={captureSelection}>
-                <div className="paragraph-main"><span className="paragraph-number">{sectionIndex ? `${sectionIndex}.${blockIndex + 1}` : `A${blockIndex + 1}`}</span><div className="paragraph-markdown"><MarkdownBlock value={block} /></div><div className="paragraph-actions"><button onClick={() => translate(id)}><Languages size={12} /> Translate</button><button onClick={() => explain(hasFormula ? "formula" : "theorem", id)}><Sparkles size={12} /> Explain</button><button><Layers3 size={12} /> Add</button></div></div>
-                {translated[id] && <div className="translation-result"><div><span className="tag tag-ai">Chinese Translation · Revision {translated[id]}</span>{saved[id] && <span className="tag tag-success"><Check size={10} /> Saved</span>}</div><p>该段落已转换为结构化中文译文，并与原文段落、章节和页码保持关联。译文可以独立保存，也可以随时使用当前翻译模型重新生成。</p><footer><button className={saved[id] ? "active" : ""} onClick={() => setSaved((state) => ({ ...state, [id]: !state[id] }))}>{saved[id] ? "Saved Translation" : "Save Translation"}</button><button onClick={() => { setTranslated((state) => ({ ...state, [id]: state[id] + 1 })); setSaved((state) => ({ ...state, [id]: false })); }}><RefreshCw size={11} /> Retranslate</button><button>Save as Note</button></footer></div>}
-                {analysis && activeBlock === id && analysis !== "translation" && <AnalysisCard type={analysis} />}
+              const state = translations[block.id] ?? persistedTranslations[block.id];
+              const hasFormula = /\$|\\\[|\\begin\{equation/.test(block.text);
+              return <div className={`paragraph-card ${activeBlock === block.id ? "active" : ""}`} key={block.id} onMouseUp={() => captureSelection(block)}>
+                <div className="paragraph-main"><span className="paragraph-number">{sectionIndex ? `${sectionIndex}.${blockIndex + 1}` : `A${blockIndex + 1}`}</span><div className="paragraph-markdown"><MarkdownBlock value={block.text} /></div><div className="paragraph-actions"><button onClick={() => void translate(block)}><Languages size={12} /> Translate</button><button onClick={() => explain(hasFormula ? "formula" : "theorem", block.id)}><Sparkles size={12} /> Explain</button><button><Layers3 size={12} /> Add</button></div></div>
+                {state && <TranslationPanel block={block} state={state} onSave={() => void persistTranslation(block, state)} onRetry={() => void translate(block)} onCancel={() => void cancelTranslation(block.id)} />}
+                {analysis && activeBlock === block.id && <AnalysisCard type={analysis} />}
               </div>;
             })}</div>
           </section>)}
@@ -86,15 +235,29 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         {mode === "figures" && <div className="reader-figures">{paper.figures.length ? paper.figures.map((figure) => <figure key={figure.id}>{assetUrl(`${paper.markdownPath?.replace(/[\\/][^\\/]+$/, "")}/${figure.relativePath}`) ? <img src={assetUrl(`${paper.markdownPath?.replace(/[\\/][^\\/]+$/, "")}/${figure.relativePath}`)} alt={figure.caption ?? "Extracted figure"} /> : <div><FileImage size={32} /></div>}<figcaption>{figure.caption ?? "Extracted figure"}</figcaption></figure>) : <div className="pdf-placeholder"><FileImage size={36} /><h2>No extracted figures</h2><p>Figures will appear after the parser finishes extraction.</p></div>}</div>}
       </main>
       <aside className="reader-agent-panel">
-        <header><Bot size={15} /><strong>Paper Analyst Agent</strong><span className="tag tag-success">Ready</span></header>
-        <div className="agent-panel-scroll"><p className="agent-intro">I can explain selected passages, formulas and theorems, compare claims with your local library, and cite the source evidence.</p><div className="agent-context-card"><div><strong>Conversation Context</strong><b>{contextPercent}%</b></div><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><p>{(contextUsed / 1000).toFixed(1)}K / 128K tokens · {fullText ? "Full paper included" : "3 selected passages"}</p><button className={fullText ? "active" : ""} onClick={() => setFullText(!fullText)}>{fullText ? "Remove Full Text" : "Load Full Text"}</button></div><label className="agent-model-field"><span>Agent model</span><select value={agentModel} onChange={(event) => setAgentModel(event.target.value)}>{customModels.map((model) => <option key={model.id} value={model.id}>{model.name} · {model.format}</option>)}</select></label><div className="agent-tool-call"><span><Sparkles size={12} /> search_local_library</span><b>0.8 s</b><code>query: “attention routing”<br />results: {Math.max(3, sections.length)} papers</code></div><p className="agent-answer">The selected claim is grounded in the current section. I will keep the answer linked to its exact paragraph and page evidence.</p></div>
+        <header><Bot size={15} /><strong>Paper Analyst Agent</strong><span className={`tag ${credentialReady ? "tag-success" : "tag-warning"}`}>{credentialReady ? "Gateway ready" : selectedProvider ? "Needs key" : "Needs model"}</span></header>
+        <div className="agent-panel-scroll"><p className="agent-intro">Translations stream through the secure Rust model gateway and can be persisted with exact section and block provenance.</p><div className="agent-context-card"><div><strong>Conversation Context</strong><b>{contextPercent}%</b></div><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><p>{(contextUsed / 1000).toFixed(1)}K / 128K tokens · {fullText ? "Full paper included" : "Selected passages"}</p><button className={fullText ? "active" : ""} onClick={() => setFullText(!fullText)}>{fullText ? "Remove Full Text" : "Load Full Text"}</button></div><label className="agent-model-field"><span>Translation and agent model</span><select value={agentModel} onChange={(event) => setAgentModel(event.target.value)}>{customModels.map((model) => <option key={model.id} value={model.id}>{model.displayName} · {providers.find((provider) => provider.id === model.providerId)?.format ?? "unavailable"}</option>)}</select></label><div className="agent-tool-call"><span><Sparkles size={12} /> secure_model_gateway</span><b>Rust</b><code>provider: {selectedProvider?.name ?? "not configured"}<br />credential: {selectedProvider?.credentialId ?? "none"}</code></div><p className="agent-answer">API keys remain in Stronghold and Rust memory. Python, SQLite, logs and persisted React state receive no provider secret.</p></div>
         <label className="agent-chat-input"><MessageSquareText size={13} /><input placeholder="Ask about this paper…" /><Send size={13} /></label>
       </aside>
     </div>
-    <footer className="reader-context-bar"><Layers3 size={14} /><strong>Conversation Context</strong><span className={`tag ${fullText ? "tag-ai" : "tag-primary"}`}>{fullText ? "Full paper loaded" : "3 passages loaded"}</span><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><code>{(contextUsed / 1000).toFixed(1)}K / 128K · {contextPercent}%</code><span>Updates immediately when sections or full text are added.</span><button onClick={() => setFullText(!fullText)}>{fullText ? "Remove Full Text" : "Load Full Text"}</button></footer>
+    <footer className="reader-context-bar"><Layers3 size={14} /><strong>Conversation Context</strong><span className={`tag ${fullText ? "tag-ai" : "tag-primary"}`}>{fullText ? "Full paper loaded" : "Selected passages"}</span><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><code>{(contextUsed / 1000).toFixed(1)}K / 128K · {contextPercent}%</code><span>Context persistence is the next shared pipeline stage.</span><button onClick={() => setFullText(!fullText)}>{fullText ? "Remove Full Text" : "Load Full Text"}</button></footer>
+  </div>;
+}
+
+function TranslationPanel({ block, state, onSave, onRetry, onCancel }: { block: ReaderBlock; state: TranslationState; onSave: () => void; onRetry: () => void; onCancel: () => void }) {
+  return <div className={`translation-result ${state.status}`} data-block-id={block.id}>
+    <div><span className="tag tag-ai">Chinese Translation{state.record ? ` · Revision ${state.record.revision}` : ""}</span>{state.status === "saved" && <span className="tag tag-success"><Check size={10} /> Saved</span>}</div>
+    {state.status === "streaming" && !state.text && <p><LoaderCircle className="spin" size={13} /> Waiting for the first model token…</p>}
+    {state.text && <div className="translation-markdown"><MarkdownBlock value={state.text} /></div>}
+    {state.error && <p className="translation-error"><TriangleAlert size={13} /> {state.error}</p>}
+    <footer>
+      {state.status === "streaming" ? <button onClick={onCancel}><Square size={10} /> Cancel</button> : <button onClick={onRetry}><RefreshCw size={11} /> {state.status === "error" ? "Retry" : "Retranslate"}</button>}
+      {state.status === "unsaved" && <button onClick={onSave}>Save Translation</button>}
+      {state.status === "saved" && <button className="active" disabled>Persisted</button>}
+    </footer>
   </div>;
 }
 
 function AnalysisCard({ type }: { type: "formula" | "theorem" }) {
-  return <div className={`reader-analysis ${type}`}><span className="tag tag-ai">AI {type === "formula" ? "Formula" : "Theorem"} Explanation · Evidence grounded</span><h3>{type === "formula" ? "Formula intuition and term-by-term explanation" : "Claim, assumptions and proof sketch"}</h3>{type === "formula" ? <div className="formula-grid"><div><b>Inputs</b><p>Identifies each symbol and its role in the computation.</p></div><div><b>Operation</b><p>Explains the transformation and normalization step.</p></div><div><b>Output</b><p>Connects the result back to the surrounding method.</p></div></div> : <p><b>Interpretation.</b> The statement is explained under the assumptions made by the paper. The explanation distinguishes the supported claim from a broader conclusion and keeps the source passage attached.</p>}<footer><button>Save Explanation</button><button>Show Source Evidence</button><button>Ask Follow-up</button></footer></div>;
+  return <div className={`reader-analysis ${type}`}><span className="tag tag-ai">AI {type === "formula" ? "Formula" : "Theorem"} Explanation · Gateway pending</span><h3>{type === "formula" ? "Formula intuition and term-by-term explanation" : "Claim, assumptions and proof sketch"}</h3>{type === "formula" ? <div className="formula-grid"><div><b>Inputs</b><p>Identifies each symbol and its role in the computation.</p></div><div><b>Operation</b><p>Explains the transformation and normalization step.</p></div><div><b>Output</b><p>Connects the result back to the surrounding method.</p></div></div> : <p><b>Next connection.</b> This panel will reuse the secure model stream with the source statement, proof and adjacent structured blocks.</p>}<footer><button disabled>Save Explanation</button><button>Show Source Evidence</button><button>Ask Follow-up</button></footer></div>;
 }

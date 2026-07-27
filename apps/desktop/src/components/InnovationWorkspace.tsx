@@ -42,7 +42,7 @@ function paperTokens(paper: LibraryPaper) {
 }
 
 export function InnovationWorkspace({ papers }: { papers: LibraryPaper[] }) {
-  const { customModels, setView } = useWorkspace();
+  const { customModels, providers, setView } = useWorkspace();
   const contextPapers = useMemo(() => {
     const ready = papers.filter((paper) => paper.status === "READY");
     return (ready.length > 0 ? ready : papers).slice(0, 5);
@@ -86,7 +86,7 @@ export function InnovationWorkspace({ papers }: { papers: LibraryPaper[] }) {
 
   const selectModel = (value: string, label: string, onChange: (model: string) => void) => (
     <select aria-label={label} value={value || firstModelId} onChange={(event) => onChange(event.target.value)}>
-      {customModels.map((model) => <option value={model.id} key={model.id}>{model.name} / {model.model}</option>)}
+      {customModels.map((model) => <option value={model.id} key={model.id}>{model.displayName} / {model.model}</option>)}
     </select>
   );
 
@@ -179,7 +179,7 @@ export function InnovationWorkspace({ papers }: { papers: LibraryPaper[] }) {
                 const model = customModels.find((item) => item.id === routeModels[route.id]);
                 return <div className="route-row" key={route.id}>
                   <span className="route-number">{index + 1}</span>
-                  <span className="route-copy"><strong>{route.label}<b>{model?.format === "anthropic" ? "Anthropic" : "OpenAI-compatible"}</b></strong><small>{route.description}</small></span>
+                  <span className="route-copy"><strong>{route.label}<b>{providers.find((provider) => provider.id === model?.providerId)?.format === "anthropic" ? "Anthropic" : "OpenAI-compatible"}</b></strong><small>{route.description}</small></span>
                   {selectModel(routeModels[route.id], `${route.label} model`, (selectedModel) => setRouteModels({ ...routeModels, [route.id]: selectedModel }))}
                 </div>;
               })}

@@ -171,6 +171,69 @@ export interface ParseArtifactBundle {
   warnings: string[];
 }
 
+export type ApiFormat = "openai" | "anthropic";
+
+export interface ProviderConfig {
+  id: string;
+  name: string;
+  format: ApiFormat;
+  baseUrl: string;
+  credentialId: string;
+  headers?: Record<string, string>;
+  timeoutSeconds: number;
+}
+
+export interface ModelConfig {
+  id: string;
+  providerId: string;
+  model: string;
+  displayName: string;
+  maxContextTokens: number;
+  maxOutputTokens: number;
+}
+
+export interface CredentialSummary {
+  credentialId: string;
+  configured: boolean;
+}
+
+export interface ModelMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+export interface ModelStreamRequest {
+  requestId: string;
+  provider: ProviderConfig;
+  model: ModelConfig;
+  messages: ModelMessage[];
+  temperature?: number;
+}
+
+export interface ModelStreamEvent {
+  requestId: string;
+  kind: "started" | "delta" | "done" | "cancelled" | "error";
+  text?: string;
+  error?: string;
+  usage?: { inputTokens: number; outputTokens: number };
+}
+
+export interface TranslationRecord {
+  id: string;
+  paperId: string;
+  sectionId: string;
+  blockId: string;
+  sourceHash: string;
+  sourceText: string;
+  translatedText: string;
+  targetLanguage: string;
+  modelId: string;
+  promptVersion: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AgentProfile {
   id: string;
   name: string;

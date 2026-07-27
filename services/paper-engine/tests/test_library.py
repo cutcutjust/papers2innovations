@@ -36,7 +36,39 @@ def test_initializes_versioned_library_layout(tmp_path: Path) -> None:
 
     with sqlite3.connect(result["database"]) as connection:
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-    assert version == 2
+    assert version == 3
+
+
+def test_reader_translation_is_revisioned_and_persisted(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    source = tmp_path / "Papers" / "reader.pdf"
+    make_pdf(source)
+    library.scan()
+    paper = library.list_papers()[0]
+
+    document = library.read_document(paper["id"])
+    assert document["paper_id"] == paper["id"]
+
+    payload = {
+        "paperId": paper["id"],
+        "sectionId": "section-1",
+        "blockId": "section-1:block-1",
+        "sourceText": "A grounded source paragraph.",
+        "translatedText": "一段有依据的译文。",
+        "targetLanguage": "zh-CN",
+        "modelId": "test-model",
+        "promptVersion": "reader-translate-v1",
+    }
+    first = library.save_translation(payload)
+    second = library.save_translation({**payload, "translatedText": "修订后的译文。"})
+
+    assert first["revision"] == 1
+    assert second["revision"] == 2
+    restored = Library(tmp_path).list_translations(paper["id"])
+    assert len(restored) == 1
+    assert restored[0]["translatedText"] == "修订后的译文。"
+    assert restored[0]["sourceHash"]
 
 
 def test_scan_parses_and_persists_generated_artifacts(tmp_path: Path) -> None:

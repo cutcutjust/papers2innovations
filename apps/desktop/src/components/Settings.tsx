@@ -1,16 +1,21 @@
 import { useEffect, useState } from "react";
 import { Bot, CheckCircle2, Eye, EyeOff, LoaderCircle, Plus, ShieldCheck, Trash2, Wifi } from "lucide-react";
+import type { CredentialSummary, ProviderConfig } from "@p2i/contracts";
 import {
   deleteOcrCredential,
+  deleteProviderCredential,
   hydrateOcrCredential,
+  hydrateProviderCredentials,
   saveOcrCredential,
+  saveProviderCredential,
+  testProviderConnection,
   testQwenConnection,
 } from "../lib/credentials";
 import { nativeRuntime, uninstallApplication } from "../lib/bridge";
 import { useWorkspace, type ModelApiFormat } from "../store";
 
 export function Settings() {
-  const { customModels, addCustomModel, removeCustomModel } = useWorkspace();
+  const { customModels, providers, addCustomModel, removeCustomModel } = useWorkspace();
   const [configured, setConfigured] = useState(false);
   const [workspaceId, setWorkspaceId] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -23,6 +28,8 @@ export function Settings() {
   const [modelId, setModelId] = useState("");
   const [modelBaseUrl, setModelBaseUrl] = useState("");
   const [modelFormat, setModelFormat] = useState<ModelApiFormat>("openai");
+  const [modelApiKey, setModelApiKey] = useState("");
+  const [providerSummaries, setProviderSummaries] = useState<Record<string, CredentialSummary>>({});
 
   const run = async (action: () => Promise<void>) => {
     setBusy(true);
@@ -46,6 +53,12 @@ export function Settings() {
       setStatus(value.configured ? "Stronghold unlocked automatically. Qwen is configured." : "Stronghold is ready. No Qwen credential is stored.");
     });
   }, []);
+
+  useEffect(() => {
+    void hydrateProviderCredentials(providers).then((summaries) => {
+      setProviderSummaries(Object.fromEntries(summaries.map((item) => [item.credentialId, item])));
+    }).catch(() => undefined);
+  }, [providers]);
 
   const save = () => run(async () => {
     if (!apiKey || !consent) throw new Error("API key and page-upload consent are required.");
@@ -80,42 +93,75 @@ export function Settings() {
     void run(uninstallApplication);
   };
 
-  const addModel = () => {
+  const addModel = () => run(async () => {
     const id = modelId.trim();
-    if (!id || !modelBaseUrl.trim()) {
-      setStatus("Model ID and Base URL are required.");
-      return;
-    }
-    addCustomModel({
-      id,
+    if (!id || !modelBaseUrl.trim() || !modelApiKey.trim()) throw new Error("Model ID, Base URL and API key are required.");
+    const provider: ProviderConfig = {
+      id: `provider-${id}`,
       name: modelName.trim() || id,
-      model: id,
-      baseUrl: modelBaseUrl.trim().replace(/\/$/, ""),
       format: modelFormat,
-    });
+      baseUrl: modelBaseUrl.trim().replace(/\/$/, ""),
+      credentialId: `provider-${id}`,
+      timeoutSeconds: 90,
+    };
+    const model = {
+      id,
+      providerId: provider.id,
+      displayName: modelName.trim() || id,
+      model: id,
+      maxContextTokens: 128000,
+      maxOutputTokens: 4096,
+    };
+    await saveProviderCredential(provider, modelApiKey);
+    addCustomModel(provider, model);
+    setProviderSummaries((current) => ({ ...current, [provider.credentialId]: { credentialId: provider.credentialId, configured: true } }));
     setModelName("");
     setModelId("");
     setModelBaseUrl("");
+    setModelApiKey("");
     setStatus(`Custom model ${id} is available to every AI stage.`);
-  };
+  });
+
+  const removeModel = (modelIdToRemove: string) => run(async () => {
+    const model = customModels.find((item) => item.id === modelIdToRemove);
+    const provider = providers.find((item) => item.id === model?.providerId);
+    const providerUseCount = customModels.filter((item) => item.providerId === provider?.id).length;
+    if (provider && providerUseCount <= 1) await deleteProviderCredential(provider.credentialId);
+    removeCustomModel(modelIdToRemove);
+    setStatus(`Custom model ${modelIdToRemove} was removed.`);
+  });
+
+  const testModel = (modelIdToTest: string) => run(async () => {
+    const model = customModels.find((item) => item.id === modelIdToTest);
+    const provider = providers.find((item) => item.id === model?.providerId);
+    if (!model || !provider) throw new Error("Provider configuration is unavailable.");
+    const result = await testProviderConnection(provider, model);
+    setStatus(result.ok ? `${model.displayName} connection succeeded (HTTP ${result.status}).` : `${model.displayName} connection failed (HTTP ${result.status}).`);
+  });
 
   return <main className="settings-page">
     <div className="page-title-block"><div className="page-icon"><ShieldCheck size={20} /></div><div><h1>Models & security</h1><p>Manage reusable AI endpoints and full-page OCR credentials.</p></div></div>
     <section className="settings-section model-settings-section">
       <div className="settings-heading"><div><h2>Custom AI models</h2><p>Shared by compression, evidence extraction, idea generation, novelty and critique.</p></div><Bot size={18} /></div>
       <div className="model-registry">
-        {customModels.map((model) => <div className="model-registry-row" key={model.id}>
-          <span className="model-format-badge">{model.format === "openai" ? "OpenAI" : "Anthropic"}</span>
-          <span className="model-registry-copy"><strong>{model.name}</strong><small>{model.model} / {model.baseUrl}</small></span>
-          <button className="icon-button small" onClick={() => removeCustomModel(model.id)} title={`Remove ${model.name}`} disabled={customModels.length === 1}><Trash2 size={14} /></button>
-        </div>)}
+        {customModels.map((model) => {
+          const provider = providers.find((item) => item.id === model.providerId);
+          const providerConfigured = provider ? providerSummaries[provider.credentialId]?.configured : false;
+          return <div className="model-registry-row" key={model.id}>
+            <span className="model-format-badge">{provider?.format === "anthropic" ? "Anthropic" : "OpenAI"}</span>
+            <span className="model-registry-copy"><strong>{model.displayName}</strong><small>{model.model} / {provider?.baseUrl ?? "Missing provider"} / {providerConfigured ? "Credential stored" : "Needs key"}</small></span>
+            <button className="icon-button small" onClick={() => void testModel(model.id)} title={`Test ${model.displayName}`} disabled={busy || !providerConfigured}><Wifi size={14} /></button>
+            <button className="icon-button small" onClick={() => void removeModel(model.id)} title={`Remove ${model.displayName}`} disabled={busy || customModels.length === 1}><Trash2 size={14} /></button>
+          </div>;
+        })}
       </div>
       <div className="model-entry-grid">
         <label><span>Display name</span><input value={modelName} onChange={(event) => setModelName(event.target.value)} placeholder="Reasoning" /></label>
         <label><span>Model ID</span><input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="custom-reasoning-model" /></label>
         <label className="model-url-field"><span>Base URL</span><input value={modelBaseUrl} onChange={(event) => setModelBaseUrl(event.target.value)} placeholder="https://gateway.example.com/v1" /></label>
         <label><span>API format</span><select value={modelFormat} onChange={(event) => setModelFormat(event.target.value as ModelApiFormat)}><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option></select></label>
-        <button className="primary-button compact model-add-button" onClick={addModel}><Plus size={14} /> Add model</button>
+        <label className="model-url-field"><span>API key</span><input type="password" value={modelApiKey} onChange={(event) => setModelApiKey(event.target.value)} placeholder="Stored only in Stronghold" autoComplete="off" /></label>
+        <button className="primary-button compact model-add-button" onClick={() => void addModel()} disabled={busy}><Plus size={14} /> Add model</button>
       </div>
     </section>
     <section className="settings-section"><div className="settings-heading"><div><h2>Stronghold vault</h2><p>Automatically unlocked with a random key held by the operating system credential store.</p></div><ShieldCheck size={18} /></div><div className="vault-state"><span>{configured ? "Qwen credential stored" : "Vault ready"}</span><strong>{configured ? "Configured" : "Not configured"}</strong></div></section>

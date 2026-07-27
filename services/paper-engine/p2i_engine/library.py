@@ -945,6 +945,91 @@ class Library:
             raise FileNotFoundError(f"No Markdown exists for paper {paper_id}")
         return Path(row["markdown_path"]).read_text(encoding="utf-8")
 
+    def read_document(self, paper_id: str) -> dict[str, Any]:
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT document_path FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone()
+        if not row or not row["document_path"]:
+            raise FileNotFoundError(f"No structured document exists for paper {paper_id}")
+        return json.loads(Path(row["document_path"]).read_text(encoding="utf-8"))
+
+    def list_translations(self, paper_id: str) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                "SELECT t.* FROM translations t "
+                "JOIN (SELECT block_id, target_language, MAX(revision) AS revision "
+                "FROM translations WHERE paper_id = ? GROUP BY block_id, target_language) latest "
+                "ON latest.block_id = t.block_id AND latest.target_language = t.target_language "
+                "AND latest.revision = t.revision WHERE t.paper_id = ? ORDER BY t.updated_at",
+                (paper_id, paper_id),
+            ).fetchall()
+        return [self._translation_contract(dict(row)) for row in rows]
+
+    def save_translation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        required = (
+            "paperId", "sectionId", "blockId", "sourceText", "translatedText",
+            "targetLanguage", "modelId", "promptVersion",
+        )
+        missing = [key for key in required if not str(payload.get(key, "")).strip()]
+        if missing:
+            raise ValueError("Missing translation fields: " + ", ".join(missing))
+        paper_id = str(payload["paperId"])
+        now = utc_now()
+        with self.db.connect() as connection:
+            paper = connection.execute(
+                "SELECT canonical_sha256 FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone()
+            if not paper:
+                raise KeyError(f"Unknown paper: {paper_id}")
+            revision = connection.execute(
+                "SELECT COALESCE(MAX(revision), 0) + 1 FROM translations "
+                "WHERE paper_id = ? AND block_id = ? AND target_language = ?",
+                (paper_id, payload["blockId"], payload["targetLanguage"]),
+            ).fetchone()[0]
+            record = {
+                "id": str(uuid.uuid4()),
+                "paper_id": paper_id,
+                "section_id": str(payload["sectionId"]),
+                "block_id": str(payload["blockId"]),
+                "source_hash": paper["canonical_sha256"],
+                "source_text": str(payload["sourceText"]),
+                "translated_text": str(payload["translatedText"]),
+                "target_language": str(payload["targetLanguage"]),
+                "model_id": str(payload["modelId"]),
+                "prompt_version": str(payload["promptVersion"]),
+                "revision": revision,
+                "created_at": now,
+                "updated_at": now,
+            }
+            connection.execute(
+                "INSERT INTO translations(id, paper_id, section_id, block_id, source_hash, "
+                "source_text, translated_text, target_language, model_id, prompt_version, "
+                "revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(record.values()),
+            )
+        return self._translation_contract(record)
+
+    @staticmethod
+    def _translation_contract(record: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": record["id"],
+            "paperId": record["paper_id"],
+            "sectionId": record["section_id"],
+            "blockId": record["block_id"],
+            "sourceHash": record["source_hash"],
+            "sourceText": record["source_text"],
+            "translatedText": record["translated_text"],
+            "targetLanguage": record["target_language"],
+            "modelId": record["model_id"],
+            "promptVersion": record["prompt_version"],
+            "revision": record["revision"],
+            "createdAt": record["created_at"],
+            "updatedAt": record["updated_at"],
+        }
+
 
 def watch_library(root: str | Path, interval: float = 2.0) -> None:
     library = Library(root)

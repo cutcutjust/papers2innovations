@@ -1,7 +1,8 @@
-import type { JobStage, LibraryPaper, ProgressNotification, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
+import type { JobStage, LibraryPaper, ModelStreamEvent, ModelStreamRequest, PaperDocument, ProgressNotification, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { demoMarkdown, demoPapers } from "../demo";
+import { sanitizeProviderConfig } from "./providerConfig";
 
 export const nativeRuntime = isTauri();
 
@@ -36,6 +37,66 @@ export async function readMarkdown(root: string, paperId: string): Promise<strin
   if (!nativeRuntime) return demoMarkdown;
   const result = await rpc<{ markdown: string }>("paper.read_markdown", { root, paperId });
   return result.markdown;
+}
+
+export async function readDocument(root: string, paperId: string): Promise<PaperDocument> {
+  if (!nativeRuntime) {
+    return {
+      schema_version: "1.0",
+      paper_id: paperId,
+      source_sha256: "demo-source-hash",
+      title: demoPapers.find((paper) => paper.id === paperId)?.title ?? "Demo paper",
+      authors: [],
+      page_count: 1,
+      sections: [{ id: "demo-section", title: "Paper", level: 1, order: 0, markdown: demoMarkdown, anchors: [] }],
+      figures: [],
+      tables: [],
+      parser: { name: "demo", version: "1" },
+      generated_at: new Date(0).toISOString(),
+    };
+  }
+  return rpc<PaperDocument>("paper.read_document", { root, paperId });
+}
+
+export async function listTranslations(root: string, paperId: string): Promise<TranslationRecord[]> {
+  if (!nativeRuntime) return [];
+  return rpc<TranslationRecord[]>("translation.list", { root, paperId });
+}
+
+export async function saveTranslation(root: string, input: Omit<TranslationRecord, "id" | "sourceHash" | "revision" | "createdAt" | "updatedAt">): Promise<TranslationRecord> {
+  if (!nativeRuntime) {
+    const now = new Date().toISOString();
+    return { ...input, id: crypto.randomUUID(), sourceHash: "demo-source-hash", revision: 1, createdAt: now, updatedAt: now };
+  }
+  return rpc<TranslationRecord>("translation.save", { root, ...input });
+}
+
+export interface ModelStreamHandle {
+  cancel: () => Promise<void>;
+  dispose: () => void;
+}
+
+export async function startModelStream(input: ModelStreamRequest, onEvent: (event: ModelStreamEvent) => void): Promise<ModelStreamHandle> {
+  const safeInput = { ...input, provider: sanitizeProviderConfig(input.provider) };
+  if (!nativeRuntime) {
+    onEvent({ requestId: safeInput.requestId, kind: "started" });
+    onEvent({ requestId: safeInput.requestId, kind: "delta", text: `Preview translation: ${safeInput.messages.at(-1)?.content ?? ""}` });
+    onEvent({ requestId: safeInput.requestId, kind: "done", usage: { inputTokens: 0, outputTokens: 0 } });
+    return { cancel: async () => undefined, dispose: () => undefined };
+  }
+  const unlisten = await listen<ModelStreamEvent>("model-stream", (event) => {
+    if (event.payload.requestId === safeInput.requestId) onEvent(event.payload);
+  });
+  try {
+    await invoke("model_stream_start", { input: safeInput });
+  } catch (error) {
+    unlisten();
+    throw error;
+  }
+  return {
+    cancel: () => invoke<void>("model_stream_cancel", { requestId: safeInput.requestId }),
+    dispose: unlisten,
+  };
 }
 
 export async function onEngineProgress(

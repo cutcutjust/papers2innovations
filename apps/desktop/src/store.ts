@@ -1,23 +1,22 @@
 import { create } from "zustand";
+import type { ApiFormat, ModelConfig, ProviderConfig } from "@p2i/contracts";
+import { sanitizeProviderConfig } from "./lib/providerConfig";
 
 export type View = "library" | "reader" | "agents" | "context" | "graph" | "innovate" | "jobs" | "import" | "settings";
 type ReaderMode = "markdown" | "pdf" | "figures";
 
-export type ModelApiFormat = "openai" | "anthropic";
+export type ModelApiFormat = ApiFormat;
 
-export interface CustomModelConfig {
-  id: string;
-  name: string;
-  model: string;
-  baseUrl: string;
-  format: ModelApiFormat;
-}
+export const defaultProviders: ProviderConfig[] = [
+  { id: "provider-openai-demo", name: "OpenAI-compatible", format: "openai", baseUrl: "https://api.example.com/v1", credentialId: "provider-openai-demo", timeoutSeconds: 90 },
+  { id: "provider-anthropic-demo", name: "Anthropic-compatible", format: "anthropic", baseUrl: "https://api.example.com/v1", credentialId: "provider-anthropic-demo", timeoutSeconds: 90 },
+];
 
-export const defaultCustomModels: CustomModelConfig[] = [
-  { id: "custom-fast-model", name: "Fast", model: "custom-fast-model", baseUrl: "https://api.example.com/v1", format: "openai" },
-  { id: "custom-chat-model", name: "Chat", model: "custom-chat-model", baseUrl: "https://api.example.com/v1", format: "openai" },
-  { id: "custom-long-context-model", name: "Long context", model: "custom-long-context-model", baseUrl: "https://api.example.com", format: "anthropic" },
-  { id: "custom-reasoning-model", name: "Reasoning", model: "custom-reasoning-model", baseUrl: "https://api.example.com/v1", format: "openai" },
+export const defaultCustomModels: ModelConfig[] = [
+  { id: "custom-fast-model", providerId: "provider-openai-demo", displayName: "Fast", model: "custom-fast-model", maxContextTokens: 128000, maxOutputTokens: 4096 },
+  { id: "custom-chat-model", providerId: "provider-openai-demo", displayName: "Chat", model: "custom-chat-model", maxContextTokens: 128000, maxOutputTokens: 4096 },
+  { id: "custom-long-context-model", providerId: "provider-anthropic-demo", displayName: "Long context", model: "custom-long-context-model", maxContextTokens: 200000, maxOutputTokens: 8192 },
+  { id: "custom-reasoning-model", providerId: "provider-openai-demo", displayName: "Reasoning", model: "custom-reasoning-model", maxContextTokens: 128000, maxOutputTokens: 8192 },
 ];
 
 interface WorkspaceState {
@@ -28,7 +27,8 @@ interface WorkspaceState {
   query: string;
   statusFilter: "all" | "ready" | "processing" | "issues";
   pdfPage: number;
-  customModels: CustomModelConfig[];
+  providers: ProviderConfig[];
+  customModels: ModelConfig[];
   setRoot: (root: string) => void;
   selectPaper: (paperId: string) => void;
   openReader: (paperId?: string) => void;
@@ -37,18 +37,53 @@ interface WorkspaceState {
   setQuery: (query: string) => void;
   setStatusFilter: (filter: WorkspaceState["statusFilter"]) => void;
   openPdfAt: (page: number) => void;
-  addCustomModel: (model: CustomModelConfig) => void;
+  addCustomModel: (provider: ProviderConfig, model: ModelConfig) => void;
   removeCustomModel: (modelId: string) => void;
 }
 
 const savedRoot = localStorage.getItem("p2i.libraryRoot") ?? "";
-const loadCustomModels = () => {
+const loadModelRegistry = (): { providers: ProviderConfig[]; models: ModelConfig[] } => {
   try {
-    const value = JSON.parse(localStorage.getItem("p2i.customModels") ?? "null");
-    return Array.isArray(value) && value.length > 0 ? value as CustomModelConfig[] : defaultCustomModels;
+    const providers = JSON.parse(localStorage.getItem("p2i.providers") ?? "null");
+    const models = JSON.parse(localStorage.getItem("p2i.models") ?? "null");
+    if (Array.isArray(providers) && providers.length > 0 && Array.isArray(models) && models.length > 0) {
+      const safeProviders = (providers as ProviderConfig[]).map(sanitizeProviderConfig);
+      if (JSON.stringify(safeProviders) !== JSON.stringify(providers)) {
+        localStorage.setItem("p2i.providers", JSON.stringify(safeProviders));
+      }
+      return { providers: safeProviders, models: models as ModelConfig[] };
+    }
+    const legacy = JSON.parse(localStorage.getItem("p2i.customModels") ?? "null") as Array<Record<string, string>> | null;
+    if (Array.isArray(legacy) && legacy.length > 0) {
+      const migratedProviders = legacy.map((item) => ({
+        id: `provider-${item.id}`,
+        name: item.name || item.id,
+        format: (item.format === "anthropic" ? "anthropic" : "openai") as ApiFormat,
+        baseUrl: item.baseUrl,
+        credentialId: `provider-${item.id}`,
+        timeoutSeconds: 90,
+      }));
+      const migratedModels = legacy.map((item) => ({
+        id: item.id,
+        providerId: `provider-${item.id}`,
+        model: item.model || item.id,
+        displayName: item.name || item.id,
+        maxContextTokens: 128000,
+        maxOutputTokens: 4096,
+      }));
+      return { providers: migratedProviders, models: migratedModels };
+    }
   } catch {
-    return defaultCustomModels;
+    // Fall through to non-secret defaults.
   }
+  return { providers: defaultProviders, models: defaultCustomModels };
+};
+
+const initialRegistry = loadModelRegistry();
+const persistModelRegistry = (providers: ProviderConfig[], models: ModelConfig[]) => {
+  localStorage.setItem("p2i.providers", JSON.stringify(providers.map(sanitizeProviderConfig)));
+  localStorage.setItem("p2i.models", JSON.stringify(models));
+  localStorage.removeItem("p2i.customModels");
 };
 
 export const useWorkspace = create<WorkspaceState>((set) => ({
@@ -58,7 +93,8 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   query: "",
   statusFilter: "all",
   pdfPage: 1,
-  customModels: loadCustomModels(),
+  providers: initialRegistry.providers,
+  customModels: initialRegistry.models,
   setRoot: (root) => {
     localStorage.setItem("p2i.libraryRoot", root);
     set({ root });
@@ -70,14 +106,18 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   setQuery: (query) => set({ query }),
   setStatusFilter: (statusFilter) => set({ statusFilter }),
   openPdfAt: (pdfPage) => set({ pdfPage, readerMode: "pdf" }),
-  addCustomModel: (model) => set((state) => {
+  addCustomModel: (provider, model) => set((state) => {
+    const safeProvider = sanitizeProviderConfig(provider);
+    const providers = [...state.providers.filter((item) => item.id !== safeProvider.id), safeProvider];
     const customModels = [...state.customModels.filter((item) => item.id !== model.id), model];
-    localStorage.setItem("p2i.customModels", JSON.stringify(customModels));
-    return { customModels };
+    persistModelRegistry(providers, customModels);
+    return { providers, customModels };
   }),
   removeCustomModel: (modelId) => set((state) => {
     const customModels = state.customModels.filter((model) => model.id !== modelId);
-    localStorage.setItem("p2i.customModels", JSON.stringify(customModels));
-    return { customModels };
+    const usedProviders = new Set(customModels.map((model) => model.providerId));
+    const providers = state.providers.filter((provider) => usedProviders.has(provider.id));
+    persistModelRegistry(providers, customModels);
+    return { providers, customModels };
   }),
 }));

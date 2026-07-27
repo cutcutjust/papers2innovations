@@ -15,7 +15,7 @@ import { Agents } from "./components/Agents";
 import { ContextWorkspace } from "./components/ContextWorkspace";
 import { CitationGraph } from "./components/CitationGraph";
 import { chooseLibrary, initializeLibrary, listJobs, listPapers, nativeRuntime, onEngineProgress, scanLibrary, startLibraryWatcher } from "./lib/bridge";
-import { hydrateOcrCredential } from "./lib/credentials";
+import { hydrateOcrCredential, hydrateProviderCredentials } from "./lib/credentials";
 import { useWorkspace } from "./store";
 
 export function App() {
@@ -51,8 +51,11 @@ export function App() {
   }, [root, workspace]);
 
   useEffect(() => {
-    if (nativeRuntime) void hydrateOcrCredential().catch(() => undefined);
-  }, []);
+    if (nativeRuntime) {
+      void hydrateOcrCredential().catch(() => undefined);
+      void hydrateProviderCredentials(workspace.providers).catch(() => undefined);
+    }
+  }, [workspace.providers]);
 
   useEffect(() => {
     let cleanup: () => void = () => {};
