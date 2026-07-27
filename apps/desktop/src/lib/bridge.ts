@@ -1,4 +1,4 @@
-import type { CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSourceItem, JobStage, LibraryPaper, ModelStreamEvent, ModelStreamRequest, PaperDocument, ProgressNotification, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
+import type { AgentProfile, AgentRun, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, JobStage, LibraryPaper, ModelStreamEvent, ModelStreamRequest, PaperDocument, ProgressNotification, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { demoMarkdown, demoPapers } from "../demo";
@@ -267,6 +267,163 @@ export async function clearContext(root: string): Promise<ContextDraft> {
   return rpc<ContextDraft>("context.clear", { root });
 }
 
+const demoAgentNow = new Date(0).toISOString();
+let demoAgentProfiles: AgentProfile[] = [
+  {
+    id: "paper-analyst",
+    name: "Paper Analyst",
+    description: "Explain passages and ground every claim in local evidence.",
+    color: "#4f6bed",
+    enabled: true,
+    providerId: "provider-openai-demo",
+    modelId: "custom-chat-model",
+    credentialId: "provider-openai-demo",
+    maxContextTokens: 128000,
+    maxOutputTokens: 4096,
+    contextSafetyRatio: 0.85,
+    temperature: 0.2,
+    timeoutSeconds: 90,
+    maxRetries: 2,
+    allowedTools: ["read_paper", "read_section", "find_evidence"],
+    networkPolicy: "none",
+    writePolicy: "confirm-write",
+    systemPromptId: "system:paper-analyst",
+    systemPrompt: "You are a scientific paper analyst. Answer from supplied context only and cite evidence anchors.",
+    promptVersion: "agent-v1",
+    createdAt: demoAgentNow,
+    updatedAt: demoAgentNow,
+  },
+  {
+    id: "innovation-agent",
+    name: "Innovation Agent",
+    description: "Synthesize testable research directions from grounded context.",
+    color: "#d98916",
+    enabled: true,
+    providerId: "provider-openai-demo",
+    modelId: "custom-reasoning-model",
+    credentialId: "provider-openai-demo",
+    maxContextTokens: 128000,
+    maxOutputTokens: 8192,
+    contextSafetyRatio: 0.85,
+    temperature: 0.3,
+    timeoutSeconds: 90,
+    maxRetries: 2,
+    allowedTools: ["search_library", "read_paper", "find_evidence", "create_note"],
+    networkPolicy: "academic",
+    writePolicy: "confirm-write",
+    systemPromptId: "system:innovation-agent",
+    systemPrompt: "Generate testable research ideas from supplied evidence and cite every factual premise.",
+    promptVersion: "agent-v1",
+    createdAt: demoAgentNow,
+    updatedAt: demoAgentNow,
+  },
+];
+let demoAgentRuns: AgentRun[] = [];
+
+export async function listAgentProfiles(root: string): Promise<AgentProfile[]> {
+  if (!nativeRuntime) return demoAgentProfiles.map((profile) => ({
+    ...profile,
+    latestRun: demoAgentRuns.find((run) => run.agentProfileId === profile.id),
+  }));
+  return rpc<AgentProfile[]>("agent.list", { root });
+}
+
+export async function upsertAgentProfile(root: string, profile: Omit<AgentProfile, "latestRun">): Promise<AgentProfile> {
+  if (!nativeRuntime) {
+    const now = new Date().toISOString();
+    const saved = { ...profile, createdAt: profile.createdAt || now, updatedAt: now };
+    demoAgentProfiles = [...demoAgentProfiles.filter((item) => item.id !== saved.id), saved];
+    return saved;
+  }
+  return rpc<AgentProfile>("agent.upsert", { root, ...profile });
+}
+
+export async function deleteAgentProfile(root: string, agentProfileId: string): Promise<void> {
+  if (!nativeRuntime) {
+    demoAgentProfiles = demoAgentProfiles.filter((item) => item.id !== agentProfileId);
+    return;
+  }
+  await rpc("agent.delete", { root, agentProfileId });
+}
+
+export async function listAgentRuns(root: string, agentProfileId?: string): Promise<AgentRun[]> {
+  if (!nativeRuntime) return demoAgentRuns.filter((run) => !agentProfileId || run.agentProfileId === agentProfileId);
+  return rpc<AgentRun[]>("agent.run_list", { root, agentProfileId, limit: 50 });
+}
+
+export async function startAgentRun(root: string, input: { agentProfileId: string; userPrompt: string; contextSnapshot: ContextSnapshot }): Promise<AgentRun> {
+  if (!nativeRuntime) {
+    const profile = demoAgentProfiles.find((item) => item.id === input.agentProfileId);
+    if (!profile) throw new Error("Unknown agent profile.");
+    const now = new Date().toISOString();
+    const run: AgentRun = {
+      id: crypto.randomUUID(),
+      agentProfileId: profile.id,
+      status: "running",
+      providerId: profile.providerId,
+      modelId: profile.modelId,
+      promptVersion: profile.promptVersion,
+      userPrompt: input.userPrompt,
+      contextSnapshot: input.contextSnapshot,
+      outputText: "",
+      usage: { inputTokens: 0, outputTokens: 0, durationMs: 0 },
+      cancelRequested: false,
+      startedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    };
+    demoAgentRuns = [run, ...demoAgentRuns];
+    return run;
+  }
+  return rpc<AgentRun>("agent.run_start", { root, ...input });
+}
+
+export async function updateAgentRun(root: string, runId: string, input: { status: "running" | "completed" | "failed" | "cancelled"; outputText: string; inputTokens?: number; outputTokens?: number; durationMs?: number; error?: string }): Promise<AgentRun> {
+  if (!nativeRuntime) {
+    const index = demoAgentRuns.findIndex((run) => run.id === runId);
+    if (index < 0) throw new Error("Unknown agent run.");
+    const now = new Date().toISOString();
+    const previous = demoAgentRuns[index];
+    const updated: AgentRun = {
+      ...previous,
+      status: input.status,
+      outputText: input.outputText,
+      usage: {
+        inputTokens: input.inputTokens ?? previous.usage.inputTokens,
+        outputTokens: input.outputTokens ?? previous.usage.outputTokens,
+        durationMs: input.durationMs ?? previous.usage.durationMs,
+      },
+      error: input.error,
+      cancelRequested: input.status === "cancelled",
+      finishedAt: input.status === "running" ? undefined : now,
+      updatedAt: now,
+    };
+    demoAgentRuns = demoAgentRuns.map((run) => run.id === runId ? updated : run);
+    return updated;
+  }
+  return rpc<AgentRun>("agent.run_update", { root, runId, ...input });
+}
+
+export async function cancelAgentRun(root: string, runId: string): Promise<AgentRun> {
+  if (!nativeRuntime) return updateAgentRun(root, runId, { status: "cancelled", outputText: demoAgentRuns.find((run) => run.id === runId)?.outputText ?? "" });
+  return rpc<AgentRun>("agent.run_cancel", { root, runId });
+}
+
+export async function retryAgentRun(root: string, runId: string): Promise<AgentRun> {
+  if (!nativeRuntime) {
+    const previous = demoAgentRuns.find((run) => run.id === runId);
+    if (!previous) throw new Error("Unknown agent run.");
+    const retried = await startAgentRun(root, {
+      agentProfileId: previous.agentProfileId,
+      userPrompt: previous.userPrompt,
+      contextSnapshot: previous.contextSnapshot,
+    });
+    retried.retryOf = runId;
+    return retried;
+  }
+  return rpc<AgentRun>("agent.run_retry", { root, runId });
+}
+
 export interface ModelStreamHandle {
   cancel: () => Promise<void>;
   dispose: () => void;
@@ -276,7 +433,7 @@ export async function startModelStream(input: ModelStreamRequest, onEvent: (even
   const safeInput = { ...input, provider: sanitizeProviderConfig(input.provider) };
   if (!nativeRuntime) {
     onEvent({ requestId: safeInput.requestId, kind: "started" });
-    onEvent({ requestId: safeInput.requestId, kind: "delta", text: `Preview translation: ${safeInput.messages.at(-1)?.content ?? ""}` });
+    onEvent({ requestId: safeInput.requestId, kind: "delta", text: `Preview response: ${safeInput.messages.at(-1)?.content ?? ""}` });
     onEvent({ requestId: safeInput.requestId, kind: "done", usage: { inputTokens: 0, outputTokens: 0 } });
     return { cancel: async () => undefined, dispose: () => undefined };
   }

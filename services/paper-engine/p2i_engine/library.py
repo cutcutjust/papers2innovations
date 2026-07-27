@@ -20,6 +20,82 @@ from .zotero import ZoteroImporter, ZoteroLockedError
 
 ProgressCallback = Callable[[ProgressEvent], None]
 
+AGENT_TOOLS = {
+    "search_library",
+    "read_paper",
+    "read_section",
+    "read_figure",
+    "find_evidence",
+    "get_references",
+    "get_related_papers",
+    "count_context_tokens",
+    "create_note",
+    "update_context",
+}
+
+DEFAULT_AGENT_PROFILES = (
+    {
+        "id": "paper-analyst",
+        "name": "Paper Analyst",
+        "description": "Explain passages and ground every claim in local evidence.",
+        "color": "#4f6bed",
+        "modelId": "custom-chat-model",
+        "allowedTools": ["read_paper", "read_section", "find_evidence"],
+        "networkPolicy": "none",
+        "systemPrompt": "You are a scientific paper analyst. Answer from the supplied local context only. Cite paper, section, block, and page anchors for factual claims. State clearly when evidence is missing.",
+    },
+    {
+        "id": "translation-agent",
+        "name": "Translation Agent",
+        "description": "Translate scientific prose while preserving structure and terminology.",
+        "color": "#3984d8",
+        "modelId": "custom-fast-model",
+        "allowedTools": ["read_paper", "read_section"],
+        "networkPolicy": "none",
+        "systemPrompt": "Translate scientific text faithfully. Preserve Markdown, LaTeX, terminology, citations, numbers, and uncertainty. Do not add unsupported explanations.",
+    },
+    {
+        "id": "figure-analyst",
+        "name": "Figure Analyst",
+        "description": "Interpret diagrams, charts, captions, and linked paper evidence.",
+        "color": "#7357d8",
+        "modelId": "custom-chat-model",
+        "allowedTools": ["read_paper", "read_figure", "find_evidence"],
+        "networkPolicy": "none",
+        "systemPrompt": "Analyze scientific figures using their captions and surrounding paper context. Separate direct observations from interpretation and cite the source page.",
+    },
+    {
+        "id": "citation-agent",
+        "name": "Citation Agent",
+        "description": "Resolve references and explain shared citation paths.",
+        "color": "#28a06a",
+        "modelId": "custom-long-context-model",
+        "allowedTools": ["get_references", "get_related_papers", "find_evidence"],
+        "networkPolicy": "academic",
+        "systemPrompt": "Analyze citation relationships without inventing metadata. Distinguish resolved local papers from unresolved references and cite graph provenance.",
+    },
+    {
+        "id": "innovation-agent",
+        "name": "Innovation Agent",
+        "description": "Synthesize testable research directions from grounded context.",
+        "color": "#d98916",
+        "modelId": "custom-reasoning-model",
+        "allowedTools": ["search_library", "read_paper", "find_evidence", "create_note"],
+        "networkPolicy": "academic",
+        "systemPrompt": "Generate testable research ideas from supplied evidence. For every factual premise cite its paper anchor. Include a falsifiable hypothesis, minimum experiment, and novelty risks.",
+    },
+    {
+        "id": "novelty-critic",
+        "name": "Novelty Critic",
+        "description": "Challenge novelty and expose unsupported assumptions.",
+        "color": "#d64545",
+        "modelId": "custom-reasoning-model",
+        "allowedTools": ["search_library", "get_related_papers", "find_evidence"],
+        "networkPolicy": "academic",
+        "systemPrompt": "Act as a rigorous novelty critic. Identify closest prior work, unsupported assumptions, confounders, and decisive falsification tests. Never fabricate evidence.",
+    },
+)
+
 
 class Library:
     def __init__(self, root: str | Path, ocr_page: Callable[[dict], dict] | None = None):
@@ -48,6 +124,8 @@ class Library:
             directory.mkdir(parents=True, exist_ok=True)
         self.db.migrate()
         if not self._initialized:
+            self._ensure_default_agent_profiles()
+            self._recover_interrupted_agent_runs()
             recovered = self._recover_interrupted_jobs()
             self._initialized = True
             self._recovered_jobs = recovered
@@ -1387,6 +1465,410 @@ class Library:
         with self.db.connect() as connection:
             connection.execute("DELETE FROM context_items")
         return self.get_context_draft()
+
+    @staticmethod
+    def _normalize_agent_profile(
+        payload: dict[str, Any], created_at: str | None = None
+    ) -> dict[str, Any]:
+        profile_id = str(payload.get("id") or uuid.uuid4()).strip()
+        name = str(payload.get("name", "")).strip()
+        description = str(payload.get("description", "")).strip()
+        provider_id = str(payload.get("providerId", "")).strip()
+        model_id = str(payload.get("modelId", "")).strip()
+        credential_id = str(payload.get("credentialId", "")).strip()
+        system_prompt = str(payload.get("systemPrompt", "")).strip()
+        if not all((profile_id, name, provider_id, model_id, credential_id, system_prompt)):
+            raise ValueError(
+                "Agent id, name, provider, model, credential, and system prompt are required"
+            )
+        if len(profile_id) > 120 or len(name) > 160 or len(system_prompt) > 50000:
+            raise ValueError("Agent profile fields exceed their size limit")
+
+        allowed_tools = list(dict.fromkeys(str(item) for item in payload.get("allowedTools", [])))
+        unknown_tools = sorted(set(allowed_tools) - AGENT_TOOLS)
+        if unknown_tools:
+            raise ValueError("Unknown agent tools: " + ", ".join(unknown_tools))
+        network_policy = str(payload.get("networkPolicy", "none"))
+        write_policy = str(payload.get("writePolicy", "read-only"))
+        if network_policy not in {"none", "academic", "full"}:
+            raise ValueError("Invalid agent network policy")
+        if write_policy not in {"read-only", "confirm-write", "trusted-write"}:
+            raise ValueError("Invalid agent write policy")
+
+        context_safety_ratio = float(payload.get("contextSafetyRatio", 0.85))
+        temperature = float(payload.get("temperature", 0.2))
+        max_context_tokens = int(payload.get("maxContextTokens", 128000))
+        max_output_tokens = int(payload.get("maxOutputTokens", 4096))
+        timeout_seconds = int(payload.get("timeoutSeconds", 90))
+        max_retries = int(payload.get("maxRetries", 2))
+        if not 0 < context_safety_ratio <= 1:
+            raise ValueError("Agent context safety ratio must be in (0, 1]")
+        if not 0 <= temperature <= 2:
+            raise ValueError("Agent temperature must be between 0 and 2")
+        if min(max_context_tokens, max_output_tokens, timeout_seconds) < 1 or max_retries < 0:
+            raise ValueError("Agent token, timeout, and retry limits are invalid")
+
+        color = str(payload.get("color", "#4f6bed")).strip().lower()
+        if len(color) != 7 or not color.startswith("#") or any(
+            character not in "0123456789abcdef" for character in color[1:]
+        ):
+            color = "#4f6bed"
+        now = utc_now()
+        return {
+            "id": profile_id,
+            "name": name,
+            "description": description,
+            "color": color,
+            "enabled": 1 if bool(payload.get("enabled", True)) else 0,
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "credential_id": credential_id,
+            "max_context_tokens": max_context_tokens,
+            "max_output_tokens": max_output_tokens,
+            "context_safety_ratio": context_safety_ratio,
+            "temperature": temperature,
+            "reasoning_effort": str(payload.get("reasoningEffort", "")).strip() or None,
+            "timeout_seconds": timeout_seconds,
+            "max_retries": max_retries,
+            "max_cost_per_run": payload.get("maxCostPerRun"),
+            "max_cost_per_day": payload.get("maxCostPerDay"),
+            "allowed_tools_json": json.dumps(allowed_tools, separators=(",", ":")),
+            "network_policy": network_policy,
+            "write_policy": write_policy,
+            "system_prompt_id": str(
+                payload.get("systemPromptId") or f"system:{profile_id}"
+            ),
+            "system_prompt": system_prompt,
+            "prompt_version": str(payload.get("promptVersion") or "agent-v1"),
+            "created_at": created_at or now,
+            "updated_at": now,
+        }
+
+    @staticmethod
+    def _write_agent_profile(connection: Any, record: dict[str, Any]) -> None:
+        connection.execute(
+            "INSERT INTO agent_profiles(id, name, description, color, enabled, provider_id, "
+            "model_id, credential_id, max_context_tokens, max_output_tokens, "
+            "context_safety_ratio, temperature, reasoning_effort, timeout_seconds, max_retries, "
+            "max_cost_per_run, max_cost_per_day, allowed_tools_json, network_policy, write_policy, "
+            "system_prompt_id, system_prompt, prompt_version, created_at, updated_at) "
+            "VALUES (:id, :name, :description, :color, :enabled, :provider_id, :model_id, "
+            ":credential_id, :max_context_tokens, :max_output_tokens, :context_safety_ratio, "
+            ":temperature, :reasoning_effort, :timeout_seconds, :max_retries, :max_cost_per_run, "
+            ":max_cost_per_day, :allowed_tools_json, :network_policy, :write_policy, "
+            ":system_prompt_id, :system_prompt, :prompt_version, :created_at, :updated_at) "
+            "ON CONFLICT(id) DO UPDATE SET name = excluded.name, description = excluded.description, "
+            "color = excluded.color, enabled = excluded.enabled, provider_id = excluded.provider_id, "
+            "model_id = excluded.model_id, credential_id = excluded.credential_id, "
+            "max_context_tokens = excluded.max_context_tokens, "
+            "max_output_tokens = excluded.max_output_tokens, "
+            "context_safety_ratio = excluded.context_safety_ratio, temperature = excluded.temperature, "
+            "reasoning_effort = excluded.reasoning_effort, timeout_seconds = excluded.timeout_seconds, "
+            "max_retries = excluded.max_retries, max_cost_per_run = excluded.max_cost_per_run, "
+            "max_cost_per_day = excluded.max_cost_per_day, "
+            "allowed_tools_json = excluded.allowed_tools_json, network_policy = excluded.network_policy, "
+            "write_policy = excluded.write_policy, system_prompt_id = excluded.system_prompt_id, "
+            "system_prompt = excluded.system_prompt, prompt_version = excluded.prompt_version, "
+            "updated_at = excluded.updated_at",
+            record,
+        )
+
+    def _ensure_default_agent_profiles(self) -> None:
+        with self.db.connect() as connection:
+            if connection.execute("SELECT COUNT(*) FROM agent_profiles").fetchone()[0]:
+                return
+            for default in DEFAULT_AGENT_PROFILES:
+                provider_id = (
+                    "provider-anthropic-demo"
+                    if default["modelId"] == "custom-long-context-model"
+                    else "provider-openai-demo"
+                )
+                payload = {
+                    **default,
+                    "enabled": True,
+                    "providerId": provider_id,
+                    "credentialId": provider_id,
+                    "maxContextTokens": 128000,
+                    "maxOutputTokens": 4096,
+                    "contextSafetyRatio": 0.85,
+                    "temperature": 0.2,
+                    "timeoutSeconds": 90,
+                    "maxRetries": 2,
+                    "writePolicy": "confirm-write",
+                    "systemPromptId": f"system:{default['id']}",
+                    "promptVersion": "agent-v1",
+                }
+                self._write_agent_profile(
+                    connection, self._normalize_agent_profile(payload)
+                )
+
+    def _recover_interrupted_agent_runs(self) -> None:
+        now = utc_now()
+        with self.db.connect() as connection:
+            connection.execute(
+                "UPDATE agent_runs SET status = 'interrupted', "
+                "error = COALESCE(error, 'Model stream interrupted by engine restart'), "
+                "finished_at = ?, updated_at = ? WHERE status = 'running'",
+                (now, now),
+            )
+
+    @classmethod
+    def _agent_profile_contract(
+        cls, record: Any, latest_run: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        profile = {
+            "id": record["id"],
+            "name": record["name"],
+            "description": record["description"],
+            "color": record["color"],
+            "enabled": bool(record["enabled"]),
+            "providerId": record["provider_id"],
+            "modelId": record["model_id"],
+            "credentialId": record["credential_id"],
+            "maxContextTokens": record["max_context_tokens"],
+            "maxOutputTokens": record["max_output_tokens"],
+            "contextSafetyRatio": record["context_safety_ratio"],
+            "temperature": record["temperature"],
+            "reasoningEffort": record["reasoning_effort"],
+            "timeoutSeconds": record["timeout_seconds"],
+            "maxRetries": record["max_retries"],
+            "maxCostPerRun": record["max_cost_per_run"],
+            "maxCostPerDay": record["max_cost_per_day"],
+            "allowedTools": json.loads(record["allowed_tools_json"]),
+            "networkPolicy": record["network_policy"],
+            "writePolicy": record["write_policy"],
+            "systemPromptId": record["system_prompt_id"],
+            "systemPrompt": record["system_prompt"],
+            "promptVersion": record["prompt_version"],
+            "createdAt": record["created_at"],
+            "updatedAt": record["updated_at"],
+        }
+        if latest_run:
+            profile["latestRun"] = latest_run
+        return profile
+
+    def list_agent_profiles(self) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.db.connect() as connection:
+            profiles = connection.execute(
+                "SELECT * FROM agent_profiles ORDER BY created_at, id"
+            ).fetchall()
+            latest_runs = {
+                row["agent_profile_id"]: self._agent_run_contract(row)
+                for row in connection.execute(
+                    "SELECT ar.* FROM agent_runs ar JOIN (SELECT agent_profile_id, MAX(created_at) "
+                    "created_at FROM agent_runs GROUP BY agent_profile_id) latest "
+                    "ON latest.agent_profile_id = ar.agent_profile_id "
+                    "AND latest.created_at = ar.created_at"
+                )
+            }
+        return [
+            self._agent_profile_contract(row, latest_runs.get(row["id"]))
+            for row in profiles
+        ]
+
+    def upsert_agent_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        profile_id = str(payload.get("id") or uuid.uuid4())
+        with self.db.connect() as connection:
+            existing = connection.execute(
+                "SELECT created_at FROM agent_profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+            record = self._normalize_agent_profile(
+                {**payload, "id": profile_id}, existing["created_at"] if existing else None
+            )
+            self._write_agent_profile(connection, record)
+        return self._agent_profile_contract(record)
+
+    def delete_agent_profile(self, profile_id: str) -> bool:
+        self.initialize()
+        with self.db.connect() as connection:
+            if connection.execute(
+                "SELECT 1 FROM agent_runs WHERE agent_profile_id = ? LIMIT 1", (profile_id,)
+            ).fetchone():
+                raise ValueError("Agent profiles with run history cannot be deleted; disable it instead")
+            cursor = connection.execute("DELETE FROM agent_profiles WHERE id = ?", (profile_id,))
+        return bool(cursor.rowcount)
+
+    @staticmethod
+    def _agent_run_contract(record: Any) -> dict[str, Any]:
+        return {
+            "id": record["id"],
+            "agentProfileId": record["agent_profile_id"],
+            "retryOf": record["retry_of"],
+            "status": record["status"],
+            "providerId": record["provider_id"],
+            "modelId": record["model_id"],
+            "promptVersion": record["prompt_version"],
+            "userPrompt": record["user_prompt"],
+            "contextSnapshot": json.loads(record["context_snapshot_json"]),
+            "outputText": record["output_text"],
+            "usage": {
+                "inputTokens": record["input_tokens"],
+                "outputTokens": record["output_tokens"],
+                "durationMs": record["duration_ms"],
+            },
+            "error": record["error"],
+            "cancelRequested": bool(record["cancel_requested"]),
+            "startedAt": record["started_at"],
+            "finishedAt": record["finished_at"],
+            "createdAt": record["created_at"],
+            "updatedAt": record["updated_at"],
+        }
+
+    def list_agent_runs(
+        self, profile_id: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        limit = max(1, min(int(limit), 200))
+        with self.db.connect() as connection:
+            if profile_id:
+                rows = connection.execute(
+                    "SELECT * FROM agent_runs WHERE agent_profile_id = ? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (profile_id, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM agent_runs ORDER BY created_at DESC LIMIT ?", (limit,)
+                ).fetchall()
+        return [self._agent_run_contract(row) for row in rows]
+
+    def _insert_agent_run(
+        self,
+        connection: Any,
+        profile: Any,
+        user_prompt: str,
+        context_snapshot: dict[str, Any],
+        retry_of: str | None = None,
+    ) -> dict[str, Any]:
+        if not bool(profile["enabled"]):
+            raise ValueError("Agent profile is disabled")
+        user_prompt = user_prompt.strip()
+        if not user_prompt or len(user_prompt) > 100000:
+            raise ValueError("Agent run prompt is empty or too large")
+        snapshot_json = json.dumps(context_snapshot, ensure_ascii=False, separators=(",", ":"))
+        if len(snapshot_json.encode("utf-8")) > 2 * 1024 * 1024:
+            raise ValueError("Agent context snapshot exceeds 2 MB")
+        now = utc_now()
+        record = {
+            "id": str(uuid.uuid4()),
+            "agent_profile_id": profile["id"],
+            "retry_of": retry_of,
+            "status": "running",
+            "provider_id": profile["provider_id"],
+            "model_id": profile["model_id"],
+            "prompt_version": profile["prompt_version"],
+            "user_prompt": user_prompt,
+            "context_snapshot_json": snapshot_json,
+            "output_text": "",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "duration_ms": 0,
+            "error": None,
+            "cancel_requested": 0,
+            "started_at": now,
+            "finished_at": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        connection.execute(
+            "INSERT INTO agent_runs(id, agent_profile_id, retry_of, status, provider_id, "
+            "model_id, prompt_version, user_prompt, context_snapshot_json, output_text, "
+            "input_tokens, output_tokens, duration_ms, error, cancel_requested, started_at, "
+            "finished_at, created_at, updated_at) VALUES (:id, :agent_profile_id, :retry_of, "
+            ":status, :provider_id, :model_id, :prompt_version, :user_prompt, "
+            ":context_snapshot_json, :output_text, :input_tokens, :output_tokens, :duration_ms, "
+            ":error, :cancel_requested, :started_at, :finished_at, :created_at, :updated_at)",
+            record,
+        )
+        return record
+
+    def start_agent_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        profile_id = str(payload.get("agentProfileId", ""))
+        context_snapshot = payload.get("contextSnapshot") or {}
+        if not isinstance(context_snapshot, dict):
+            raise ValueError("Agent context snapshot must be an object")
+        with self.db.connect() as connection:
+            profile = connection.execute(
+                "SELECT * FROM agent_profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+            if not profile:
+                raise KeyError(f"Unknown agent profile: {profile_id}")
+            record = self._insert_agent_run(
+                connection, profile, str(payload.get("userPrompt", "")), context_snapshot
+            )
+        return self._agent_run_contract(record)
+
+    def update_agent_run(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        status = str(payload.get("status", "running"))
+        if status not in {"running", "completed", "failed", "cancelled"}:
+            raise ValueError("Invalid agent run status update")
+        output_text = str(payload.get("outputText", ""))
+        if len(output_text) > 2_000_000:
+            raise ValueError("Agent run output exceeds 2 million characters")
+        now = utc_now()
+        finished_at = now if status in {"completed", "failed", "cancelled"} else None
+        error = str(payload.get("error", ""))[:4000] or None
+        with self.db.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM agent_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if not existing:
+                raise KeyError(f"Unknown agent run: {run_id}")
+            if existing["status"] not in {"running", "interrupted"}:
+                if existing["status"] == status:
+                    return self._agent_run_contract(existing)
+                raise ValueError("Agent run is already terminal")
+            connection.execute(
+                "UPDATE agent_runs SET status = ?, output_text = ?, input_tokens = ?, "
+                "output_tokens = ?, duration_ms = ?, error = ?, cancel_requested = ?, "
+                "finished_at = COALESCE(?, finished_at), updated_at = ? WHERE id = ?",
+                (
+                    status,
+                    output_text,
+                    max(0, int(payload.get("inputTokens", existing["input_tokens"]))),
+                    max(0, int(payload.get("outputTokens", existing["output_tokens"]))),
+                    max(0, int(payload.get("durationMs", existing["duration_ms"]))),
+                    error,
+                    1 if status == "cancelled" else existing["cancel_requested"],
+                    finished_at,
+                    now,
+                    run_id,
+                ),
+            )
+            record = connection.execute(
+                "SELECT * FROM agent_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        return self._agent_run_contract(record)
+
+    def cancel_agent_run(self, run_id: str) -> dict[str, Any]:
+        return self.update_agent_run(run_id, {"status": "cancelled"})
+
+    def retry_agent_run(self, run_id: str) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            previous = connection.execute(
+                "SELECT * FROM agent_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if not previous:
+                raise KeyError(f"Unknown agent run: {run_id}")
+            if previous["status"] == "running":
+                raise ValueError("Cannot retry an active agent run")
+            profile = connection.execute(
+                "SELECT * FROM agent_profiles WHERE id = ?",
+                (previous["agent_profile_id"],),
+            ).fetchone()
+            record = self._insert_agent_run(
+                connection,
+                profile,
+                previous["user_prompt"],
+                json.loads(previous["context_snapshot_json"]),
+                retry_of=run_id,
+            )
+        return self._agent_run_contract(record)
 
     @staticmethod
     def _translation_contract(record: dict[str, Any]) -> dict[str, Any]:

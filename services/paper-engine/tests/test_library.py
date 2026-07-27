@@ -36,7 +36,84 @@ def test_initializes_versioned_library_layout(tmp_path: Path) -> None:
 
     with sqlite3.connect(result["database"]) as connection:
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-    assert version == 5
+    assert version == 6
+
+
+def test_agent_profiles_runs_retry_and_restart_recovery_are_persistent(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    profiles = library.list_agent_profiles()
+    assert len(profiles) == 6
+    profile = profiles[0]
+    assert profile["allowedTools"]
+    assert profile["systemPrompt"]
+
+    snapshot = {
+        "id": "snapshot-1",
+        "agentProfileId": profile["id"],
+        "modelId": profile["modelId"],
+        "items": [],
+        "tokenBreakdown": {
+            "systemPrompt": 10,
+            "tools": 20,
+            "conversation": 0,
+            "papers": 0,
+            "figures": 0,
+            "outputReserve": 30,
+            "safetyBuffer": 40,
+        },
+        "promptVersion": profile["promptVersion"],
+        "toolVersions": {},
+        "retrievalQueries": [],
+        "externalResults": [],
+        "createdAt": "2026-07-27T00:00:00Z",
+    }
+    first = library.start_agent_run({
+        "agentProfileId": profile["id"],
+        "userPrompt": "Summarize grounded evidence.",
+        "contextSnapshot": snapshot,
+    })
+    checkpoint = library.update_agent_run(first["id"], {
+        "status": "running",
+        "outputText": "Partial grounded output",
+        "durationMs": 250,
+    })
+    assert checkpoint["status"] == "running"
+    assert checkpoint["outputText"].startswith("Partial")
+
+    restarted = Library(tmp_path)
+    restarted.initialize()
+    interrupted = restarted.list_agent_runs(profile["id"])[0]
+    assert interrupted["status"] == "interrupted"
+    assert interrupted["outputText"] == "Partial grounded output"
+
+    retried = restarted.retry_agent_run(interrupted["id"])
+    completed = restarted.update_agent_run(retried["id"], {
+        "status": "completed",
+        "outputText": "Persisted grounded output.",
+        "inputTokens": 42,
+        "outputTokens": 9,
+        "durationMs": 800,
+    })
+    assert completed["retryOf"] == interrupted["id"]
+    assert completed["usage"] == {"inputTokens": 42, "outputTokens": 9, "durationMs": 800}
+    assert Library(tmp_path).list_agent_runs(profile["id"])[0]["outputText"] == "Persisted grounded output."
+
+
+def test_agent_profile_rejects_unknown_tool_and_protects_run_history(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    profile = library.list_agent_profiles()[0]
+    with pytest.raises(ValueError, match="Unknown agent tools"):
+        library.upsert_agent_profile({**profile, "allowedTools": ["shell"]})
+
+    library.start_agent_run({
+        "agentProfileId": profile["id"],
+        "userPrompt": "Ground this claim.",
+        "contextSnapshot": {},
+    })
+    with pytest.raises(ValueError, match="run history"):
+        library.delete_agent_profile(profile["id"])
 
 
 def test_reader_translation_is_revisioned_and_persisted(tmp_path: Path) -> None:

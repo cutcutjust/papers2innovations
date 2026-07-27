@@ -237,6 +237,8 @@ export interface TranslationRecord {
 export interface AgentProfile {
   id: string;
   name: string;
+  description: string;
+  color: string;
   enabled: boolean;
   providerId: string;
   modelId: string;
@@ -254,7 +256,33 @@ export interface AgentProfile {
   networkPolicy: "none" | "academic" | "full";
   writePolicy: "read-only" | "confirm-write" | "trusted-write";
   systemPromptId: string;
+  systemPrompt: string;
   promptVersion: string;
+  createdAt: string;
+  updatedAt: string;
+  latestRun?: AgentRun;
+}
+
+export type AgentRunStatus = "running" | "completed" | "failed" | "cancelled" | "interrupted";
+
+export interface AgentRun {
+  id: string;
+  agentProfileId: string;
+  retryOf?: string;
+  status: AgentRunStatus;
+  providerId: string;
+  modelId: string;
+  promptVersion: string;
+  userPrompt: string;
+  contextSnapshot: ContextSnapshot;
+  outputText: string;
+  usage: { inputTokens: number; outputTokens: number; durationMs: number };
+  error?: string;
+  cancelRequested: boolean;
+  startedAt?: string;
+  finishedAt?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type ContextLoadMode = "full" | "structured" | "compressed" | "retrieval" | "sections";
@@ -325,7 +353,9 @@ export interface ContextSnapshot {
   modelId: string;
   reasoningEffort?: string;
   items: Array<{
+    contextItemId?: string;
     paperId: string;
+    sourceHash?: string;
     mode: ContextLoadMode;
     sectionIds: string[];
     figureIds: string[];

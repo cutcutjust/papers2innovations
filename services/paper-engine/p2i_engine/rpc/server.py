@@ -155,6 +155,28 @@ class RpcServer:
             return self.library(params["root"]).remove_paper_from_context(params["paperId"])
         if method == "context.clear":
             return self.library(params["root"]).clear_context()
+        if method == "agent.list":
+            return self.library(params["root"]).list_agent_profiles()
+        if method == "agent.upsert":
+            return self.library(params["root"]).upsert_agent_profile(params)
+        if method == "agent.delete":
+            return {
+                "deleted": self.library(params["root"]).delete_agent_profile(
+                    params["agentProfileId"]
+                )
+            }
+        if method == "agent.run_list":
+            return self.library(params["root"]).list_agent_runs(
+                params.get("agentProfileId"), int(params.get("limit", 50))
+            )
+        if method == "agent.run_start":
+            return self.library(params["root"]).start_agent_run(params)
+        if method == "agent.run_update":
+            return self.library(params["root"]).update_agent_run(params["runId"], params)
+        if method == "agent.run_cancel":
+            return self.library(params["root"]).cancel_agent_run(params["runId"])
+        if method == "agent.run_retry":
+            return self.library(params["root"]).retry_agent_run(params["runId"])
         if method == "zotero.inspect":
             from ..zotero import ZoteroImporter
 
