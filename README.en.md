@@ -6,17 +6,18 @@
   <p>
     <a href="https://github.com/cutcutjust/papers2innovations/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/cutcutjust/papers2innovations?style=flat-square&color=5865df" /></a>
     <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078d4?style=flat-square&logo=windows" />
+    <img alt="macOS 11 or newer" src="https://img.shields.io/badge/macOS-11%2B-111111?style=flat-square&logo=apple" />
     <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24c8db?style=flat-square&logo=tauri&logoColor=white" />
     <img alt="Local first" src="https://img.shields.io/badge/data-local--first-238636?style=flat-square" />
   </p>
-  <p><a href="https://github.com/cutcutjust/papers2innovations/releases/latest"><strong>Download for Windows</strong></a></p>
+  <p><a href="https://github.com/cutcutjust/papers2innovations/releases/latest"><strong>Download a release</strong></a></p>
 </div>
 
 ![Section-based Papers2Innovations Reader](docs/images/reader-workspace.png)
 
 Papers2Innovations addresses two practical barriers: English terminology, equations, and long-form structure interrupt reading for Chinese speakers; newcomers may finish a paper yet still struggle to compare methods, locate gaps, and formulate a research question. It reconstructs PDFs as section-based Markdown linked to source pages, then keeps translation, explanation, evidence context, and innovation analysis in one recoverable local workspace.
 
-> Current release: `v0.1.17` for Windows x64. The project remains in active `0.1.x` development; keep backups of irreplaceable source PDFs.
+> Current source version: `v0.1.17` for Windows x64 and universal macOS (Apple Silicon + Intel). The project remains in active `0.1.x` development; keep backups of irreplaceable source PDFs.
 
 ## Why Papers2Innovations exists
 
@@ -85,8 +86,8 @@ The innovation workbench binds each run to an exact context snapshot. Stages may
 
 ## Quick start
 
-1. Download the latest Windows installer from [GitHub Releases](https://github.com/cutcutjust/papers2innovations/releases/latest).
-2. Open the app and select an independent library directory such as `E:\Papers2Innovations-Library`.
+1. Download the latest package for your platform from [GitHub Releases](https://github.com/cutcutjust/papers2innovations/releases/latest); macOS uses the universal `.dmg`.
+2. Open the app and select an independent library directory such as `~/Documents/Papers2Innovations-Library`.
 3. Place PDFs in `Papers/`, or close Zotero and use **Import Zotero**.
 4. Track hashing, layout, OCR, image, table, and indexing stages in **Activity**; failed stages can be retried.
 5. Create nested collections and drag papers into the research-topic tree.
@@ -115,11 +116,23 @@ The paper library is independent of the application install directory. Upgrading
 
 The app checks the signed GitHub `latest.json` after startup. A new version can be downloaded, installed, and relaunched in place; **Check for updates** is also available under Security & Application. GitHub availability never blocks local work.
 
-Uninstall through Windows Installed Apps, the Start menu shortcut, or Settings. The uninstaller removes app files while preserving the independent library and user data.
+On Windows, uninstall through Installed Apps, the Start menu shortcut, or Settings. On macOS, move the app from Applications to Trash. Both methods remove only the app and preserve the independent library and user data.
 
 ## Development
 
 Prerequisites: Node.js 20+, Python 3.11, Rust stable with `rustfmt` and `clippy`, and Tauri 2 platform dependencies.
+
+On an Apple Silicon Mac with Xcode Command Line Tools, Rust, and Rosetta 2 installed, one command creates a universal `.app` and `.dmg` for Apple Silicon and Intel. The script downloads and verifies an official universal Python package without modifying the system Python.
+
+```bash
+git clone https://github.com/cutcutjust/papers2innovations.git
+cd papers2innovations
+npm run macos:build
+```
+
+Bundles are written to `apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/`.
+
+Windows development environment:
 
 ```powershell
 git clone https://github.com/cutcutjust/papers2innovations.git

@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "npm run dev --workspace @p2i/desktop",
     "build": "npm run build --workspace @p2i/contracts && npm run build --workspace @p2i/desktop",
+    "macos:build": "./scripts/build-macos.sh",
     "typecheck": "npm run typecheck --workspace @p2i/contracts && npm run typecheck --workspace @p2i/desktop",
     "test": "npm run test --workspace @p2i/desktop"
   },
