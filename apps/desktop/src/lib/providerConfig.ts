@@ -24,3 +24,8 @@ export function sanitizeProviderConfig(provider: ProviderConfig): ProviderConfig
     headers: Object.keys(safeHeaders).length ? safeHeaders : undefined,
   };
 }
+
+export function providerIdForModel(modelId: string): string {
+  const safeModelId = modelId.trim().replace(/[^A-Za-z0-9._:-]+/g, "-").replace(/^-+|-+$/g, "");
+  return `provider-${safeModelId || "custom"}`.slice(0, 128);
+}

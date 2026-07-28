@@ -123,6 +123,18 @@ export async function testQwenConnection(): Promise<{
   return invoke("qwen_test_connection");
 }
 
+export async function configureOcrProvider(provider: ProviderConfig, model: ModelConfig, consent: boolean): Promise<void> {
+  if (!nativeRuntime) return;
+  await invoke("ocr_provider_configure", {
+    input: { provider: sanitizeProviderConfig(provider), model, consent },
+  });
+}
+
+export async function clearOcrProvider(): Promise<void> {
+  if (!nativeRuntime) return;
+  await invoke("credential_delete");
+}
+
 const providerStoreKey = (credentialId: string) => `model-provider:${credentialId}`;
 
 export async function saveProviderCredential(provider: ProviderConfig, apiKey: string): Promise<CredentialSummary> {

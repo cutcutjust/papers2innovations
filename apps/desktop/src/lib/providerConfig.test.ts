@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isSensitiveProviderHeader, sanitizeProviderConfig } from "./providerConfig";
+import { isSensitiveProviderHeader, providerIdForModel, sanitizeProviderConfig } from "./providerConfig";
 
 describe("provider configuration security", () => {
   it("recognizes credential-bearing headers case-insensitively", () => {
@@ -26,5 +26,10 @@ describe("provider configuration security", () => {
 
     expect(provider.headers).toEqual({ "OpenAI-Organization": "org-test" });
     expect(JSON.stringify(provider)).not.toContain("secret");
+  });
+
+  it("creates credential IDs accepted by the native vault", () => {
+    expect(providerIdForModel("qwen3.6-plus")).toBe("provider-qwen3.6-plus");
+    expect(providerIdForModel("vendor/model latest")).toBe("provider-vendor-model-latest");
   });
 });

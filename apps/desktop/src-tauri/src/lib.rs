@@ -44,6 +44,7 @@ struct OcrConfig {
     base_url: Option<String>,
     consent: bool,
     workspace_required: bool,
+    model: Option<String>,
 }
 
 #[derive(Default)]
@@ -98,6 +99,14 @@ struct CredentialInput {
     #[serde(default)]
     workspace_id: Option<String>,
     base_url: Option<String>,
+    consent: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OcrProviderInput {
+    provider: ProviderConfigInput,
+    model: ModelConfigInput,
     consent: bool,
 }
 
@@ -446,7 +455,7 @@ impl Engine {
         }
         let base_url = ocr_base_url(&config);
         let body = json!({
-            "model": request.model,
+            "model": config.model.as_deref().unwrap_or(&request.model),
             "messages": [{
                 "role": "user",
                 "content": [
@@ -606,6 +615,7 @@ fn credential_set(engine: State<'_, Engine>, input: CredentialInput) -> Result<(
         base_url: input.base_url.filter(|value| !value.trim().is_empty()),
         consent: input.consent,
         workspace_required: false,
+        model: None,
     };
     Ok(())
 }
@@ -625,7 +635,7 @@ fn validate_credential_id(credential_id: &str) -> Result<(), String> {
         || credential_id.len() > 128
         || !credential_id
             .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "-_:".contains(character))
+            .all(|character| character.is_ascii_alphanumeric() || "-_:.".contains(character))
     {
         return Err("Invalid provider credential ID".into());
     }
@@ -663,6 +673,38 @@ fn provider_credential_delete(
         .lock()
         .map_err(|_| "Provider credential lock poisoned")?
         .remove(&credential_id);
+    Ok(())
+}
+
+#[tauri::command]
+fn ocr_provider_configure(
+    engine: State<'_, Engine>,
+    input: OcrProviderInput,
+) -> Result<(), String> {
+    validate_credential_id(&input.provider.credential_id)?;
+    if input.provider.format != "openai" {
+        return Err("Full-page OCR requires an OpenAI-compatible model".into());
+    }
+    let api_key = engine
+        .0
+        .model_credentials
+        .lock()
+        .map_err(|_| "Provider credential lock poisoned")?
+        .get(&input.provider.credential_id)
+        .cloned()
+        .ok_or("Provider credential is not configured")?;
+    *engine
+        .0
+        .ocr
+        .lock()
+        .map_err(|_| "OCR config lock poisoned")? = OcrConfig {
+        api_key: Some(api_key),
+        workspace_id: None,
+        base_url: Some(input.provider.base_url.trim_end_matches('/').to_owned()),
+        consent: input.consent,
+        workspace_required: false,
+        model: Some(input.model.model),
+    };
     Ok(())
 }
 
@@ -813,7 +855,7 @@ fn ocr_status(engine: State<'_, Engine>) -> Result<Value, String> {
         "consent": config.consent,
         "workspaceConfigured": config.workspace_id.is_some(),
         "workspaceRequired": config.workspace_required,
-        "model": "qwen3.5-ocr",
+        "model": config.model.as_deref().unwrap_or("qwen3.5-ocr"),
         "baseUrl": ocr_base_url(&config)
     }))
 }
@@ -1415,6 +1457,7 @@ pub fn run() {
             credential_delete,
             provider_credential_set,
             provider_credential_delete,
+            ocr_provider_configure,
             provider_test_connection,
             model_stream_start,
             model_stream_cancel,
@@ -1433,8 +1476,8 @@ pub fn run() {
 mod tests {
     use super::{
         consume_model_stream, model_endpoint, model_headers, send_model_request, stream_delta,
-        Engine, ModelConfigInput, ModelMessageInput, ModelStreamInput, OcrLimiter,
-        ProviderConfigInput,
+        validate_credential_id, Engine, ModelConfigInput, ModelMessageInput, ModelStreamInput,
+        OcrLimiter, ProviderConfigInput,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -1521,6 +1564,13 @@ mod tests {
             thread.join().expect("thread");
         }
         assert_eq!(maximum.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn provider_credential_ids_support_dotted_model_names() {
+        assert!(validate_credential_id("provider-qwen3.6-plus").is_ok());
+        assert!(validate_credential_id("provider:qwen_ocr-2026").is_ok());
+        assert!(validate_credential_id("provider/qwen").is_err());
     }
 
     #[test]

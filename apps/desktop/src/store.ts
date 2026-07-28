@@ -32,6 +32,8 @@ interface WorkspaceState {
   contextCompressionModelId: string;
   markdownFormattingModelId: string;
   autoFormatMarkdown: boolean;
+  fullPageOcrModelId: string;
+  ocrConsent: boolean;
   setRoot: (root: string) => void;
   selectPaper: (paperId: string) => void;
   openReader: (paperId?: string) => void;
@@ -46,6 +48,8 @@ interface WorkspaceState {
   setContextCompressionModelId: (modelId: string) => void;
   setMarkdownFormattingModelId: (modelId: string) => void;
   setAutoFormatMarkdown: (enabled: boolean) => void;
+  setFullPageOcrModelId: (modelId: string) => void;
+  setOcrConsent: (enabled: boolean) => void;
 }
 
 const savedRoot = localStorage.getItem("p2i.libraryRoot") ?? "";
@@ -110,6 +114,8 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   contextCompressionModelId: localStorage.getItem("p2i.contextCompressionModelId") ?? initialRegistry.models[0]?.id ?? "",
   markdownFormattingModelId: localStorage.getItem("p2i.markdownFormattingModelId") ?? initialRegistry.models[0]?.id ?? "",
   autoFormatMarkdown: localStorage.getItem("p2i.autoFormatMarkdown") === "true",
+  fullPageOcrModelId: localStorage.getItem("p2i.fullPageOcrModelId") ?? "",
+  ocrConsent: localStorage.getItem("p2i.ocrConsent") === "true",
   setRoot: (root) => {
     localStorage.setItem("p2i.libraryRoot", root);
     set({ root });
@@ -139,8 +145,10 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
     const providers = state.providers.filter((provider) => usedProviders.has(provider.id));
     persistModelRegistry(providers, customModels);
     const markdownFormattingModelId = state.markdownFormattingModelId === modelId ? customModels[0]?.id ?? "" : state.markdownFormattingModelId;
+    const fullPageOcrModelId = state.fullPageOcrModelId === modelId ? "" : state.fullPageOcrModelId;
     localStorage.setItem("p2i.markdownFormattingModelId", markdownFormattingModelId);
-    return { providers, customModels, markdownFormattingModelId };
+    localStorage.setItem("p2i.fullPageOcrModelId", fullPageOcrModelId);
+    return { providers, customModels, markdownFormattingModelId, fullPageOcrModelId };
   }),
   setContextCompressionModelId: (contextCompressionModelId) => {
     localStorage.setItem("p2i.contextCompressionModelId", contextCompressionModelId);
@@ -153,5 +161,13 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   setAutoFormatMarkdown: (autoFormatMarkdown) => {
     localStorage.setItem("p2i.autoFormatMarkdown", String(autoFormatMarkdown));
     set({ autoFormatMarkdown });
+  },
+  setFullPageOcrModelId: (fullPageOcrModelId) => {
+    localStorage.setItem("p2i.fullPageOcrModelId", fullPageOcrModelId);
+    set({ fullPageOcrModelId });
+  },
+  setOcrConsent: (ocrConsent) => {
+    localStorage.setItem("p2i.ocrConsent", String(ocrConsent));
+    set({ ocrConsent });
   },
 }));
