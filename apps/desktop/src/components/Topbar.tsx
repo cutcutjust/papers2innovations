@@ -1,4 +1,5 @@
-import { Atom, Search, Sparkles } from "lucide-react";
+import { Search } from "lucide-react";
+import appIcon from "../assets/p2i-app-icon.svg";
 import { useWorkspace, type View } from "../store";
 
 const primaryViews: Array<{ view: View; label: string }> = [
@@ -15,7 +16,7 @@ export function Topbar() {
     <header className="figma-topbar">
       <div className="window-controls" aria-hidden="true"><i /><i /><i /></div>
       <button className="figma-brand" onClick={() => setView("library")}>
-        <span><Atom size={15} /></span><strong>Papers2Innovations</strong>
+        <span><img src={appIcon} alt="" /></span><strong>Papers2Innovations</strong>
       </button>
       <nav className="top-navigation" aria-label="Product navigation">
         {primaryViews.map((item) => (
@@ -26,8 +27,6 @@ export function Topbar() {
         <Search size={14} />
         <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search papers" aria-label="Search papers" />
       </label>
-      <button className="top-ai-button" title="AI actions"><Sparkles size={14} /></button>
-      <span className="user-avatar">RW</span>
     </header>
   );
 }

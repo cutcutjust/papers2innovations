@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildReaderBlocks, buildReaderSections, resolveMarkdownAssetPath, sanitizeExtractedMarkdown } from "./documentBlocks";
+import { buildReaderBlocks, buildReaderSections, compactReaderBlocks, resolveMarkdownAssetPath, sanitizeExtractedMarkdown } from "./documentBlocks";
 
 describe("structured Reader blocks", () => {
   it("removes internal provenance anchors without creating empty paragraphs", () => {
@@ -34,6 +34,23 @@ describe("structured Reader blocks", () => {
       .toBe("E:\\Library\\.p2i\\generated\\paper\\figures\\figure-1.png");
     expect(resolveMarkdownAssetPath("E:\\Library\\paper.md", "https://example.com/figure.png"))
       .toBe("https://example.com/figure.png");
+  });
+
+  it("compacts consecutive OCR labels without merging normal prose or figures", () => {
+    const blocks = buildReaderBlocks("figure", [
+      "Classifier", "Text-MoE", "Audio-MoE", "Vision-MoE", "Cross-attention", "Hub Token",
+      "This is a normal explanatory paragraph that is intentionally long enough to remain independent from compact OCR labels in the Reader layout.",
+      "![Architecture](figures/figure-1.png)",
+    ].join("\n\n"));
+
+    const compacted = compactReaderBlocks(blocks);
+
+    expect(compacted).toHaveLength(3);
+    expect(compacted[0].compacted).toBe(true);
+    expect(compacted[0].text).toContain("Classifier; Text-MoE; Audio-MoE");
+    expect(compacted[0].sourceBlockIds).toHaveLength(6);
+    expect(compacted[1].compacted).not.toBe(true);
+    expect(compacted[2].text).toContain("figure-1.png");
   });
 });
 

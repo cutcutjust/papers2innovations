@@ -5,6 +5,8 @@ export interface ReaderDocumentBlock {
   sectionId: string;
   text: string;
   page?: number;
+  compacted?: boolean;
+  sourceBlockIds?: string[];
 }
 
 export interface ReaderDisplaySection {
@@ -47,6 +49,49 @@ export function buildReaderBlocks(sectionId: string, markdown: string, page?: nu
     .map((text) => text.trim())
     .filter((text) => text && !/^#{1,6}\s/.test(text))
     .map((text, index) => ({ id: `${sectionId}:block-${index + 1}`, sectionId, text, page }));
+}
+
+const STRUCTURAL_MARKDOWN = /(?:^|\n)(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|```|\|)|!\[[^\]]*\]\(|\$\$|\\\[|\\begin\{/m;
+
+function isCompactFragment(block: ReaderDocumentBlock): boolean {
+  const text = block.text.trim();
+  if (!text || text.length > 96 || STRUCTURAL_MARKDOWN.test(text)) return false;
+  return text.split(/\s+/).length <= 16;
+}
+
+export function compactReaderBlocks(blocks: ReaderDocumentBlock[]): ReaderDocumentBlock[] {
+  const result: ReaderDocumentBlock[] = [];
+  let pending: ReaderDocumentBlock[] = [];
+  let pendingLength = 0;
+
+  const flush = () => {
+    if (pending.length >= 4) {
+      const first = pending[0];
+      result.push({
+        ...first,
+        text: pending.map((block) => block.text.trim()).join("; "),
+        compacted: true,
+        sourceBlockIds: pending.map((block) => block.id),
+      });
+    } else {
+      result.push(...pending);
+    }
+    pending = [];
+    pendingLength = 0;
+  };
+
+  for (const block of blocks) {
+    if (!isCompactFragment(block)) {
+      flush();
+      result.push(block);
+      continue;
+    }
+    if (pending.length && pendingLength + block.text.length > 720) flush();
+    pending.push(block);
+    pendingLength += block.text.length + 2;
+  }
+  flush();
+  return result;
 }
 
 const KNOWN_SECTIONS = new Set([
