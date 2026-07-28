@@ -8,7 +8,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { addPaperToContext, addSelectionToContext, assetUrl, clearReaderConversation, getContextCompression, getContextDraft, getReaderConversation, listReaderAnalyses, listTranslations, nativeRuntime, readContextItem, readDocument, readMarkdown, removePaperFromContext, saveFormattedDocument, saveReaderAnalysis, saveReaderChatTurn, saveTranslation, startModelStream, type ModelStreamHandle } from "../lib/bridge";
 import { hydrateProviderCredentials } from "../lib/credentials";
-import { buildReaderSections, type ReaderDisplaySection, type ReaderDocumentBlock } from "../lib/documentBlocks";
+import { buildReaderSections, resolveMarkdownAssetPath, type ReaderDisplaySection, type ReaderDocumentBlock } from "../lib/documentBlocks";
 import { MARKDOWN_FORMAT_PROMPT_VERSION, prepareMarkdownForFormatting, restoreFormattedMarkdown, splitMarkdownForFormatting } from "../lib/markdownFormatting";
 import { useWorkspace } from "../store";
 
@@ -36,8 +36,18 @@ const ANALYSIS_PROMPT_VERSION = "reader-analysis-v1";
 const CHAT_PROMPT_VERSION = "reader-chat-v1";
 const analysisKey = (blockId: string, type: ReaderAnalysisType) => `${blockId}:${type}`;
 
-function MarkdownBlock({ value }: { value: string }) {
-  return <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{value}</ReactMarkdown>;
+function MarkdownBlock({ value, markdownPath }: { value: string; markdownPath?: string }) {
+  return <ReactMarkdown
+    remarkPlugins={[remarkGfm, remarkMath]}
+    rehypePlugins={[rehypeKatex]}
+    components={{
+      img: ({ src, alt }) => {
+        const resolved = resolveMarkdownAssetPath(markdownPath, src);
+        const rendered = resolved && /^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(resolved) ? assetUrl(resolved) : resolved;
+        return <img className="markdown-paper-figure" src={rendered} alt={alt ?? "Extracted paper figure"} loading="lazy" />;
+      },
+    }}
+  >{value}</ReactMarkdown>;
 }
 
 export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) {
@@ -736,7 +746,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
               const explanationType = activeAnalysis?.blockId === block.id ? activeAnalysis.type : hasFormula ? "formula" : "theorem";
               const explanation = analysisStates[analysisKey(block.id, explanationType)] ?? persistedAnalyses[analysisKey(block.id, explanationType)];
               return <div className={`paragraph-card ${activeBlock === block.id ? "active" : ""}`} key={block.id} onMouseUp={(event) => captureSelection(block, event)}>
-                <div className="paragraph-main"><span className="paragraph-number">{sectionIndex ? `${sectionIndex}.${blockIndex + 1}` : `A${blockIndex + 1}`}</span><div className="paragraph-markdown"><MarkdownBlock value={block.text} /></div></div>
+                <div className="paragraph-main"><span className="paragraph-number">{sectionIndex ? `${sectionIndex}.${blockIndex + 1}` : `A${blockIndex + 1}`}</span><div className="paragraph-markdown"><MarkdownBlock value={block.text} markdownPath={paper.markdownPath} /></div></div>
                 <div className="paragraph-actions"><button title="Translate paragraph" aria-label="Translate paragraph" onClick={() => void translate(block)}><Languages size={14} /></button><button title={hasFormula ? "Explain formula" : "Explain paragraph"} aria-label={hasFormula ? "Explain formula" : "Explain paragraph"} onClick={() => void explain(hasFormula ? "formula" : "theorem", block)}><Sparkles size={14} /></button><button className={contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.blockId === block.id) ? "active" : ""} title="Add paragraph to context" aria-label="Add paragraph to context" disabled={contextBusy === block.id} onClick={() => void addContext(block.sectionId, block.id, block.text)}><Layers3 size={14} /></button></div>
                 {state && <TranslationPanel block={block} state={state} onSave={() => void persistTranslation(block, state)} onRetry={() => void translate(block)} onCancel={() => void cancelTranslation(block.id)} />}
                 {explanation && <AnalysisCard block={block} type={explanationType} state={explanation} onSave={() => void persistAnalysis(block, explanationType, explanation)} onRetry={() => void explain(explanationType, block)} onCancel={() => void streamHandles.current.get(`analysis:${analysisKey(block.id, explanationType)}`)?.cancel()} onFollowUp={() => { setChatInput(`Follow up on the ${explanationType} explanation for ${block.sectionId}/${block.id}: `); setAgentOpen(true); }} />}

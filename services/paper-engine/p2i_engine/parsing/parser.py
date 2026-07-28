@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +43,224 @@ def _thumbnail(image_bytes: bytes, target: Path) -> str | None:
 def _safe_image_name(name: str, index: int) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip(".-")
     return cleaned or f"figure-{index}.bin"
+
+
+_PDF_CONTROL_GLYPHS = str.maketrans(
+    {
+        "\x00": "(",
+        "\x01": ")",
+        "\x10": "(",
+        "\x11": ")",
+    }
+)
+_WRAPPED_WORD = re.compile(r"\b(?P<left>[A-Za-z]{2,})-\r?\n(?P<right>[a-z]{2,})\b")
+_PRESERVED_HYPHEN_LEFT = {
+    "cross",
+    "feed",
+    "high",
+    "large",
+    "low",
+    "real",
+    "self",
+    "small",
+    "spatio",
+    "state",
+    "task",
+}
+_FIGURE_CAPTION = re.compile(
+    r"^\s*(?:fig(?:ure)?\.?)\s*(?P<number>\d+[A-Za-z]?)\s*[:.]\s*(?P<caption>.+)",
+    re.I | re.S,
+)
+_PAGE_ANCHOR = re.compile(
+    r'<a\b[^>]*\bdata-page=["\'](?P<page>\d+)["\'][^>]*>\s*</a>', re.I
+)
+
+
+def _normalize_extracted_text(value: str) -> str:
+    """Remove PDF font control glyphs without flattening meaningful Unicode math."""
+
+    normalized = unicodedata.normalize("NFC", value.translate(_PDF_CONTROL_GLYPHS))
+    normalized = "".join(
+        character
+        if character in "\n\r\t" or ord(character) >= 32
+        else " "
+        for character in normalized
+    )
+
+    def join_wrapped_word(match: re.Match[str]) -> str:
+        left = match.group("left")
+        right = match.group("right")
+        separator = "-" if left.casefold() in _PRESERVED_HYPHEN_LEFT else ""
+        return f"{left}{separator}{right}"
+
+    return _WRAPPED_WORD.sub(join_wrapped_word, normalized)
+
+
+def _markdown_figure(figure: PaperFigure) -> str:
+    caption = re.sub(
+        r"[\[\]\r\n]+", " ", figure.caption or f"Figure on page {figure.page}"
+    )
+    caption_match = _FIGURE_CAPTION.match(caption)
+    alt = (
+        f"Figure {caption_match.group('number')}: {caption_match.group('caption')}"
+        if caption_match
+        else caption
+    )
+    alt = re.sub(r"\s+", " ", alt).strip()
+    if len(alt) > 180:
+        alt = f"{alt[:177].rstrip()}..."
+    return f"![{alt}]({figure.relative_path})"
+
+
+def _embed_figures(markdown: str, figures: list[PaperFigure]) -> str:
+    result = markdown
+    for figure in figures:
+        image = _markdown_figure(figure)
+        if image in result:
+            continue
+        inserted = False
+        caption = _FIGURE_CAPTION.match(figure.caption or "")
+        if caption:
+            number = re.escape(caption.group("number"))
+            marker = re.compile(
+                rf"(?im)^(?=\s*(?:fig(?:ure)?\.?)\s*{number}\s*[:.])"
+            )
+            result, count = marker.subn(f"{image}\n\n", result, count=1)
+            inserted = count == 1
+        if not inserted:
+            result = f"{result.rstrip()}\n\n{image}"
+    return result
+
+
+def _page_markdown_from_sections(document: PaperDocument) -> dict[int, str]:
+    pages: dict[int, list[str]] = {}
+    for section in document.sections:
+        matches = list(_PAGE_ANCHOR.finditer(section.markdown))
+        if not matches:
+            page = section.page_start or 1
+            pages.setdefault(page, []).append(section.markdown)
+            continue
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(section.markdown)
+            body = section.markdown[match.end() : end].strip()
+            if body:
+                pages.setdefault(int(match.group("page")), []).append(body)
+    return {page: "\n\n".join(parts) for page, parts in pages.items()}
+
+
+def _extract_rendered_figures(source: Path, figure_dir: Path) -> list[PaperFigure]:
+    """Render caption-linked regions so vector diagrams survive the compact parser."""
+
+    try:
+        import fitz
+    except ImportError:
+        return []
+
+    figures: list[PaperFigure] = []
+    try:
+        with fitz.open(source) as document:
+            for page_index, page in enumerate(document, start=1):
+                page_rect = page.rect
+                page_area = page_rect.width * page_rect.height
+                blocks = page.get_text("blocks", sort=True)
+                captions: list[tuple[Any, str]] = []
+                for block in blocks:
+                    text = re.sub(r"\s+", " ", str(block[4])).strip()
+                    if _FIGURE_CAPTION.match(text):
+                        captions.append((fitz.Rect(block[:4]), text))
+                if not captions:
+                    continue
+
+                drawing_rects = [
+                    fitz.Rect(drawing["rect"])
+                    for drawing in page.get_drawings()
+                    if drawing.get("rect")
+                ]
+                image_rects = [
+                    fitz.Rect(block["bbox"])
+                    for block in page.get_text("dict").get("blocks", [])
+                    if block.get("type") == 1 and block.get("bbox")
+                ]
+                previous_caption_bottom = page_rect.y0
+                for caption_rect, caption in captions:
+                    window_top = max(
+                        previous_caption_bottom,
+                        caption_rect.y0 - page_rect.height * 0.45,
+                    )
+                    wide_caption = caption_rect.width >= page_rect.width * 0.55
+
+                    def overlaps_caption_column(rect: Any) -> bool:
+                        overlap = min(rect.x1, caption_rect.x1) - max(rect.x0, caption_rect.x0)
+                        return wide_caption or overlap > min(rect.width, caption_rect.width) * 0.2
+
+                    candidates = []
+                    for rect in [*drawing_rects, *image_rects]:
+                        if rect.is_empty or rect.width < 3 or rect.height < 3:
+                            continue
+                        if rect.get_area() > page_area * 0.28:
+                            continue
+                        if rect.y0 < window_top or rect.y1 > caption_rect.y0 + 2:
+                            continue
+                        if overlaps_caption_column(rect):
+                            candidates.append(rect)
+                    if not candidates:
+                        previous_caption_bottom = caption_rect.y1
+                        continue
+
+                    clip = fitz.Rect(candidates[0])
+                    for rect in candidates[1:]:
+                        clip |= rect
+                    for block in blocks:
+                        rect = fitz.Rect(block[:4])
+                        if (
+                            rect.y0 >= clip.y0 - 12
+                            and rect.y1 <= caption_rect.y0 + 2
+                            and min(rect.x1, clip.x1) - max(rect.x0, clip.x0) > 0
+                        ):
+                            clip |= rect
+                    clip = fitz.Rect(
+                        max(page_rect.x0, clip.x0 - 6),
+                        max(page_rect.y0, clip.y0 - 6),
+                        min(page_rect.x1, clip.x1 + 6),
+                        min(page_rect.y1, clip.y1 + 6),
+                    )
+                    if clip.width < 72 or clip.height < 40:
+                        previous_caption_bottom = caption_rect.y1
+                        continue
+
+                    figure_number = len(figures) + 1
+                    image_path = figure_dir / f"figure-{figure_number}.png"
+                    pixmap = page.get_pixmap(
+                        matrix=fitz.Matrix(2, 2), clip=clip, alpha=False
+                    )
+                    pixmap.save(image_path)
+                    image_bytes = image_path.read_bytes()
+                    thumbnail_name = _thumbnail(
+                        image_bytes,
+                        figure_dir / f"figure-{figure_number}-thumb.webp",
+                    )
+                    figures.append(
+                        PaperFigure(
+                            id=f"figure-{figure_number}",
+                            caption=caption,
+                            relative_path=f"figures/{image_path.name}",
+                            thumbnail_path=(
+                                f"figures/{thumbnail_name}" if thumbnail_name else None
+                            ),
+                            page=page_index,
+                            bbox=BoundingBox(
+                                left=max(0.0, clip.x0 / page_rect.width),
+                                top=max(0.0, clip.y0 / page_rect.height),
+                                right=min(1.0, clip.x1 / page_rect.width),
+                                bottom=min(1.0, clip.y1 / page_rect.height),
+                            ),
+                            mime_type="image/png",
+                        )
+                    )
+                    previous_caption_bottom = caption_rect.y1
+    except Exception:
+        return []
+    return figures
 
 
 _KNOWN_SECTION_NAMES = {
@@ -234,41 +453,52 @@ def _parse_with_pypdf(
     figure_dir = output_dir / "figures"
     figure_dir.mkdir(parents=True, exist_ok=True)
     page_contents: list[tuple[int, str]] = []
-    figures: list[PaperFigure] = []
+    figures = _extract_rendered_figures(source, figure_dir)
+    figures_by_page: dict[int, list[PaperFigure]] = {}
+    for figure in figures:
+        if figure.page is not None:
+            figures_by_page.setdefault(figure.page, []).append(figure)
     title = source.stem.replace("_", " ").replace("-", " ").strip()
 
     for page_index, page in enumerate(reader.pages, start=1):
-        text = (page.extract_text() or "").strip()
+        text = _normalize_extracted_text(page.extract_text() or "").strip()
         nonempty_lines = [line.strip() for line in text.splitlines() if line.strip()]
         if page_index == 1 and nonempty_lines:
             candidate = nonempty_lines[0]
             if 5 <= len(candidate) <= 240:
                 title = candidate
         body = text or "_No extractable text was found on this page._"
-        page_markdown = body
+        page_figures = list(figures_by_page.get(page_index, []))
 
-        try:
-            for image_index, image in enumerate(page.images, start=1):
-                image_name = _safe_image_name(image.name, len(figures) + image_index)
-                image_path = figure_dir / image_name
-                image_path.write_bytes(image.data)
-                thumbnail_name = _thumbnail(
-                    image.data, figure_dir / f"{Path(image_name).stem}-thumb.webp"
-                )
-                mime = "image/png" if image_name.lower().endswith(".png") else "image/jpeg"
-                figures.append(
-                    PaperFigure(
+        if not page_figures:
+            try:
+                for image in page.images:
+                    image_name = _safe_image_name(image.name, len(figures) + 1)
+                    image_path = figure_dir / image_name
+                    image_path.write_bytes(image.data)
+                    thumbnail_name = _thumbnail(
+                        image.data, figure_dir / f"{Path(image_name).stem}-thumb.webp"
+                    )
+                    mime = (
+                        "image/png"
+                        if image_name.lower().endswith(".png")
+                        else "image/jpeg"
+                    )
+                    figure = PaperFigure(
                         id=f"figure-{len(figures) + 1}",
                         relative_path=f"figures/{image_name}",
                         page=page_index,
                         mime_type=mime,
-                        thumbnail_path=f"figures/{thumbnail_name}" if thumbnail_name else None,
+                        thumbnail_path=(
+                            f"figures/{thumbnail_name}" if thumbnail_name else None
+                        ),
                     )
-                )
-                page_markdown += f"\n\n![Figure on page {page_index}](figures/{image_name})"
-        except Exception:
-            # Image extraction varies across PDF encodings; text parsing remains valid.
-            pass
+                    figures.append(figure)
+                    page_figures.append(figure)
+            except Exception:
+                # Image extraction varies across PDF encodings; text parsing remains valid.
+                pass
+        page_markdown = _embed_figures(body, page_figures)
         page_contents.append((page_index, page_markdown))
 
     sections = _semantic_sections(page_contents, paper_id)
@@ -315,9 +545,8 @@ def _parse_with_docling(
             InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
         }
     ).convert(str(source))
-    markdown = conversion.document.export_to_markdown()
+    markdown = _normalize_extracted_text(conversion.document.export_to_markdown())
     exported = conversion.document.export_to_dict()
-    sections = _semantic_sections([(1, markdown)], paper_id)
     title = source.stem.replace("_", " ").replace("-", " ")
     figures: list[PaperFigure] = []
     figure_dir = output_dir / "figures"
@@ -394,6 +623,9 @@ def _parse_with_docling(
             pass
         tables.append(entry)
 
+    markdown = _embed_figures(markdown, figures)
+    sections = _semantic_sections([(1, markdown)], paper_id)
+
     document = PaperDocument(
         paper_id=paper_id,
         source_sha256=sha256,
@@ -442,6 +674,11 @@ def _apply_qwen_ocr(
     usage = OcrUsage(page_count=result.document.page_count)
     page_markdown: list[tuple[int, str]] = []
     warnings: list[str] = []
+    fallback_pages = _page_markdown_from_sections(result.document)
+    figures_by_page: dict[int, list[PaperFigure]] = {}
+    for figure in result.document.figures:
+        if figure.page is not None:
+            figures_by_page.setdefault(figure.page, []).append(figure)
 
     def process_page(page_number: int) -> dict[str, Any]:
         cache_key = hashlib.sha256(
@@ -488,14 +725,8 @@ def _apply_qwen_ocr(
             }
         except Exception as error:
             warning = f"Qwen OCR page {page_number}: {type(error).__name__}: {error}"
-            fallback_text = next(
-                (
-                    anchor.source_text
-                    for section in result.document.sections
-                    for anchor in section.anchors
-                    if anchor.page == page_number
-                ),
-                "_OCR failed for this page._",
+            fallback_text = fallback_pages.get(
+                page_number, "_OCR failed for this page._"
             )
             return {
                 "markdown": fallback_text,
@@ -512,7 +743,15 @@ def _apply_qwen_ocr(
             executor.map(process_page, range(1, result.document.page_count + 1))
         )
     for page_number, page_result in enumerate(page_results, start=1):
-        page_markdown.append((page_number, page_result["markdown"]))
+        cleaned_markdown = _normalize_extracted_text(page_result["markdown"])
+        page_markdown.append(
+            (
+                page_number,
+                _embed_figures(
+                    cleaned_markdown, figures_by_page.get(page_number, [])
+                ),
+            )
+        )
         usage.request_count += page_result["request_count"]
         usage.cache_hits += page_result["cache_hits"]
         usage.input_tokens += page_result["input_tokens"]

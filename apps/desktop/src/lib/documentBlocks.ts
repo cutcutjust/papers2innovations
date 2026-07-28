@@ -17,9 +17,31 @@ export interface ReaderDisplaySection {
 }
 
 const INTERNAL_ANCHOR = /<a\b[^>]*\bdata-block-id=(?:"[^"]+"|'[^']+')[^>]*>\s*<\/a>/gi;
+const WRAPPED_WORD = /\b([A-Za-z]{2,})-\r?\n([a-z]{2,})\b/g;
+const PRESERVED_HYPHEN_LEFT = new Set([
+  "cross", "feed", "high", "large", "low", "real", "self", "small", "spatio", "state", "task",
+]);
+
+export function sanitizeExtractedMarkdown(value: string): string {
+  return value
+    .replace(/[\u0000\u0010]/g, "(")
+    .replace(/[\u0001\u0011]/g, ")")
+    .replace(/[\u0002-\u0008\u000b\u000c\u000e\u000f\u0012-\u001f]/g, " ")
+    .replace(WRAPPED_WORD, (_match, left: string, right: string) => (
+      `${left}${PRESERVED_HYPHEN_LEFT.has(left.toLocaleLowerCase()) ? "-" : ""}${right}`
+    ));
+}
+
+export function resolveMarkdownAssetPath(markdownPath: string | undefined, source: string | undefined): string | undefined {
+  if (!source || /^(?:[A-Za-z][A-Za-z0-9+.-]*:|\/|\\|#)/.test(source) || !markdownPath) return source;
+  const base = markdownPath.replace(/[\\/][^\\/]+$/, "");
+  if (!base || base === markdownPath) return source;
+  const separator = base.includes("\\") ? "\\" : "/";
+  return `${base}${separator}${source.replace(/[\\/]/g, separator)}`;
+}
 
 export function buildReaderBlocks(sectionId: string, markdown: string, page?: number): ReaderDocumentBlock[] {
-  return markdown
+  return sanitizeExtractedMarkdown(markdown)
     .replace(INTERNAL_ANCHOR, "")
     .split(/\n{2,}/)
     .map((text) => text.trim())

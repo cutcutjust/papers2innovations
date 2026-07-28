@@ -752,6 +752,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .paragraph-markdown p + p { margin-top: 12px; }
 .paragraph-markdown h3, .paragraph-markdown h4 { color: var(--ink); font-size: 16px; }
 .paragraph-markdown th, .paragraph-markdown td { padding: 8px; font-size: 12px; }
+.paragraph-markdown .markdown-paper-figure { display: block; width: auto; max-width: 100%; max-height: 640px; margin: 18px auto; object-fit: contain; background: #fff; border: 1px solid #e1e4e9; border-radius: 4px; }
 .paragraph-actions button { min-height: 28px; }
 .analysis-markdown, .analysis-markdown p, .chat-markdown, .chat-markdown p { font-size: 12px; line-height: 1.7; }
 

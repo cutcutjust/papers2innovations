@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from p2i_engine.parsing.parser import _semantic_sections
+from pathlib import Path
+
+import fitz
+
+from p2i_engine.parsing.parser import (
+    _embed_figures,
+    _extract_rendered_figures,
+    _normalize_extracted_text,
+    _semantic_sections,
+)
 
 
 def test_semantic_sections_merge_content_across_pages() -> None:
@@ -48,3 +57,42 @@ def test_semantic_sections_fall_back_to_one_document() -> None:
     assert sections[0].page_start == 1
     assert sections[0].page_end == 2
     assert [anchor.page for anchor in sections[0].anchors] == [1, 2]
+
+
+def test_normalize_extracted_text_repairs_pdf_control_glyphs_and_wraps() -> None:
+    normalized = _normalize_extracted_text(
+        "Linear\n\x00\nGELU\n\x01\nbi-\nases and cross-\nmodal features"
+    )
+
+    assert "\x00" not in normalized
+    assert "\x01" not in normalized
+    assert "(\nGELU\n)" in normalized
+    assert "biases" in normalized
+    assert "cross-modal" in normalized
+
+
+def test_fallback_parser_renders_vector_figure_and_embeds_markdown(tmp_path: Path) -> None:
+    source = tmp_path / "vector-figure.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.draw_rect(fitz.Rect(72, 72, 540, 190), color=(0, 0, 0), width=1)
+    page.draw_line((100, 150), (500, 100), color=(0.2, 0.4, 0.8), width=3)
+    page.insert_text((90, 110), "Vector architecture", fontsize=16)
+    page.insert_text((72, 220), "Fig. 1: Synthetic vector architecture.", fontsize=11)
+    document.save(source)
+    document.close()
+
+    figure_dir = tmp_path / "figures"
+    figure_dir.mkdir()
+    figures = _extract_rendered_figures(source, figure_dir)
+
+    assert len(figures) == 1
+    assert figures[0].caption == "Fig. 1: Synthetic vector architecture."
+    assert (tmp_path / figures[0].relative_path).is_file()
+    markdown = _embed_figures(
+        "Intro text.\n\nFig. 1: Synthetic vector architecture.\n\nMethod text.",
+        figures,
+    )
+    assert markdown.index("![Figure 1: Synthetic vector architecture.]") < markdown.index(
+        "\n\nFig. 1: Synthetic vector architecture."
+    )

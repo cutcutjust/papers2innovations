@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildReaderBlocks, buildReaderSections } from "./documentBlocks";
+import { buildReaderBlocks, buildReaderSections, resolveMarkdownAssetPath, sanitizeExtractedMarkdown } from "./documentBlocks";
 
 describe("structured Reader blocks", () => {
   it("removes internal provenance anchors without creating empty paragraphs", () => {
@@ -23,6 +23,17 @@ describe("structured Reader blocks", () => {
       "See [source](https://example.com).",
       "Second paragraph.",
     ]);
+  });
+
+  it("repairs PDF control glyphs and obvious wrapped words", () => {
+    expect(sanitizeExtractedMarkdown("Linear\n\u0000\nGELU\n\u0001\nbi-\nases and cross-\nmodal")).toContain("Linear\n(\nGELU\n)\nbiases and cross-modal");
+  });
+
+  it("resolves relative Markdown figures beside the generated document", () => {
+    expect(resolveMarkdownAssetPath("E:\\Library\\.p2i\\generated\\paper\\paper.md", "figures/figure-1.png"))
+      .toBe("E:\\Library\\.p2i\\generated\\paper\\figures\\figure-1.png");
+    expect(resolveMarkdownAssetPath("E:\\Library\\paper.md", "https://example.com/figure.png"))
+      .toBe("https://example.com/figure.png");
   });
 });
 
