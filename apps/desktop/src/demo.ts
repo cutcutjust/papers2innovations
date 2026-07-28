@@ -19,6 +19,7 @@ export const demoPapers: LibraryPaper[] = [
         mimeType: "image/png",
       },
     ],
+    collectionIds: ["demo-methods"],
     updatedAt: new Date().toISOString(),
   },
   {
@@ -29,6 +30,7 @@ export const demoPapers: LibraryPaper[] = [
     progress: 0.46,
     pageCount: 0,
     figures: [],
+    collectionIds: ["demo-multimodal-group"],
     updatedAt: new Date(Date.now() - 3600_000).toISOString(),
   },
   {
@@ -39,6 +41,7 @@ export const demoPapers: LibraryPaper[] = [
     progress: 1,
     pageCount: 0,
     figures: [],
+    collectionIds: [],
     updatedAt: new Date(Date.now() - 7200_000).toISOString(),
     error: "Encrypted PDF: a password is required before layout parsing can continue.",
   },
@@ -78,4 +81,3 @@ We evaluate section ordering, page localization, and whether each synthesized cl
 
 Scanned PDFs require OCR, and complex vector figures may not expose reusable embedded images. These cases remain visible as partial results instead of being silently omitted.
 `;
-

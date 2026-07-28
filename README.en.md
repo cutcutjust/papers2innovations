@@ -1,7 +1,7 @@
 <div align="center">
   <img src="apps/desktop/src-tauri/icons/128x128.png" width="88" alt="Papers2Innovations icon" />
   <h1>Papers2Innovations</h1>
-  <p><strong>A local-first research workspace that turns PDFs into structured evidence, reusable context, and testable ideas.</strong></p>
+  <p><strong>Built for Chinese-speaking researchers: understand English papers and turn grounded evidence into testable research ideas.</strong></p>
   <p><a href="README.md">中文</a> · <a href="README.en.md">English</a></p>
   <p>
     <a href="https://github.com/cutcutjust/papers2innovations/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/cutcutjust/papers2innovations?style=flat-square&color=5865df" /></a>
@@ -14,17 +14,31 @@
 
 ![Section-based Papers2Innovations Reader](docs/images/reader-workspace.png)
 
-Papers2Innovations keeps PDFs, structured Markdown, evidence anchors, model usage, and research runs in a recoverable local workspace. Its Tauri desktop host, Python parsing engine, and React UI provide Zotero import, section-based reading, figure extraction, context management, research agents, and staged innovation synthesis.
+Papers2Innovations addresses two practical barriers: English terminology, equations, and long-form structure interrupt reading for Chinese speakers; newcomers may finish a paper yet still struggle to compare methods, locate gaps, and formulate a research question. It reconstructs PDFs as section-based Markdown linked to source pages, then keeps translation, explanation, evidence context, and innovation analysis in one recoverable local workspace.
 
-> Current release: `v0.1.16` for Windows x64. The project remains in active `0.1.x` development; keep backups of irreplaceable source PDFs.
+> Current release: `v0.1.17` for Windows x64. The project remains in active `0.1.x` development; keep backups of irreplaceable source PDFs.
+
+## Why Papers2Innovations exists
+
+Saving PDFs or generating isolated summaries does not solve sustained understanding. Readers still face language friction, unverifiable paraphrases, and the harder task of finding shared assumptions, methodological differences, failure boundaries, and open questions across papers.
+
+| Stage | What the system does | What the reader gains |
+| --- | --- | --- |
+| Organize | Import local/Zotero papers into a persistent folder tree; drag papers to group them. | A maintainable research library instead of scattered files. |
+| Read | Rebuild section Markdown with PDF pages, figures, tables, and equations. | Clear paper structure with direct paths back to source pages. |
+| Understand | Translate selections and explain equations or methods, with Chinese output by default. | Lower language friction without separating conclusions from evidence. |
+| Accumulate | Add papers, sections, or paragraphs to shared context with anchors and token details. | Reusable research evidence rather than disposable chat history. |
+| Innovate | Compare evidence, identify conflicts and gaps, then generate and critique ideas in stages. | A path from reading papers to testable questions and experiment plans. |
+
+The system does not claim to replace research judgment. It makes sources, limitations, and intermediate reasoning inspectable so language assistance and idea exploration use the same evidence base.
 
 ## Capabilities
 
 | Area | Capability |
 | --- | --- |
-| Ingest | Watch `Papers/`, preview and import Zotero read-only, deduplicate by SHA-256, copy atomically, and record provenance. |
+| Library | Watch `Papers/`, import Zotero read-only, deduplicate by SHA-256, and organize papers in a persistent nested tree with drag-to-group. |
 | Parse | Generate section Markdown, page anchors, figures, tables, and normalized coordinates; resume interrupted jobs by stage. |
-| Read | Navigate Markdown and PDF by paper section, jump to source pages, resize the outline, and render AI-generated LaTeX correctly. |
+| Read | Navigate Markdown/PDF by section or enter fullscreen focus mode with only outline, Markdown body, and paper assistant visible. |
 | Context | Share evidence-bound context across Reader, Agents, and Innovate, with expandable system prompts, tool schemas, paper text, and token budgets. |
 | Agents | Configure a model, prompt, tool permissions, network/write policy, cancellation, retries, and checkpoints per agent. |
 | Innovate | Run context compression, evidence extraction, idea generation, novelty review, and experiment critique. |
@@ -45,6 +59,18 @@ Papers2Innovations keeps PDFs, structured Markdown, evidence anchors, model usag
 
 ## Research workspaces
 
+### Collection tree
+
+Collections are persistent library data, not decorative tags. Create nested folders, rename or delete nodes, filter an entire subtree, and drag a paper from the table to move it. Existing Zotero collections migrate beneath a `Zotero` root during upgrade.
+
+![Papers2Innovations collection tree and drag-to-group](docs/images/collection-tree.png)
+
+### Distraction-free reading
+
+Focus mode hides global navigation, the library sidebar, toolbar, and context footer. Only the resizable section outline, structured Markdown, and paper assistant remain. Press `Esc` to restore the standard workspace.
+
+![Papers2Innovations focus reading mode](docs/images/focus-reading.png)
+
 ### Agent Center
 
 Agents execute only explicitly allowed local tools. Default prompts request Chinese output and require paper, section, block, or page anchors for factual claims; prompts remain fully editable.
@@ -63,8 +89,9 @@ The innovation workbench binds each run to an exact context snapshot. Stages may
 2. Open the app and select an independent library directory such as `E:\Papers2Innovations-Library`.
 3. Place PDFs in `Papers/`, or close Zotero and use **Import Zotero**.
 4. Track hashing, layout, OCR, image, table, and indexing stages in **Activity**; failed stages can be retried.
-5. In **Models & Processing**, add a model with a custom Base URL, context size, and API key, then assign Markdown/OCR workflows.
-6. Read by section, add evidence to shared Context, and continue in Agents or Innovate.
+5. Create nested collections and drag papers into the research-topic tree.
+6. In **Models & Processing**, add a model with a custom Base URL, context size, and API key, then assign Markdown/OCR workflows.
+7. Read by section or enter Focus mode, add key evidence to shared Context, and continue in Agents or Innovate.
 
 Local ingestion and fallback parsing do not require a model key. Translation, explanation, Markdown cleanup, OCR, agents, and synthesis use only models configured by the user.
 

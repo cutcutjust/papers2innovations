@@ -27,6 +27,8 @@ export interface WorkspaceState {
   readerMode: ReaderMode;
   query: string;
   statusFilter: "all" | "ready" | "processing" | "issues";
+  selectedCollectionId?: string;
+  readerFocusMode: boolean;
   pdfPage: number;
   providers: ProviderConfig[];
   customModels: ModelConfig[];
@@ -43,6 +45,8 @@ export interface WorkspaceState {
   setReaderMode: (mode: ReaderMode) => void;
   setQuery: (query: string) => void;
   setStatusFilter: (filter: WorkspaceState["statusFilter"]) => void;
+  setSelectedCollectionId: (collectionId?: string) => void;
+  setReaderFocusMode: (enabled: boolean) => void;
   openPdfAt: (page: number) => void;
   addCustomModel: (provider: ProviderConfig, model: ModelConfig) => void;
   updateCustomModel: (modelId: string, patch: Partial<Pick<ModelConfig, "displayName" | "maxContextTokens" | "maxOutputTokens">>) => void;
@@ -115,6 +119,8 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   readerMode: "markdown",
   query: "",
   statusFilter: "all",
+  selectedCollectionId: undefined,
+  readerFocusMode: false,
   pdfPage: 1,
   providers: initialRegistry.providers,
   customModels: initialRegistry.models,
@@ -134,6 +140,8 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   setReaderMode: (readerMode) => set({ readerMode }),
   setQuery: (query) => set({ query }),
   setStatusFilter: (statusFilter) => set({ statusFilter }),
+  setSelectedCollectionId: (selectedCollectionId) => set({ selectedCollectionId }),
+  setReaderFocusMode: (readerFocusMode) => set({ readerFocusMode }),
   openPdfAt: (pdfPage) => set({ pdfPage, readerMode: "pdf" }),
   addCustomModel: (provider, model) => set((state) => {
     const safeProvider = sanitizeProviderConfig(provider);

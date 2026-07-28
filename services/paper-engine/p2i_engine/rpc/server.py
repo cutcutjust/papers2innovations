@@ -97,6 +97,26 @@ class RpcServer:
             )
         if method == "library.list":
             return self.library(params["root"]).list_papers()
+        if method == "collection.list":
+            return self.library(params["root"]).list_collections()
+        if method == "collection.create":
+            return self.library(params["root"]).create_collection(
+                params.get("name"), params.get("parentId"), params.get("color", "#4f6bed")
+            )
+        if method == "collection.update":
+            return self.library(params["root"]).update_collection(
+                params["collectionId"], params
+            )
+        if method == "collection.delete":
+            return {
+                "deleted": self.library(params["root"]).delete_collection(
+                    params["collectionId"]
+                )
+            }
+        if method == "collection.move_paper":
+            return self.library(params["root"]).move_paper_to_collection(
+                params["paperId"], params.get("collectionId")
+            )
         if method == "library.file_events":
             return self.library(params["root"]).apply_file_events(
                 params.get("events", []), self.notify_progress, request_id

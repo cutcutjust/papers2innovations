@@ -1,19 +1,23 @@
-import type { LibraryPaper } from "@p2i/contracts";
-import { BookOpen, CheckCircle2, ChevronRight, FileText, Filter, FolderOpen, Grid2X2, Layers3, List, MoreHorizontal, RefreshCw, Search, SortAsc, Upload } from "lucide-react";
+import type { LibraryCollection, LibraryPaper } from "@p2i/contracts";
+import { BookOpen, CheckCircle2, ChevronRight, FileText, Filter, FolderOpen, Grid2X2, GripVertical, Layers3, List, RefreshCw, Search, SortAsc, Upload } from "lucide-react";
+import { useMemo, useState } from "react";
 import { Status } from "./Status";
 import { useWorkspace } from "../store";
 
 interface Props {
   papers: LibraryPaper[];
   allPapers: LibraryPaper[];
+  collections: LibraryCollection[];
   selected?: LibraryPaper;
   scanning: boolean;
   onScan: () => void;
   onChooseLibrary: () => void;
 }
 
-export function LibraryWorkspace({ papers, allPapers, selected, scanning, onScan, onChooseLibrary }: Props) {
+export function LibraryWorkspace({ papers, allPapers, collections, selected, scanning, onScan, onChooseLibrary }: Props) {
   const { selectedPaperId, selectPaper, openReader, query, setQuery } = useWorkspace();
+  const [draggingPaperId, setDraggingPaperId] = useState("");
+  const collectionNames = useMemo(() => new Map(collections.map((item) => [item.id, item.name])), [collections]);
   return (
     <div className="library-workspace">
       <header className="page-header figma-page-header">
@@ -33,13 +37,13 @@ export function LibraryWorkspace({ papers, allPapers, selected, scanning, onScan
         <section className="paper-table-wrap">
           <div className="paper-table-head"><span>标题</span><span>状态</span><span>页数</span><span>更新时间</span><span /></div>
           <div className="figma-paper-table">
-            {papers.map((paper, index) => (
-              <button key={paper.id} className={`figma-paper-row ${selectedPaperId === paper.id ? "selected" : ""}`} onClick={() => selectPaper(paper.id)} onDoubleClick={() => openReader(paper.id)}>
-                <span className="paper-title-cell"><span className="paper-doc-icon"><FileText size={15} /></span><span><strong>{paper.title}</strong><small>{paper.sourcePath}</small><em>{index % 3 === 0 ? "基础模型" : index % 3 === 1 ? "多模态" : "本地论文库"}</em></span></span>
+            {papers.map((paper) => (
+              <button key={paper.id} draggable className={`figma-paper-row ${selectedPaperId === paper.id ? "selected" : ""} ${draggingPaperId === paper.id ? "dragging" : ""}`} onClick={() => selectPaper(paper.id)} onDoubleClick={() => openReader(paper.id)} onDragStart={(event) => { selectPaper(paper.id); setDraggingPaperId(paper.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-p2i-paper-id", paper.id); event.dataTransfer.setData("text/plain", paper.id); }} onDragEnd={() => setDraggingPaperId("")} title="拖动到左侧分类完成归组">
+                <span className="paper-title-cell"><span className="paper-doc-icon"><FileText size={15} /></span><span><strong>{paper.title}</strong><small>{paper.sourcePath}</small><em>{paper.collectionIds[0] ? collectionNames.get(paper.collectionIds[0]) ?? "已分类" : "未分类"}</em></span></span>
                 <span><Status status={paper.status} /></span>
                 <span className="mono-cell">{paper.pageCount || "—"}</span>
                 <span>{new Date(paper.updatedAt).toLocaleDateString()}</span>
-                <span><MoreHorizontal size={15} /></span>
+                <span className="paper-drag-handle" title="拖动归组"><GripVertical size={15} /></span>
               </button>
             ))}
             {!papers.length && <div className="empty-table"><FileText size={28} /><strong>没有符合条件的论文</strong><span>请尝试更改搜索内容或筛选条件。</span></div>}

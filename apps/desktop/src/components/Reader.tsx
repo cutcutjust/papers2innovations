@@ -1,7 +1,8 @@
 import type { ContextSnapshot, LibraryPaper, ModelStreamEvent, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, TranslationRecord } from "@p2i/contracts";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpen, Bot, Check, ChevronLeft, FileImage, FileText, Languages, Layers3, LoaderCircle, MessageSquareText, RefreshCw, Search, Send, Sparkles, Square, Trash2, TriangleAlert, WandSparkles, X } from "lucide-react";
+import { BookOpen, Bot, Check, ChevronLeft, FileImage, FileText, Languages, Layers3, LoaderCircle, Maximize2, MessageSquareText, Minimize2, RefreshCw, Search, Send, Sparkles, Square, Trash2, TriangleAlert, WandSparkles, X } from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -58,7 +59,7 @@ function MarkdownBlock({ value, markdownPath }: { value: string; markdownPath?: 
 }
 
 export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) {
-  const { setView, customModels, providers, markdownFormattingModelId, autoFormatMarkdown } = useWorkspace();
+  const { setView, customModels, providers, markdownFormattingModelId, autoFormatMarkdown, readerFocusMode, setReaderFocusMode } = useWorkspace();
   const queryClient = useQueryClient();
   const [mode, setMode] = useState<ReaderMode>("integrated");
   const [selection, setSelection] = useState<SelectionSource | null>(null);
@@ -256,6 +257,29 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     autoFormattingKey.current = key;
     void formatDocument();
   }, [autoFormatMarkdown, documentQuery.data, formattingCredentialReady, formattingModel?.id, formattingProvider?.id, paper?.id]);
+
+  const toggleFocusMode = async (enabled: boolean) => {
+    setReaderFocusMode(enabled);
+    if (enabled) {
+      setMode("integrated");
+      setAgentOpen(true);
+    }
+    if (nativeRuntime) {
+      try {
+        await getCurrentWindow().setFullscreen(enabled);
+      } catch {
+        // The layout still enters focus mode if the window manager rejects fullscreen.
+      }
+    }
+  };
+
+  useEffect(() => {
+    const exitOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape" && readerFocusMode) void toggleFocusMode(false);
+    };
+    window.addEventListener("keydown", exitOnEscape);
+    return () => window.removeEventListener("keydown", exitOnEscape);
+  }, [readerFocusMode]);
 
   if (!paper) return <main className="reader-empty"><BookOpen size={34} /><h2>尚未选择论文</h2><p>请先在论文库中选择一篇论文，再用阅读器打开。</p><button className="primary-button compact" onClick={() => setView("library")}>打开论文库</button></main>;
 
@@ -792,12 +816,14 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const sourcePdfUrl = assetUrl(paper.sourcePath);
   const pagedPdfUrl = sourcePdfUrl ? `${sourcePdfUrl}#page=${pdfPage}&view=FitH` : "";
 
-  return <div className="reader-workspace">
+  return <div className={`reader-workspace ${readerFocusMode ? "focus-mode" : ""}`}>
+    {readerFocusMode && <button className="reader-focus-exit" onClick={() => void toggleFocusMode(false)} title="退出纯享模式（Esc）"><Minimize2 size={14} /> 退出纯享</button>}
     {selection && <div ref={selectionToolbar} className={`selection-popover ${selection.placement}`} style={{ left: selection.left, top: selection.top }} role="toolbar" aria-label="Selected text actions"><button title="Translate selected text" onClick={() => void translate(selection)}><Languages size={14} /> Translate</button><button title="Explain selected text" onClick={() => void explain("theorem", selection)}><Sparkles size={14} /> Explain</button><button className="icon-button" title="Close" onClick={() => setSelection(null)}><X size={14} /></button></div>}
     <div className="reader-toolbar">
       <button onClick={() => setView("library")}><ChevronLeft size={13} /> 论文库</button>
       <strong title={paper.title}>{paper.title}</strong>
       <div className="reader-mode-switch"><button className={mode === "integrated" ? "active" : ""} onClick={() => changeMode("integrated")}>整合阅读</button><button className={mode === "pdf" ? "active" : ""} onClick={() => changeMode("pdf")}>仅 PDF</button><button className={mode === "figures" ? "active" : ""} onClick={() => changeMode("figures")}>插图</button></div>
+      <button className="reader-focus-button" onClick={() => void toggleFocusMode(true)} title="只保留目录、Markdown 正文和论文阅读助手"><Maximize2 size={13} /> 纯享阅读</button>
       <button><Search size={13} /> 查找</button><button className={formattingStatus === "saved" ? "active" : ""} disabled={formattingStatus === "formatting"} title={formattingError || `使用 ${formattingModel?.displayName ?? "所选模型"} 整理 Markdown`} onClick={() => void formatDocument()}>{formattingStatus === "formatting" ? <LoaderCircle className="spin" size={13} /> : <WandSparkles size={13} />} {formattingStatus === "formatting" ? `${formattingProgress}%` : "整理"}</button><button className={fullText ? "active" : ""} disabled={contextBusy === "paper"} onClick={() => void togglePaperContext()}><Layers3 size={13} /> {fullText ? `论文上下文 · ${contextPercent}%` : "加载全文"}</button><button className="reader-agent-toggle" onClick={() => setAgentOpen(true)}><Bot size={13} /> 询问 AI</button>
     </div>
     <div className="reader-main">

@@ -1,10 +1,16 @@
-import type { AgentProfile, AgentRun, AgentToolCallRecord, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryPaper, ModelStreamEvent, ModelStreamRequest, ModelToolDefinition, PaperDocument, ProgressNotification, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, ReaderConversation, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
+import type { AgentProfile, AgentRun, AgentToolCallRecord, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryCollection, LibraryPaper, ModelStreamEvent, ModelStreamRequest, ModelToolDefinition, PaperDocument, ProgressNotification, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, ReaderConversation, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { demoMarkdown, demoPapers } from "../demo";
 import { sanitizeProviderConfig } from "./providerConfig";
 
 export const nativeRuntime = isTauri();
+
+let demoCollections: LibraryCollection[] = [
+  { id: "demo-research", name: "研究主题", color: "#3984d8", sortOrder: 0, paperCount: 0, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() },
+  { id: "demo-methods", name: "基础模型", parentId: "demo-research", color: "#4f6bed", sortOrder: 0, paperCount: 1, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() },
+  { id: "demo-multimodal-group", name: "多模态", parentId: "demo-research", color: "#28a06a", sortOrder: 1, paperCount: 1, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() },
+];
 
 async function rpc<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
   return invoke<T>("rpc_call", { method, params });
@@ -29,8 +35,60 @@ export async function scanLibrary(root: string, requireStable = false): Promise<
 }
 
 export async function listPapers(root: string): Promise<LibraryPaper[]> {
-  if (!nativeRuntime) return demoPapers;
+  if (!nativeRuntime) return demoPapers.map((paper) => ({ ...paper, collectionIds: [...paper.collectionIds] }));
   return rpc<LibraryPaper[]>("library.list", { root });
+}
+
+export async function listCollections(root: string): Promise<LibraryCollection[]> {
+  if (!nativeRuntime) return demoCollections.map((item) => ({ ...item }));
+  return rpc<LibraryCollection[]>("collection.list", { root });
+}
+
+export async function createCollection(root: string, input: { name: string; parentId?: string; color?: string }): Promise<LibraryCollection> {
+  if (!nativeRuntime) {
+    const now = new Date().toISOString();
+    const collection: LibraryCollection = { id: crypto.randomUUID(), name: input.name, parentId: input.parentId, color: input.color ?? "#4f6bed", sortOrder: demoCollections.filter((item) => item.parentId === input.parentId).length, paperCount: 0, createdAt: now, updatedAt: now };
+    demoCollections = [...demoCollections, collection];
+    return collection;
+  }
+  return rpc<LibraryCollection>("collection.create", { root, ...input });
+}
+
+export async function updateCollection(root: string, collectionId: string, patch: { name?: string; parentId?: string; color?: string; sortOrder?: number }): Promise<LibraryCollection> {
+  if (!nativeRuntime) {
+    const current = demoCollections.find((item) => item.id === collectionId);
+    if (!current) throw new Error("分类不存在");
+    const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };
+    demoCollections = demoCollections.map((item) => item.id === collectionId ? updated : item);
+    return updated;
+  }
+  return rpc<LibraryCollection>("collection.update", { root, collectionId, ...patch });
+}
+
+export async function deleteCollection(root: string, collectionId: string): Promise<void> {
+  if (!nativeRuntime) {
+    const descendants = new Set<string>([collectionId]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const item of demoCollections) if (item.parentId && descendants.has(item.parentId) && !descendants.has(item.id)) { descendants.add(item.id); changed = true; }
+    }
+    demoCollections = demoCollections.filter((item) => !descendants.has(item.id));
+    for (const paper of demoPapers) paper.collectionIds = paper.collectionIds.filter((id) => !descendants.has(id));
+    return;
+  }
+  await rpc("collection.delete", { root, collectionId });
+}
+
+export async function movePaperToCollection(root: string, paperId: string, collectionId?: string): Promise<void> {
+  if (!nativeRuntime) {
+    const paper = demoPapers.find((item) => item.id === paperId);
+    if (!paper) throw new Error("论文不存在");
+    paper.collectionIds = collectionId ? [collectionId] : [];
+    demoCollections = demoCollections.map((item) => ({ ...item, paperCount: demoPapers.filter((paperItem) => paperItem.collectionIds.includes(item.id)).length }));
+    return;
+  }
+  await rpc("collection.move_paper", { root, paperId, collectionId });
 }
 
 export async function readMarkdown(root: string, paperId: string): Promise<string> {

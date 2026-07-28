@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FolderOpen } from "lucide-react";
 import { AppUpdater } from "./components/AppUpdater";
@@ -15,8 +16,9 @@ import { LibraryWorkspace } from "./components/LibraryWorkspace";
 import { Agents } from "./components/Agents";
 import { ContextWorkspace } from "./components/ContextWorkspace";
 import { CitationGraph } from "./components/CitationGraph";
-import { chooseLibrary, initializeLibrary, listJobs, listPapers, nativeRuntime, onEngineProgress, scanLibrary, startLibraryWatcher } from "./lib/bridge";
+import { chooseLibrary, initializeLibrary, listCollections, listJobs, listPapers, nativeRuntime, onEngineProgress, scanLibrary, startLibraryWatcher } from "./lib/bridge";
 import { hydrateOcrCredential, hydrateProviderCredentials, loadWorkspaceSettingsSnapshot, saveWorkspaceSettingsSnapshot } from "./lib/credentials";
+import { filterPapersByCollection } from "./lib/collectionTree";
 import { hasPersistedWorkspaceSettings, useWorkspace } from "./store";
 
 export function App() {
@@ -40,6 +42,16 @@ export function App() {
   const scanMutation = useMutation({
     mutationFn: () => scanLibrary(root),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["papers", root] }),
+  });
+  const collectionsQuery = useQuery({
+    queryKey: ["collections", root],
+    queryFn: async () => {
+      await initializeLibrary(root);
+      return listCollections(root);
+    },
+    enabled: Boolean(root),
+    refetchOnWindowFocus: false,
+    retry: false,
   });
   const jobsQuery = useQuery({
     queryKey: ["jobs", root],
@@ -123,14 +135,15 @@ export function App() {
   const papers = useMemo(() => {
     const all = papersQuery.data ?? [];
     const text = workspace.query.trim().toLowerCase();
-    return all.filter((paper) => {
+    const scoped = filterPapersByCollection(all, collectionsQuery.data ?? [], workspace.selectedCollectionId);
+    return scoped.filter((paper) => {
       if (text && !`${paper.title} ${paper.sourcePath}`.toLowerCase().includes(text)) return false;
       if (workspace.statusFilter === "ready") return paper.status === "READY";
       if (workspace.statusFilter === "issues") return ["FAILED", "MISSING", "CANCELLED"].includes(paper.status);
       if (workspace.statusFilter === "processing") return !["READY", "FAILED", "MISSING", "CANCELLED"].includes(paper.status);
       return true;
     });
-  }, [papersQuery.data, workspace.query, workspace.statusFilter]);
+  }, [collectionsQuery.data, papersQuery.data, workspace.query, workspace.selectedCollectionId, workspace.statusFilter]);
 
   const allPapers = papersQuery.data ?? [];
 
@@ -139,6 +152,18 @@ export function App() {
       workspace.selectPaper(allPapers[0].id);
     }
   }, [allPapers, workspace]);
+
+  useEffect(() => {
+    if (workspace.view === "library" && papers[0] && !papers.some((paper) => paper.id === workspace.selectedPaperId)) {
+      workspace.selectPaper(papers[0].id);
+    }
+  }, [papers, workspace.selectedCollectionId, workspace.view]);
+
+  useEffect(() => {
+    if (workspace.view === "reader" || !workspace.readerFocusMode) return;
+    workspace.setReaderFocusMode(false);
+    if (nativeRuntime) void getCurrentWindow().setFullscreen(false).catch(() => undefined);
+  }, [workspace.readerFocusMode, workspace.view]);
 
   const selected = allPapers.find((paper) => paper.id === workspace.selectedPaperId);
 
@@ -172,7 +197,7 @@ export function App() {
   ) : papersQuery.isError ? (
     <LibraryStartup error={new Error(papersQuery.error instanceof Error ? papersQuery.error.message : String(papersQuery.error ?? "无法打开本地索引"))} onRetry={() => void papersQuery.refetch()} />
   ) : (
-    <LibraryWorkspace papers={papers} allPapers={allPapers} selected={selected} scanning={scanMutation.isPending} onScan={() => scanMutation.mutate()} onChooseLibrary={choose} />
+    <LibraryWorkspace papers={papers} allPapers={allPapers} collections={collectionsQuery.data ?? []} selected={papers.find((paper) => paper.id === workspace.selectedPaperId) ?? papers[0]} scanning={scanMutation.isPending} onScan={() => scanMutation.mutate()} onChooseLibrary={choose} />
   );
 
   if (!root) {
@@ -187,10 +212,10 @@ export function App() {
   }
 
   return (
-    <div className="app-shell" data-font-size={workspace.fontSize}>
+    <div className={`app-shell ${workspace.readerFocusMode ? "reader-focus-mode" : ""}`} data-font-size={workspace.fontSize}>
       <Topbar />
       <div className="app-main">
-        <Sidebar paperCount={allPapers.length} />
+        <Sidebar root={root} papers={allPapers} collections={collectionsQuery.data ?? []} />
         <div className="workspace-shell">
           {workspaceContent}
         </div>

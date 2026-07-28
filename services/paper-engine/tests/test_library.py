@@ -36,7 +36,33 @@ def test_initializes_versioned_library_layout(tmp_path: Path) -> None:
 
     with sqlite3.connect(result["database"]) as connection:
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-    assert version == 9
+    assert version == 10
+
+
+def test_collection_tree_move_filter_and_delete_are_persistent(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    make_pdf(library.papers_dir / "tree-paper.pdf")
+    library.scan()
+    paper = library.list_papers()[0]
+
+    parent = library.create_collection("研究主题", color="#3984d8")
+    child = library.create_collection("多模态", parent["id"], "#28a06a")
+    moved = library.move_paper_to_collection(paper["id"], child["id"])
+    assert moved["collectionId"] == child["id"]
+    assert library.list_papers()[0]["collectionIds"] == [child["id"]]
+
+    renamed = library.update_collection(child["id"], {"name": "多模态推理"})
+    assert renamed["name"] == "多模态推理"
+    with pytest.raises(ValueError, match="descendant"):
+        library.update_collection(parent["id"], {"parentId": child["id"]})
+
+    restarted = Library(tmp_path)
+    restarted.initialize()
+    assert any(item["name"] == "多模态推理" for item in restarted.list_collections())
+    assert restarted.delete_collection(parent["id"]) is True
+    assert restarted.list_collections() == []
+    assert restarted.list_papers()[0]["collectionIds"] == []
 
 
 def test_agent_profiles_runs_retry_and_restart_recovery_are_persistent(tmp_path: Path) -> None:

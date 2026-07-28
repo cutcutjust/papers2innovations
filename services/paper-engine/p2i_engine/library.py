@@ -848,6 +848,13 @@ class Library:
             ).fetchall()
             papers = []
             for row in rows:
+                collection_ids = [
+                    item["collection_id"]
+                    for item in connection.execute(
+                        "SELECT collection_id FROM paper_collections WHERE paper_id = ? ORDER BY assigned_at",
+                        (row["id"],),
+                    )
+                ]
                 figures = [
                     dict(figure)
                     for figure in connection.execute(
@@ -879,9 +886,186 @@ class Library:
                         ],
                         "updatedAt": row["updated_at"],
                         "error": row["error"],
+                        "collectionIds": collection_ids,
                     }
                 )
             return papers
+
+    @staticmethod
+    def _validate_collection_name(name: Any) -> str:
+        normalized = " ".join(str(name or "").split())
+        if not normalized or len(normalized) > 120:
+            raise ValueError("Collection name must contain 1 to 120 characters")
+        if any(character in normalized for character in "\\/\0"):
+            raise ValueError("Collection name cannot contain path separators")
+        return normalized
+
+    @staticmethod
+    def _validate_collection_color(color: Any) -> str:
+        normalized = str(color or "#4f6bed").lower()
+        if len(normalized) != 7 or not normalized.startswith("#"):
+            raise ValueError("Collection color must use #RRGGBB")
+        try:
+            int(normalized[1:], 16)
+        except ValueError as error:
+            raise ValueError("Collection color must use #RRGGBB") from error
+        return normalized
+
+    def list_collections(self) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                "SELECT c.*, COUNT(pc.paper_id) AS paper_count "
+                "FROM library_collections c "
+                "LEFT JOIN paper_collections pc ON pc.collection_id = c.id "
+                "GROUP BY c.id ORDER BY c.parent_id IS NOT NULL, c.sort_order, c.name COLLATE NOCASE"
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "parentId": row["parent_id"],
+                "color": row["color"],
+                "sortOrder": row["sort_order"],
+                "paperCount": row["paper_count"],
+                "createdAt": row["created_at"],
+                "updatedAt": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def create_collection(
+        self, name: Any, parent_id: str | None = None, color: Any = "#4f6bed"
+    ) -> dict[str, Any]:
+        self.initialize()
+        normalized_name = self._validate_collection_name(name)
+        normalized_color = self._validate_collection_color(color)
+        collection_id = str(uuid.uuid4())
+        now = utc_now()
+        with self.db.connect() as connection:
+            if parent_id and not connection.execute(
+                "SELECT 1 FROM library_collections WHERE id = ?", (parent_id,)
+            ).fetchone():
+                raise KeyError(f"Unknown parent collection: {parent_id}")
+            sort_order = connection.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM library_collections "
+                "WHERE COALESCE(parent_id, '') = COALESCE(?, '')",
+                (parent_id,),
+            ).fetchone()[0]
+            try:
+                connection.execute(
+                    "INSERT INTO library_collections(id, name, parent_id, color, sort_order, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (collection_id, normalized_name, parent_id, normalized_color, sort_order, now, now),
+                )
+            except Exception as error:
+                if "UNIQUE" in str(error).upper():
+                    raise ValueError("A collection with this name already exists here") from error
+                raise
+        return next(item for item in self.list_collections() if item["id"] == collection_id)
+
+    def update_collection(self, collection_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            current = connection.execute(
+                "SELECT * FROM library_collections WHERE id = ?", (collection_id,)
+            ).fetchone()
+            if not current:
+                raise KeyError(f"Unknown collection: {collection_id}")
+            name = self._validate_collection_name(patch.get("name", current["name"]))
+            color = self._validate_collection_color(patch.get("color", current["color"]))
+            parent_id = patch.get("parentId", current["parent_id"])
+            if parent_id == collection_id:
+                raise ValueError("A collection cannot be its own parent")
+            if parent_id:
+                parent = connection.execute(
+                    "SELECT id FROM library_collections WHERE id = ?", (parent_id,)
+                ).fetchone()
+                if not parent:
+                    raise KeyError(f"Unknown parent collection: {parent_id}")
+                descendant = connection.execute(
+                    "WITH RECURSIVE descendants(id) AS ("
+                    "SELECT id FROM library_collections WHERE parent_id = ? "
+                    "UNION ALL SELECT c.id FROM library_collections c JOIN descendants d ON c.parent_id = d.id"
+                    ") SELECT 1 FROM descendants WHERE id = ?",
+                    (collection_id, parent_id),
+                ).fetchone()
+                if descendant:
+                    raise ValueError("A collection cannot be moved into its own descendant")
+            sort_order = int(patch.get("sortOrder", current["sort_order"]))
+            now = utc_now()
+            try:
+                connection.execute(
+                    "UPDATE library_collections SET name = ?, parent_id = ?, color = ?, sort_order = ?, updated_at = ? "
+                    "WHERE id = ?",
+                    (name, parent_id, color, sort_order, now, collection_id),
+                )
+            except Exception as error:
+                if "UNIQUE" in str(error).upper():
+                    raise ValueError("A collection with this name already exists here") from error
+                raise
+        return next(item for item in self.list_collections() if item["id"] == collection_id)
+
+    def delete_collection(self, collection_id: str) -> bool:
+        self.initialize()
+        with self.db.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM library_collections WHERE id = ?", (collection_id,)
+            )
+            return cursor.rowcount > 0
+
+    def move_paper_to_collection(self, paper_id: str, collection_id: str | None) -> dict[str, Any]:
+        self.initialize()
+        now = utc_now()
+        with self.db.connect() as connection:
+            if not connection.execute("SELECT 1 FROM papers WHERE id = ?", (paper_id,)).fetchone():
+                raise KeyError(f"Unknown paper: {paper_id}")
+            if collection_id and not connection.execute(
+                "SELECT 1 FROM library_collections WHERE id = ?", (collection_id,)
+            ).fetchone():
+                raise KeyError(f"Unknown collection: {collection_id}")
+            connection.execute("DELETE FROM paper_collections WHERE paper_id = ?", (paper_id,))
+            if collection_id:
+                connection.execute(
+                    "INSERT INTO paper_collections(paper_id, collection_id, assigned_at) VALUES (?, ?, ?)",
+                    (paper_id, collection_id, now),
+                )
+        return {"paperId": paper_id, "collectionId": collection_id, "assignedAt": now}
+
+    @staticmethod
+    def _ensure_zotero_collection(
+        connection: Any, collection_name: str, paper_id: str, now: str
+    ) -> None:
+        root = connection.execute(
+            "SELECT id FROM library_collections WHERE id = 'source-zotero'"
+        ).fetchone()
+        if not root:
+            connection.execute(
+                "INSERT INTO library_collections(id, name, parent_id, color, sort_order, created_at, updated_at) "
+                "VALUES ('source-zotero', 'Zotero', NULL, '#3984d8', 0, ?, ?)",
+                (now, now),
+            )
+        child = connection.execute(
+            "SELECT id FROM library_collections WHERE parent_id = 'source-zotero' AND name = ? COLLATE NOCASE",
+            (collection_name,),
+        ).fetchone()
+        if not child:
+            child_id = str(uuid.uuid4())
+            sort_order = connection.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM library_collections WHERE parent_id = 'source-zotero'"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO library_collections(id, name, parent_id, color, sort_order, created_at, updated_at) "
+                "VALUES (?, ?, 'source-zotero', '#4f6bed', ?, ?, ?)",
+                (child_id, collection_name, sort_order, now, now),
+            )
+        else:
+            child_id = child["id"]
+        connection.execute("DELETE FROM paper_collections WHERE paper_id = ?", (paper_id,))
+        connection.execute(
+            "INSERT INTO paper_collections(paper_id, collection_id, assigned_at) VALUES (?, ?, ?)",
+            (paper_id, child_id, now),
+        )
 
     def list_jobs(self) -> list[dict]:
         self.initialize()
@@ -1037,6 +1221,11 @@ class Library:
                         now,
                     ),
                 )
+                source_collection = candidate["collections"][0] if candidate["collections"] else None
+                if source_collection:
+                    self._ensure_zotero_collection(
+                        connection, source_collection, paper["id"], now
+                    )
         manifest = {
             "schemaVersion": 1,
             "source": str(importer.data_dir),

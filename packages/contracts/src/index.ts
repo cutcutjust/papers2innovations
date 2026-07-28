@@ -573,6 +573,18 @@ export interface LibraryPaper {
   figures: LibraryFigure[];
   updatedAt: string;
   error?: string;
+  collectionIds: string[];
+}
+
+export interface LibraryCollection {
+  id: string;
+  name: string;
+  parentId?: string;
+  color: string;
+  sortOrder: number;
+  paperCount: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface JsonRpcRequest {

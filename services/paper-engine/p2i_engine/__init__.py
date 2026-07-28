@@ -1,3 +1,3 @@
 """Papers2Innovations local paper engine."""
 
-__version__ = "0.1.16"
+__version__ = "0.1.17"
