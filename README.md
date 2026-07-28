@@ -21,7 +21,7 @@
 
 Papers2Innovations keeps PDFs, generated Markdown, evidence anchors, model usage, and research runs in one persistent workspace. It combines a native desktop shell, a recoverable local parsing engine, secure model access, section-based reading, citation analysis, research agents, and a resumable innovation pipeline.
 
-> **Current release:** `v0.1.9` for Windows x64. The project is in active `0.1.x` development; keep backups of irreplaceable source PDFs.
+> **Current release:** `v0.1.10` for Windows x64. The project is in active `0.1.x` development; keep backups of irreplaceable source PDFs.
 
 ## What it does
 
