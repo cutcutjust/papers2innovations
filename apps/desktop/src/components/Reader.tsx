@@ -1,5 +1,5 @@
 import type { ContextSnapshot, LibraryPaper, ModelStreamEvent, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, TranslationRecord } from "@p2i/contracts";
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { BookOpen, Bot, Check, ChevronLeft, FileImage, FileText, Languages, Layers3, LoaderCircle, MessageSquareText, RefreshCw, Search, Send, Sparkles, Square, Trash2, TriangleAlert, WandSparkles, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -10,6 +10,7 @@ import { addPaperToContext, addSelectionToContext, assetUrl, clearReaderConversa
 import { hydrateProviderCredentials } from "../lib/credentials";
 import { buildReaderSections, compactReaderBlocks, resolveMarkdownAssetPath, type ReaderDisplaySection, type ReaderDocumentBlock } from "../lib/documentBlocks";
 import { MARKDOWN_FORMAT_PROMPT_VERSION, prepareMarkdownForFormatting, restoreFormattedMarkdown, splitMarkdownForFormatting } from "../lib/markdownFormatting";
+import { normalizeMarkdownMath } from "../lib/markdownMath";
 import { useWorkspace } from "../store";
 
 type ReaderMode = "integrated" | "pdf" | "figures";
@@ -34,7 +35,13 @@ type AnalysisState = {
 const TRANSLATION_PROMPT_VERSION = "reader-translate-v1";
 const ANALYSIS_PROMPT_VERSION = "reader-analysis-v1";
 const CHAT_PROMPT_VERSION = "reader-chat-v1";
+const READER_OUTLINE_WIDTH_KEY = "p2i.reader-outline-width";
+const DEFAULT_OUTLINE_WIDTH = 224;
+const MIN_OUTLINE_WIDTH = 176;
+const MAX_OUTLINE_WIDTH = 360;
 const analysisKey = (blockId: string, type: ReaderAnalysisType) => `${blockId}:${type}`;
+
+const clampOutlineWidth = (width: number) => Math.min(MAX_OUTLINE_WIDTH, Math.max(MIN_OUTLINE_WIDTH, Math.round(width)));
 
 function MarkdownBlock({ value, markdownPath }: { value: string; markdownPath?: string }) {
   return <ReactMarkdown
@@ -47,7 +54,7 @@ function MarkdownBlock({ value, markdownPath }: { value: string; markdownPath?: 
         return <img className="markdown-paper-figure" src={rendered} alt={alt ?? "Extracted paper figure"} loading="lazy" />;
       },
     }}
-  >{value}</ReactMarkdown>;
+  >{normalizeMarkdownMath(value)}</ReactMarkdown>;
 }
 
 export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) {
@@ -71,12 +78,20 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const [formattingStatus, setFormattingStatus] = useState<"idle" | "formatting" | "saved" | "error">("idle");
   const [formattingProgress, setFormattingProgress] = useState(0);
   const [formattingError, setFormattingError] = useState("");
+  const [outlineWidth, setOutlineWidth] = useState(() => {
+    if (typeof window === "undefined") return DEFAULT_OUTLINE_WIDTH;
+    const persisted = Number(window.localStorage.getItem(READER_OUTLINE_WIDTH_KEY));
+    return Number.isFinite(persisted) && persisted > 0 ? clampOutlineWidth(persisted) : DEFAULT_OUTLINE_WIDTH;
+  });
+  const [pdfPage, setPdfPage] = useState(1);
+  const [pdfNavigationKey, setPdfNavigationKey] = useState(0);
   const streamHandles = useRef(new Map<string, ModelStreamHandle>());
   const chatHandle = useRef<ModelStreamHandle | null>(null);
   const formattingHandle = useRef<ModelStreamHandle | null>(null);
   const autoFormattingKey = useRef("");
   const selectionToolbar = useRef<HTMLDivElement | null>(null);
   const readerCanvas = useRef<HTMLElement | null>(null);
+  const outlineDrag = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
   const readable = Boolean(paper?.id && paper && ["READY", "PARTIAL"].includes(paper.status));
   const markdownQuery = useQuery({
     queryKey: ["paper-markdown", root, paper?.id],
@@ -166,6 +181,8 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     setFormattingStatus("idle");
     setFormattingProgress(0);
     setFormattingError("");
+    setPdfPage(1);
+    setPdfNavigationKey(0);
     autoFormattingKey.current = "";
     for (const handle of streamHandles.current.values()) void handle.cancel();
     streamHandles.current.clear();
@@ -180,6 +197,10 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       formattingHandle.current = null;
     }
   }, [paper?.id]);
+
+  useEffect(() => {
+    window.localStorage.setItem(READER_OUTLINE_WIDTH_KEY, String(outlineWidth));
+  }, [outlineWidth]);
 
   useEffect(() => {
     if (mode !== "integrated" || !sections.length) return;
@@ -286,7 +307,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         model: selectedModel,
         temperature: 0.1,
         messages: [
-          { role: "system", content: "请将科研文本忠实翻译为简体中文。保留 Markdown、LaTeX、专业术语、引用、数字和不确定性，只返回译文，不要添加解释。" },
+          { role: "system", content: "请将科研文本忠实翻译为简体中文。保留 Markdown、LaTeX、专业术语、引用、数字和不确定性，只返回译文，不要添加解释。行内公式使用 $...$，块级公式使用 $$...$$，不要使用 \\(...\\) 或 \\[...\\]。" },
           { role: "user", content: block.text },
         ],
       }, onEvent);
@@ -401,7 +422,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         temperature: 0.1,
         messages: [
           { role: "system", content: type === "formula"
-            ? "请用中文严谨解释给定的科研公式：指出准确表达式，定义每个符号，说明量纲与运算，并结合相邻方法文本说明其作用、假设和歧义。保留 LaTeX，并引用提供的章节/文本块/页码锚点。"
+            ? "请用中文严谨解释给定的科研公式：指出准确表达式，定义每个符号，说明量纲与运算，并结合相邻方法文本说明其作用、假设和歧义。保留 LaTeX，并引用提供的章节/文本块/页码锚点。行内公式使用 $...$，块级公式使用 $$...$$，不要使用 \\(...\\) 或 \\[...\\]。"
             : "请用中文严谨解释给定的科研论断或定理，分别说明命题、假设、推理或证明概要、影响、局限与未解决问题。不得虚构证明，并引用提供的章节/文本块/页码锚点。" },
           { role: "user", content: `来源锚点：paper=${paper.id}, section=${block.sectionId}, block=${block.id}, page=${block.page ?? "未知"}\n\n目标原文：\n${block.text}\n\n相邻结构化上下文：\n${adjacentContext}` },
         ],
@@ -569,7 +590,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         model: selectedModel,
         temperature: 0.2,
         messages: [
-          { role: "system", content: "你是阅读器中的论文分析助手。请默认使用中文，只根据提供的本地论文上下文回答。每条事实性陈述都要尽可能引用论文、章节、文本块或页码；区分直接证据与推断，上下文不足时明确说明。" },
+          { role: "system", content: "你是阅读器中的论文分析助手。请默认使用中文，只根据提供的本地论文上下文回答。每条事实性陈述都要尽可能引用论文、章节、文本块或页码；区分直接证据与推断，上下文不足时明确说明。行内公式使用 $...$，块级公式使用 $$...$$，不要使用 \\(...\\) 或 \\[...\\]。" },
           ...priorMessages,
           { role: "user", content: `问题：${userMessage}\n\n当前本地研究上下文：\n${assembled.contextText}` },
         ],
@@ -724,16 +745,66 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     });
   };
 
+  const navigateToSection = (section: ReaderSection) => {
+    setActiveSection(section.id);
+    if (mode === "pdf") {
+      setPdfPage(section.pageStart ?? 1);
+      setPdfNavigationKey((current) => current + 1);
+      return;
+    }
+    if (mode !== "integrated") setMode("integrated");
+    window.requestAnimationFrame(() => {
+      document.getElementById(`reader-section-${section.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  };
+
+  const changeMode = (nextMode: ReaderMode) => {
+    setMode(nextMode);
+    if (nextMode === "pdf") {
+      const section = sections.find((candidate) => candidate.id === activeSection) ?? sections[0];
+      setPdfPage(section?.pageStart ?? 1);
+      setPdfNavigationKey((current) => current + 1);
+    } else if (nextMode === "integrated" && activeSection) {
+      window.requestAnimationFrame(() => {
+        document.getElementById(`reader-section-${activeSection}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+  };
+
+  const resizeOutline = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = outlineDrag.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    setOutlineWidth(clampOutlineWidth(drag.startWidth + event.clientX - drag.startX));
+  };
+
+  const finishOutlineResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (outlineDrag.current?.pointerId !== event.pointerId) return;
+    outlineDrag.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+
+  const resizeOutlineWithKeyboard = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    setOutlineWidth((current) => clampOutlineWidth(current + (event.key === "ArrowRight" ? 16 : -16)));
+  };
+
+  const sourcePdfUrl = assetUrl(paper.sourcePath);
+  const pagedPdfUrl = sourcePdfUrl ? `${sourcePdfUrl}#page=${pdfPage}&view=FitH` : "";
+
   return <div className="reader-workspace">
     {selection && <div ref={selectionToolbar} className={`selection-popover ${selection.placement}`} style={{ left: selection.left, top: selection.top }} role="toolbar" aria-label="Selected text actions"><button title="Translate selected text" onClick={() => void translate(selection)}><Languages size={14} /> Translate</button><button title="Explain selected text" onClick={() => void explain("theorem", selection)}><Sparkles size={14} /> Explain</button><button className="icon-button" title="Close" onClick={() => setSelection(null)}><X size={14} /></button></div>}
     <div className="reader-toolbar">
       <button onClick={() => setView("library")}><ChevronLeft size={13} /> 论文库</button>
       <strong title={paper.title}>{paper.title}</strong>
-      <div className="reader-mode-switch"><button className={mode === "integrated" ? "active" : ""} onClick={() => setMode("integrated")}>整合阅读</button><button className={mode === "pdf" ? "active" : ""} onClick={() => setMode("pdf")}>仅 PDF</button><button className={mode === "figures" ? "active" : ""} onClick={() => setMode("figures")}>插图</button></div>
+      <div className="reader-mode-switch"><button className={mode === "integrated" ? "active" : ""} onClick={() => changeMode("integrated")}>整合阅读</button><button className={mode === "pdf" ? "active" : ""} onClick={() => changeMode("pdf")}>仅 PDF</button><button className={mode === "figures" ? "active" : ""} onClick={() => changeMode("figures")}>插图</button></div>
       <button><Search size={13} /> 查找</button><button className={formattingStatus === "saved" ? "active" : ""} disabled={formattingStatus === "formatting"} title={formattingError || `使用 ${formattingModel?.displayName ?? "所选模型"} 整理 Markdown`} onClick={() => void formatDocument()}>{formattingStatus === "formatting" ? <LoaderCircle className="spin" size={13} /> : <WandSparkles size={13} />} {formattingStatus === "formatting" ? `${formattingProgress}%` : "整理"}</button><button className={fullText ? "active" : ""} disabled={contextBusy === "paper"} onClick={() => void togglePaperContext()}><Layers3 size={13} /> {fullText ? `论文上下文 · ${contextPercent}%` : "加载全文"}</button><button className="reader-agent-toggle" onClick={() => setAgentOpen(true)}><Bot size={13} /> 询问 AI</button>
     </div>
     <div className="reader-main">
-      <aside className="reader-outline"><span>章节</span>{sections.map((section, index) => <button key={section.id} className={activeSection === section.id ? "active" : ""} style={{ paddingLeft: `${10 + Math.max(0, section.level - 1) * 12}px` }} onClick={() => { setActiveSection(section.id); document.getElementById(`reader-section-${section.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" }); }}><b>{String(index + 1).padStart(2, "0")}</b><span>{section.title}</span><small>{section.pageStart ? section.pageStart === section.pageEnd ? `第 ${section.pageStart} 页` : `第 ${section.pageStart}-${section.pageEnd} 页` : `${section.blocks.length}`}</small></button>)}</aside>
+      <aside className="reader-outline" style={{ width: outlineWidth, flexBasis: outlineWidth }}>
+        <div className="reader-outline-scroll"><span className="reader-outline-title">{mode === "pdf" ? `PDF 目录 · 第 ${pdfPage} 页` : "章节目录"}</span>{sections.map((section, index) => <button key={section.id} className={activeSection === section.id ? "active" : ""} style={{ paddingLeft: `${10 + Math.max(0, section.level - 1) * 12}px` }} onClick={() => navigateToSection(section)}><b>{String(index + 1).padStart(2, "0")}</b><span>{section.title}</span><small>{section.pageStart ? section.pageStart === section.pageEnd ? `第 ${section.pageStart} 页` : `第 ${section.pageStart}-${section.pageEnd} 页` : `${section.blocks.length}`}</small></button>)}</div>
+        <div className="reader-outline-resizer" role="separator" aria-label="调整目录宽度" aria-orientation="vertical" aria-valuemin={MIN_OUTLINE_WIDTH} aria-valuemax={MAX_OUTLINE_WIDTH} aria-valuenow={outlineWidth} tabIndex={0} title="拖动调整目录宽度" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.focus(); outlineDrag.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: outlineWidth }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={resizeOutline} onPointerUp={finishOutlineResize} onPointerCancel={finishOutlineResize} onKeyDown={resizeOutlineWithKeyboard} />
+      </aside>
       <main className="reader-canvas" ref={readerCanvas}>
         {mode === "integrated" && <article className="integrated-paper">
           <header className="paper-reading-header"><span className="tag tag-primary">结构化文档</span><h1>{paper.title}</h1><p>本地文档 · {paper.pageCount || "—"} 页 · 更新于 {new Date(paper.updatedAt).toLocaleDateString("zh-CN")}</p></header>
@@ -756,7 +827,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
             })}</div>
           </section>;})}
         </article>}
-        {mode === "pdf" && <div className="integrated-pdf">{assetUrl(paper.sourcePath) ? <iframe title="Source PDF" src={assetUrl(paper.sourcePath)} /> : <div className="pdf-placeholder"><FileText size={38} /><h2>Native PDF preview</h2><p>The source PDF is displayed here in the Windows desktop build.</p></div>}</div>}
+        {mode === "pdf" && <div className="integrated-pdf">{pagedPdfUrl ? <iframe key={`${pdfPage}:${pdfNavigationKey}`} title={`Source PDF · page ${pdfPage}`} src={pagedPdfUrl} /> : <div className="pdf-placeholder"><FileText size={38} /><h2>无法预览 PDF</h2><p>源 PDF 路径当前不可用。</p></div>}</div>}
         {mode === "figures" && <div className="reader-figures">{paper.figures.length ? paper.figures.map((figure) => <figure key={figure.id}>{assetUrl(`${paper.markdownPath?.replace(/[\\/][^\\/]+$/, "")}/${figure.relativePath}`) ? <img src={assetUrl(`${paper.markdownPath?.replace(/[\\/][^\\/]+$/, "")}/${figure.relativePath}`)} alt={figure.caption ?? "提取的插图"} /> : <div><FileImage size={32} /></div>}<figcaption>{figure.caption ?? "提取的插图"}</figcaption></figure>) : <div className="pdf-placeholder"><FileImage size={36} /><h2>暂无提取的插图</h2><p>解析器完成图像提取后，插图会显示在这里。</p></div>}</div>}
       </main>
       <aside className={`reader-agent-panel ${agentOpen ? "open" : ""}`}>

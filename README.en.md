@@ -16,7 +16,7 @@
 
 Papers2Innovations keeps PDFs, structured Markdown, evidence anchors, model usage, and research runs in a recoverable local workspace. Its Tauri desktop host, Python parsing engine, and React UI provide Zotero import, section-based reading, figure extraction, context management, research agents, and staged innovation synthesis.
 
-> Current release: `v0.1.14` for Windows x64. The project remains in active `0.1.x` development; keep backups of irreplaceable source PDFs.
+> Current release: `v0.1.15` for Windows x64. The project remains in active `0.1.x` development; keep backups of irreplaceable source PDFs.
 
 ## Capabilities
 
@@ -24,7 +24,7 @@ Papers2Innovations keeps PDFs, structured Markdown, evidence anchors, model usag
 | --- | --- |
 | Ingest | Watch `Papers/`, preview and import Zotero read-only, deduplicate by SHA-256, copy atomically, and record provenance. |
 | Parse | Generate section Markdown, page anchors, figures, tables, and normalized coordinates; resume interrupted jobs by stage. |
-| Read | Navigate by paper section, render math, open source pages, and persist translation and explanation revisions. |
+| Read | Navigate Markdown and PDF by paper section, jump to source pages, resize the outline, and render AI-generated LaTeX correctly. |
 | Context | Share evidence-bound context across Reader, Agents, and Innovate with visible token usage and compression. |
 | Agents | Configure a model, prompt, tool permissions, network/write policy, cancellation, retries, and checkpoints per agent. |
 | Innovate | Run context compression, evidence extraction, idea generation, novelty review, and experiment critique. |
