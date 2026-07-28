@@ -1,6 +1,6 @@
-import type { ContextDraft, ContextDraftItem, ContextCompressionRecord, LibraryPaper, ModelStreamEvent } from "@p2i/contracts";
+import type { ContextDraft, ContextDraftItem, ContextCompressionRecord, LibraryPaper, ModelStreamEvent, ModelToolDefinition } from "@p2i/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Database, FileText, Layers3, LoaderCircle, Minus, Plus, RefreshCw, Search, Sparkles, Square, Trash2, TriangleAlert } from "lucide-react";
+import { Braces, Check, ChevronDown, Database, FileText, Gauge, Layers3, LoaderCircle, MessageSquareText, Minus, Plus, RefreshCw, Search, ShieldCheck, Sparkles, Square, Trash2, TriangleAlert, Wrench } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   activateContextCompression,
@@ -8,6 +8,8 @@ import {
   clearContext,
   getContextCompression,
   getContextDraft,
+  listAgentProfiles,
+  listAgentTools,
   readContextItem,
   removePaperFromContext,
   saveContextCompression,
@@ -27,6 +29,25 @@ type CompressionState = {
   usage?: { inputTokens: number; outputTokens: number };
 };
 
+type BreakdownKey = "system" | "tools" | "conversation" | "papers" | "figures" | "output" | "safety";
+
+const estimateTokens = (text: string) => Math.max(0, Math.ceil(new TextEncoder().encode(text).length / 4));
+
+const toolDisplayNames: Record<string, string> = {
+  search_library: "搜索本地论文库",
+  read_paper: "读取结构化论文",
+  read_section: "读取论文章节",
+  read_figure: "读取插图及说明",
+  find_evidence: "查找证据锚点",
+  get_references: "读取参考文献",
+  get_related_papers: "查找相关论文",
+  count_context_tokens: "计算上下文 token",
+  create_note: "保存研究笔记",
+  update_context: "更新共享上下文",
+};
+
+const toolDisplayName = (name: string) => toolDisplayNames[name] ?? name;
+
 const totalTokens = (draft: ContextDraft | undefined) => draft
   ? Object.values(draft.tokenBreakdown).reduce((total, value) => total + value, 0)
   : 0;
@@ -42,6 +63,8 @@ export function ContextWorkspace({ papers, root }: { papers: LibraryPaper[]; roo
   const [filter, setFilter] = useState("");
   const [busyPaper, setBusyPaper] = useState("");
   const [error, setError] = useState("");
+  const [expandedBreakdown, setExpandedBreakdown] = useState<BreakdownKey | null>("papers");
+  const [inspectionAgentId, setInspectionAgentId] = useState("");
   const [compressionStates, setCompressionStates] = useState<Record<string, CompressionState>>({});
   const streamHandles = useRef(new Map<string, ModelStreamHandle>());
   const streamTexts = useRef(new Map<string, string>());
@@ -55,6 +78,20 @@ export function ContextWorkspace({ papers, root }: { papers: LibraryPaper[]; roo
   const providerCredentialQuery = useQuery({
     queryKey: ["provider-credentials", providers.map((provider) => provider.credentialId).sort().join(":")],
     queryFn: () => hydrateProviderCredentials(providers),
+    retry: false,
+  });
+  const agentProfilesQuery = useQuery({
+    queryKey: ["agent-profiles", root],
+    queryFn: () => listAgentProfiles(root),
+    retry: false,
+  });
+  const inspectedAgent = agentProfilesQuery.data?.find((profile) => profile.id === inspectionAgentId)
+    ?? agentProfilesQuery.data?.find((profile) => profile.enabled)
+    ?? agentProfilesQuery.data?.[0];
+  const agentToolsQuery = useQuery({
+    queryKey: ["agent-tools", root, inspectedAgent?.id],
+    queryFn: () => listAgentTools(root, inspectedAgent!.id),
+    enabled: Boolean(inspectedAgent?.id && expandedBreakdown === "tools"),
     retry: false,
   });
   const selectedModel = customModels.find((model) => model.id === contextCompressionModelId) ?? customModels[0];
@@ -75,6 +112,10 @@ export function ContextWorkspace({ papers, root }: { papers: LibraryPaper[]; roo
   const maxContext = selectedModel?.maxContextTokens ?? 128000;
   const percent = Math.min(100, Math.round(tokenUse / maxContext * 100));
   const includedPaperIds = new Set(draft?.items.map((item) => item.paperId) ?? []);
+
+  useEffect(() => {
+    if (!inspectionAgentId && agentProfilesQuery.data?.[0]) setInspectionAgentId(agentProfilesQuery.data[0].id);
+  }, [agentProfilesQuery.data, inspectionAgentId]);
 
   useEffect(() => () => {
     for (const handle of streamHandles.current.values()) {
@@ -250,23 +291,33 @@ export function ContextWorkspace({ papers, root }: { papers: LibraryPaper[]; roo
     if (paper) void update(paper.id, () => addPaperToContext(root, paper.id, "full"));
   };
 
+  const breakdownItems: Array<{ key: BreakdownKey; label: string; value: number; icon: typeof Layers3 }> = [
+    { key: "system", label: "系统提示词", value: draft?.tokenBreakdown.systemPrompt ?? 4200, icon: Braces },
+    { key: "tools", label: "智能体工具", value: draft?.tokenBreakdown.tools ?? 7800, icon: Wrench },
+    { key: "conversation", label: "对话历史", value: draft?.tokenBreakdown.conversation ?? 0, icon: MessageSquareText },
+    { key: "papers", label: "论文上下文", value: draft?.tokenBreakdown.papers ?? 0, icon: FileText },
+    { key: "figures", label: "图像上下文", value: draft?.tokenBreakdown.figures ?? 0, icon: Database },
+    { key: "output", label: "回答输出预留", value: draft?.tokenBreakdown.outputReserve ?? 16000, icon: Gauge },
+    { key: "safety", label: "安全余量", value: draft?.tokenBreakdown.safetyBuffer ?? 8000, icon: ShieldCheck },
+  ];
+
   return <div className="context-page">
     <header className="figma-page-header">
-      <div><h1>Context Workspace</h1><p>Assemble and inspect exactly what your AI agents receive</p></div>
+      <div><h1>上下文工作区</h1><p>组合并检查智能体实际使用的论文证据与 token 预算</p></div>
       <div className="page-actions">
-        <label className="context-compression-model"><Sparkles size={12} /><span>Compression model</span><select value={selectedModel?.id ?? ""} onChange={(event) => setContextCompressionModelId(event.target.value)}>{customModels.map((model) => <option key={model.id} value={model.id}>{model.displayName}</option>)}</select></label>
-        <button className="secondary-button" disabled={!draft?.items.length || Boolean(busyPaper)} onClick={() => void update("clear", () => clearContext(root))}><Trash2 size={13} /> Clear</button>
-        <button className="primary-button compact" disabled={includedPaperIds.size === papers.length || Boolean(busyPaper)} onClick={addNextPaper}><Plus size={13} /> Add paper</button>
+        <label className="context-compression-model"><Sparkles size={12} /><span>压缩模型</span><select value={selectedModel?.id ?? ""} onChange={(event) => setContextCompressionModelId(event.target.value)}>{customModels.map((model) => <option key={model.id} value={model.id}>{model.displayName}</option>)}</select></label>
+        <button className="secondary-button" disabled={!draft?.items.length || Boolean(busyPaper)} onClick={() => void update("clear", () => clearContext(root))}><Trash2 size={13} /> 清空</button>
+        <button className="primary-button compact" disabled={includedPaperIds.size === papers.length || Boolean(busyPaper)} onClick={addNextPaper}><Plus size={13} /> 添加论文</button>
       </div>
     </header>
     {error && <div className="settings-status error"><TriangleAlert size={15} /> {error}</div>}
     <div className="context-overview">
-      <div><span>Current context</span><strong>{(tokenUse / 1000).toFixed(1)}K <small>/ {(maxContext / 1000).toFixed(0)}K tokens</small></strong><div className="context-track"><i style={{ width: `${percent}%` }} /></div></div>
-      <dl><div><dt>Papers</dt><dd>{includedPaperIds.size}</dd></div><div><dt>Capacity used</dt><dd>{percent}%</dd></div><div><dt>Output reserve</dt><dd>{((draft?.tokenBreakdown.outputReserve ?? 16000) / 1000).toFixed(0)}K</dd></div><div><dt>Safety buffer</dt><dd>{((draft?.tokenBreakdown.safetyBuffer ?? 8000) / 1000).toFixed(0)}K</dd></div></dl>
+      <div><span>当前预算</span><strong>{(tokenUse / 1000).toFixed(1)}K <small>/ {(maxContext / 1000).toFixed(0)}K tokens</small></strong><div className="context-track"><i style={{ width: `${percent}%` }} /></div></div>
+      <dl><div><dt>论文</dt><dd>{includedPaperIds.size}</dd></div><div><dt>预算占用</dt><dd>{percent}%</dd></div><div><dt>回答预留</dt><dd>{((draft?.tokenBreakdown.outputReserve ?? 16000) / 1000).toFixed(0)}K</dd></div><div><dt>安全余量</dt><dd>{((draft?.tokenBreakdown.safetyBuffer ?? 8000) / 1000).toFixed(0)}K</dd></div></dl>
     </div>
     <div className="context-layout">
       <section className="context-paper-panel">
-        <header><div><h2>Paper sources</h2><p>Persist original or AI-compressed papers with exact provenance</p></div><label><Search size={12} /><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter sources" /></label></header>
+        <header><div><h2>论文来源</h2><p>保留原文、结构化内容或带来源记录的 AI 压缩结果</p></div><label><Search size={12} /><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="筛选来源" /></label></header>
         <div className="context-paper-rows">{visiblePapers.map((paper) => {
           const items = itemsByPaper.get(paper.id) ?? [];
           const enabled = items.length > 0;
@@ -280,12 +331,12 @@ export function ContextWorkspace({ papers, root }: { papers: LibraryPaper[]; roo
             <span className="context-file-icon"><FileText size={15} /></span>
             <div className="context-paper-copy">
               <h3>{paper.title}</h3>
-              <p>{paper.pageCount || "—"} pages · {paper.status} · {items.length} context item{items.length === 1 ? "" : "s"}</p>
+              <p>{paper.pageCount || "—"} 页 · {paper.status} · {items.length} 个上下文条目</p>
               <div className="context-mode-switch">
-                <button className={mode === "full" ? "active" : ""} disabled={busy} onClick={() => void switchPaperMode(paper, "full")}>Original text</button>
-                <button className={mode === "structured" ? "active" : ""} disabled={busy} onClick={() => void switchPaperMode(paper, "structured")}>Structured document</button>
-                <button className={mode === "compressed" ? "active ai" : ""} disabled={busy && state?.status !== "streaming"} onClick={() => void compressPaper(paper, paperItem)}><Sparkles size={11} /> AI compressed</button>
-                {mode === "sections" && <span className="tag tag-ai">Reader selections</span>}
+                <button className={mode === "full" ? "active" : ""} disabled={busy} onClick={() => void switchPaperMode(paper, "full")}>原始全文</button>
+                <button className={mode === "structured" ? "active" : ""} disabled={busy} onClick={() => void switchPaperMode(paper, "structured")}>结构化文档</button>
+                <button className={mode === "compressed" ? "active ai" : ""} disabled={busy && state?.status !== "streaming"} onClick={() => void compressPaper(paper, paperItem)}><Sparkles size={11} /> AI 压缩</button>
+                {mode === "sections" && <span className="tag tag-ai">阅读器选段</span>}
               </div>
               {state && <div className={`context-compression-status ${state.status}`}>
                 {state.status === "loading" && <><LoaderCircle className="spin" size={12} /> Checking the revisioned cache…</>}
@@ -297,22 +348,69 @@ export function ContextWorkspace({ papers, root }: { papers: LibraryPaper[]; roo
               </div>}
               {mode === "compressed" && paperItem?.compression && <p className="context-compression-preview"><Database size={11} /> {paperItem.compression.preview}<span>{paperItem.compression.modelId} · r{paperItem.compression.revision}</span></p>}
             </div>
-            <code>{enabled ? `${(paperTokens / 1000).toFixed(1)}K` : "Excluded"}</code>
+            <code>{enabled ? `${(paperTokens / 1000).toFixed(1)}K` : "未加入"}</code>
           </article>;
         })}</div>
       </section>
       <aside className="context-breakdown">
-        <h2>Token breakdown</h2>
-        {[
-          ["System prompt", draft?.tokenBreakdown.systemPrompt ?? 4200],
-          ["Agent tools", draft?.tokenBreakdown.tools ?? 7800],
-          ["Conversation", draft?.tokenBreakdown.conversation ?? 0],
-          ["Paper context", draft?.tokenBreakdown.papers ?? 0],
-          ["Output reserve", draft?.tokenBreakdown.outputReserve ?? 16000],
-          ["Safety buffer", draft?.tokenBreakdown.safetyBuffer ?? 8000],
-        ].map(([label, value]) => <div className="breakdown-row" key={String(label)}><span>{label}</span><b>{(Number(value) / 1000).toFixed(1)}K</b><i><em style={{ width: `${Math.min(100, Number(value) / maxContext * 100)}%` }} /></i></div>)}
-        <div className="context-policy"><Layers3 size={15} /><div><strong>Revisioned compression</strong><p>Cache identity includes the paper hash, model and prompt version. Source changes cannot reuse stale compressed evidence.</p></div></div>
+        <div className="breakdown-heading"><div><h2>Token 预算与内容</h2><p>点击每项检查完整内容或计算规则</p></div>{Boolean(agentProfilesQuery.data?.length) && <label><span>检查智能体</span><select value={inspectedAgent?.id ?? ""} onChange={(event) => setInspectionAgentId(event.target.value)}>{agentProfilesQuery.data?.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>}</div>
+        <div className="token-breakdown-list">{breakdownItems.map((item) => {
+          const Icon = item.icon;
+          const expanded = expandedBreakdown === item.key;
+          return <div className={`breakdown-item ${expanded ? "expanded" : ""}`} key={item.key}>
+            <button className="breakdown-row" aria-expanded={expanded} onClick={() => setExpandedBreakdown(expanded ? null : item.key)}><Icon size={14} /><span>{item.label}</span><b>{item.value.toLocaleString()} tokens</b><ChevronDown size={14} /><i><em style={{ width: `${Math.min(100, item.value / maxContext * 100)}%` }} /></i></button>
+            {expanded && <TokenBreakdownDetail breakdownKey={item.key} budget={item.value} root={root} items={draft?.items ?? []} agent={inspectedAgent} tools={agentToolsQuery.data} toolsLoading={agentToolsQuery.isLoading} />}
+          </div>;
+        })}</div>
+        <div className="context-policy"><Layers3 size={15} /><div><strong>版本化压缩缓存</strong><p>缓存键包含论文哈希、模型和提示词版本。来源发生变化后，不会复用过期的压缩证据。</p></div></div>
       </aside>
     </div>
   </div>;
+}
+
+function TokenBreakdownDetail({ breakdownKey, budget, root, items, agent, tools, toolsLoading }: {
+  breakdownKey: BreakdownKey;
+  budget: number;
+  root: string;
+  items: ContextDraftItem[];
+  agent?: Awaited<ReturnType<typeof listAgentProfiles>>[number];
+  tools?: ModelToolDefinition[];
+  toolsLoading: boolean;
+}) {
+  if (breakdownKey === "system") {
+    const text = agent?.systemPrompt ?? "尚未配置智能体系统提示词。";
+    return <div className="breakdown-detail"><DetailHeader label={agent?.name ?? "未选择智能体"} actual={estimateTokens(text)} budget={budget} /><pre>{text}</pre></div>;
+  }
+  if (breakdownKey === "tools") {
+    if (toolsLoading) return <div className="breakdown-detail loading"><LoaderCircle className="spin" size={14} /> 正在读取工具定义…</div>;
+    const definitions = tools ?? [];
+    const serialized = JSON.stringify(definitions, null, 2);
+    return <div className="breakdown-detail"><DetailHeader label={`${definitions.length} 个已启用工具`} actual={estimateTokens(serialized)} budget={budget} />{definitions.length ? definitions.map((tool) => <article className="tool-definition" key={tool.name}><header><strong>{toolDisplayName(tool.name)}</strong><code>{tool.name}</code></header><p>{tool.description}</p><pre>{JSON.stringify(tool.inputSchema, null, 2)}</pre></article>) : <p className="empty-detail">当前智能体未启用工具。</p>}</div>;
+  }
+  if (breakdownKey === "papers") {
+    return <div className="breakdown-detail"><DetailHeader label={`${items.length} 个论文来源`} actual={items.reduce((total, item) => total + item.estimatedTokens, 0)} budget={budget} />{items.length ? items.map((item) => <ContextSourceDisclosure item={item} root={root} key={item.id} />) : <p className="empty-detail">尚未将论文或阅读器选段加入共享上下文。</p>}</div>;
+  }
+  if (breakdownKey === "conversation") return <BudgetExplanation budget={budget} title="当前没有对话文本" text="共享上下文草稿不自动混入 Reader 或智能体的历史对话。发起具体请求时，只会按该工作流的会话规则附加对话内容。" />;
+  if (breakdownKey === "figures") return <BudgetExplanation budget={budget} title="当前没有图像上下文" text="只有明确加入上下文的插图、图注或视觉结果才会计入此处；论文正文中的图片路径不会自动作为视觉输入发送。" />;
+  if (breakdownKey === "output") return <BudgetExplanation budget={budget} title="这是输出额度，不是输入文本" text={`共享草稿预留 ${budget.toLocaleString()} tokens，确保模型有空间生成回答。${agent ? `当前“${agent.name}”配置的单次最大输出为 ${agent.maxOutputTokens.toLocaleString()} tokens，执行时以具体智能体配置为准。` : "执行时会以具体智能体的最大输出配置为准。"}`} />;
+  return <BudgetExplanation budget={budget} title="这是防超限余量，不是输入文本" text="该余量用于覆盖 tokenizer 差异、消息角色包装、工具调用参数和供应商协议开销。它不会发送给模型，也不包含论文或提示词内容。" />;
+}
+
+function DetailHeader({ label, actual, budget }: { label: string; actual: number; budget: number }) {
+  return <header className="detail-token-header"><strong>{label}</strong><span>当前内容估算 <b>{actual.toLocaleString()}</b> · 预算 <b>{budget.toLocaleString()}</b></span></header>;
+}
+
+function BudgetExplanation({ budget, title, text }: { budget: number; title: string; text: string }) {
+  return <div className="breakdown-detail budget-explanation"><header><strong>{title}</strong><code>{budget.toLocaleString()} tokens</code></header><p>{text}</p></div>;
+}
+
+function ContextSourceDisclosure({ item, root }: { item: ContextDraftItem; root: string }) {
+  const [open, setOpen] = useState(false);
+  const sourceQuery = useQuery({
+    queryKey: ["context-source", root, item.id],
+    queryFn: () => readContextItem(root, item.id),
+    enabled: open,
+    retry: false,
+  });
+  return <details className="context-source-detail" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}><summary><span><strong>{item.paperTitle}</strong><small>{item.sectionId ? `章节 ${item.sectionId}` : item.mode === "compressed" ? "AI 压缩" : "论文全文"}</small></span><code>{item.estimatedTokens.toLocaleString()} tokens</code></summary>{sourceQuery.isLoading ? <p><LoaderCircle className="spin" size={13} /> 正在读取完整文本…</p> : sourceQuery.isError ? <p className="detail-error"><TriangleAlert size={13} /> {sourceQuery.error instanceof Error ? sourceQuery.error.message : "无法读取该来源"}</p> : <pre>{sourceQuery.data?.sourceText ?? item.sourcePreview}</pre>}</details>;
 }

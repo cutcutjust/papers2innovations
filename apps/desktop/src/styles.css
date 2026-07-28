@@ -664,7 +664,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .window-controls, .figma-brand strong, .top-command-search { display: none; }
   .top-navigation { margin-left: 0; }.top-navigation button { padding: 0 7px; }
   .research-sidebar { width: 60px; flex-basis: 60px; }.research-nav-item, .collection-row, .agent-row { justify-content: center; padding: 0; }.research-nav-item span, .research-nav-item b, .collection-row span, .collection-row b, .agent-row span, .agent-row em, .sidebar-section-title, .sidebar-divider { display: none; }.collection-row, .agent-row { height: 25px; }.sidebar-footer { justify-content: center; flex-wrap: wrap; height: auto; padding: 5px; }.sidebar-footer span { display: none; }
-  .library-inspector, .reader-agent-panel:not(.open), .graph-inspector, .context-breakdown, .agent-detail { display: none; }
+  .library-inspector, .reader-agent-panel:not(.open), .graph-inspector, .agent-detail { display: none; }
+  .context-layout { overflow-y: auto; flex-direction: column; }
+  .context-paper-panel { flex: 0 0 auto; overflow: visible; }
+  .context-breakdown { display: block; width: 100%; flex: 0 0 auto; max-height: none; border-top: 1px solid var(--line-strong); border-left: 0; }
   .reader-agent-toggle { display: flex !important; }.reader-agent-panel.open { position: fixed; z-index: 35; top: 40px; right: 0; bottom: 0; display: flex; width: min(360px, calc(100vw - 60px)); box-shadow: -8px 0 28px #18223826; }.reader-agent-close { display: grid !important; }
   .reader-outline { width: 150px; flex-basis: 150px; }.reader-context-bar > span:not(.tag) { display: none; }
   .graph-toolbar .tag, .graph-toolbar > small { display: none; }.graph-toolbar label { width: min(280px, 45vw); }.graph-list-panel { width: 220px; flex-basis: 220px; }.graph-canvas { min-width: 420px; }
@@ -974,4 +977,69 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .workflow-row select { grid-column: 2 / -1; grid-row: 2; }
   .workflow-row > .icon-button { grid-column: 3; grid-row: 1; }
   .workflow-copy small { line-height: 1.4; }
+}
+
+/* Inspectable context budgets */
+.context-breakdown { width: 400px; flex-basis: 400px; border-left-color: var(--line-strong); }
+.breakdown-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.breakdown-heading h2 { margin: 0; font-size: calc(11px * var(--font-scale, 1)); }
+.breakdown-heading p { margin: 3px 0 0; color: var(--faint); font-size: calc(8px * var(--font-scale, 1)); }
+.breakdown-heading label { display: grid; min-width: 125px; gap: 4px; color: var(--faint); font-size: calc(7px * var(--font-scale, 1)); }
+.breakdown-heading select { width: 100%; height: 28px; padding: 0 6px; color: var(--ink); background: var(--surface-soft); border: 1px solid var(--line); border-radius: 4px; font-size: calc(8px * var(--font-scale, 1)); }
+.token-breakdown-list { display: grid; gap: 6px; }
+.breakdown-item { overflow: hidden; border: 1px solid var(--line); border-radius: 5px; }
+.breakdown-item.expanded { border-color: #aeb9ed; box-shadow: 0 0 0 1px #e4e7fa; }
+.breakdown-item .breakdown-row { display: grid; width: 100%; grid-template-columns: 18px minmax(0, 1fr) auto 16px; align-items: center; gap: 6px; margin: 0; padding: 9px; color: var(--muted); background: #fff; border: 0; cursor: pointer; text-align: left; }
+.breakdown-item .breakdown-row:hover { background: var(--surface-soft); }
+.breakdown-item .breakdown-row > svg:first-child { color: var(--primary); }
+.breakdown-item .breakdown-row > svg:last-of-type { transition: transform .15s; }
+.breakdown-item .breakdown-row[aria-expanded="true"] > svg:last-of-type { transform: rotate(180deg); }
+.breakdown-item .breakdown-row b { font-family: "Cascadia Code", Consolas, monospace; font-size: calc(7px * var(--font-scale, 1)); white-space: nowrap; }
+.breakdown-item .breakdown-row i { grid-column: 1 / -1; height: 3px; margin: 0; overflow: hidden; background: #e8ebef; border-radius: 2px; }
+.breakdown-detail { display: grid; gap: 8px; padding: 10px; color: var(--muted); background: #fafbfc; border-top: 1px solid var(--line); font-size: calc(8px * var(--font-scale, 1)); }
+.breakdown-detail.loading { display: flex; align-items: center; }
+.breakdown-detail pre, .tool-definition pre, .context-source-detail pre { max-width: 100%; max-height: 310px; margin: 0; padding: 9px; overflow: auto; color: #263142; background: #fff; border: 1px solid var(--line); border-radius: 4px; font: 400 calc(8px * var(--font-scale, 1))/1.6 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.detail-token-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.detail-token-header strong { color: var(--ink); }
+.detail-token-header span { color: var(--faint); text-align: right; }
+.detail-token-header b { color: var(--muted); font-family: "Cascadia Code", Consolas, monospace; }
+.tool-definition { display: grid; gap: 6px; padding-top: 8px; border-top: 1px solid var(--line); }
+.tool-definition header, .budget-explanation header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tool-definition header strong, .budget-explanation header strong { color: var(--ink); }
+.tool-definition code, .budget-explanation header code { color: var(--primary); font-size: calc(7px * var(--font-scale, 1)); }
+.tool-definition p, .budget-explanation p, .empty-detail { margin: 0; line-height: 1.65; }
+.context-source-detail { overflow: hidden; background: #fff; border: 1px solid var(--line); border-radius: 4px; }
+.context-source-detail summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px; cursor: pointer; }
+.context-source-detail summary > span { display: grid; min-width: 0; gap: 2px; }
+.context-source-detail summary strong { overflow: hidden; color: var(--ink); text-overflow: ellipsis; white-space: nowrap; }
+.context-source-detail summary small { color: var(--faint); }
+.context-source-detail summary code { flex: 0 0 auto; color: var(--primary); font-size: calc(7px * var(--font-scale, 1)); }
+.context-source-detail > p { display: flex; align-items: center; gap: 6px; margin: 0; padding: 9px; border-top: 1px solid var(--line); }
+.context-source-detail > pre { max-height: 360px; border-width: 1px 0 0; border-radius: 0; }
+.detail-error { color: var(--red); }
+
+/* Security and application preferences */
+.font-preference-row { display: flex; min-height: 62px; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 12px; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 5px; }
+.font-preference-row > span { display: grid; gap: 4px; }
+.font-preference-row strong { font-size: calc(11px * var(--font-scale, 1)); }
+.font-preference-row small { color: var(--faint); font-size: calc(9px * var(--font-scale, 1)); }
+.segmented-control.large { padding: 3px; background: #fff; border: 1px solid var(--line); border-radius: 5px; }
+.segmented-control.large button { min-width: 48px; height: 30px; font-size: calc(10px * var(--font-scale, 1)); }
+.security-detail-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.security-detail-grid article { display: flex; min-height: 90px; align-items: flex-start; gap: 9px; padding: 12px; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 5px; }
+.security-detail-grid article > svg { flex: 0 0 auto; color: var(--primary); }
+.security-detail-grid article span { display: grid; gap: 5px; }
+.security-detail-grid strong { font-size: calc(10px * var(--font-scale, 1)); }
+.security-detail-grid small { color: var(--faint); font-size: calc(9px * var(--font-scale, 1)); line-height: 1.55; }
+
+@media (max-width: 900px) {
+  .context-breakdown { display: block; width: 100%; flex: 0 0 auto; border-top: 1px solid var(--line-strong); border-left: 0; }
+}
+
+@media (max-width: 700px) {
+  .breakdown-heading { flex-direction: column; }
+  .breakdown-heading label { width: 100%; }
+  .font-preference-row { align-items: stretch; flex-direction: column; }
+  .segmented-control.large { display: grid; grid-template-columns: repeat(3, 1fr); }
+  .security-detail-grid { grid-template-columns: 1fr; }
 }

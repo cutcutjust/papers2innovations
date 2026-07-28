@@ -1,4 +1,4 @@
-import { BookOpen, Clock3, FolderInput, History, Inbox, Layers3, Network, Plus, Settings2, Star, Users } from "lucide-react";
+import { BookOpen, Bot, Clock3, FolderInput, History, Inbox, Layers3, Network, Plus, Settings2, Star, Users } from "lucide-react";
 import { useWorkspace } from "../store";
 
 const collections = [
@@ -34,7 +34,8 @@ export function Sidebar({ paperCount = 0 }: { paperCount?: number }) {
         <button className={`research-nav-item ${view === "import" ? "active" : ""}`} onClick={() => setView("import")}><FolderInput size={14} /><span>导入 Zotero</span></button>
       </div>
       <footer className="sidebar-footer">
-        <button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")} title="设置"><Settings2 size={14} /></button>
+        <button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")} title="模型与处理"><Bot size={14} /></button>
+        <button className={view === "security" ? "active" : ""} onClick={() => setView("security")} title="安全与应用"><Settings2 size={14} /></button>
         <button className={view === "graph" ? "active" : ""} onClick={() => setView("graph")} title="引用图谱"><Network size={14} /></button>
         <button className={view === "context" ? "active" : ""} onClick={() => setView("context")} title="上下文工作区"><Layers3 size={14} /></button>
         <span><Users size={12} /> 本地</span>

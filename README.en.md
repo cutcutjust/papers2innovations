@@ -16,7 +16,7 @@
 
 Papers2Innovations keeps PDFs, structured Markdown, evidence anchors, model usage, and research runs in a recoverable local workspace. Its Tauri desktop host, Python parsing engine, and React UI provide Zotero import, section-based reading, figure extraction, context management, research agents, and staged innovation synthesis.
 
-> Current release: `v0.1.15` for Windows x64. The project remains in active `0.1.x` development; keep backups of irreplaceable source PDFs.
+> Current release: `v0.1.16` for Windows x64. The project remains in active `0.1.x` development; keep backups of irreplaceable source PDFs.
 
 ## Capabilities
 
@@ -25,12 +25,12 @@ Papers2Innovations keeps PDFs, structured Markdown, evidence anchors, model usag
 | Ingest | Watch `Papers/`, preview and import Zotero read-only, deduplicate by SHA-256, copy atomically, and record provenance. |
 | Parse | Generate section Markdown, page anchors, figures, tables, and normalized coordinates; resume interrupted jobs by stage. |
 | Read | Navigate Markdown and PDF by paper section, jump to source pages, resize the outline, and render AI-generated LaTeX correctly. |
-| Context | Share evidence-bound context across Reader, Agents, and Innovate with visible token usage and compression. |
+| Context | Share evidence-bound context across Reader, Agents, and Innovate, with expandable system prompts, tool schemas, paper text, and token budgets. |
 | Agents | Configure a model, prompt, tool permissions, network/write policy, cancellation, retries, and checkpoints per agent. |
 | Innovate | Run context compression, evidence extraction, idea generation, novelty review, and experiment critique. |
 | Maintain | Receive signed GitHub update prompts or check manually from Settings without losing local configuration. |
 
-## Models and security
+## Models, security, and application
 
 ![Papers2Innovations model settings](docs/images/model-settings.png)
 
@@ -40,6 +40,8 @@ Papers2Innovations keeps PDFs, structured Markdown, evidence anchors, model usag
 - API keys are encrypted in Tauri Stronghold, whose vault password is protected by the operating-system keychain. Python, SQLite, and logs cannot read keys.
 - Model registry, context limits, workflow assignments, OCR consent, typography, and library path are backed up as a non-secret Stronghold snapshot.
 - **In-app updates and installer upgrades preserve existing settings and API keys.** Credentials are removed only when the user explicitly deletes them.
+- Settings are split into **Models & Processing** and **Security & Application**, separating model workflows from updates, typography, privacy, and uninstall controls.
+- **Answer output reserve** is generation capacity, not input text. The Context workspace distinguishes configured budgets from current serialized-text estimates.
 
 ## Research workspaces
 
@@ -61,7 +63,7 @@ The innovation workbench binds each run to an exact context snapshot. Stages may
 2. Open the app and select an independent library directory such as `E:\Papers2Innovations-Library`.
 3. Place PDFs in `Papers/`, or close Zotero and use **Import Zotero**.
 4. Track hashing, layout, OCR, image, table, and indexing stages in **Activity**; failed stages can be retried.
-5. In **Settings**, add a model with a custom Base URL, context size, and API key, then assign Markdown/OCR workflows.
+5. In **Models & Processing**, add a model with a custom Base URL, context size, and API key, then assign Markdown/OCR workflows.
 6. Read by section, add evidence to shared Context, and continue in Agents or Innovate.
 
 Local ingestion and fallback parsing do not require a model key. Translation, explanation, Markdown cleanup, OCR, agents, and synthesis use only models configured by the user.
@@ -84,7 +86,7 @@ The paper library is independent of the application install directory. Upgrading
 
 ## Updates and uninstalling
 
-The app checks the signed GitHub `latest.json` after startup. A new version can be downloaded, installed, and relaunched in place; **Check for updates** is also available in Model & Security settings. GitHub availability never blocks local work.
+The app checks the signed GitHub `latest.json` after startup. A new version can be downloaded, installed, and relaunched in place; **Check for updates** is also available under Security & Application. GitHub availability never blocks local work.
 
 Uninstall through Windows Installed Apps, the Start menu shortcut, or Settings. The uninstaller removes app files while preserving the independent library and user data.
 

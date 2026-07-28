@@ -4,7 +4,7 @@ import { sanitizeProviderConfig } from "./lib/providerConfig";
 import { normalizeFontSize, type FontSize } from "./lib/fontSize";
 import type { WorkspaceSettingsSnapshot } from "./lib/settingsSnapshot";
 
-export type View = "library" | "reader" | "agents" | "context" | "graph" | "innovate" | "jobs" | "import" | "settings";
+export type View = "library" | "reader" | "agents" | "context" | "graph" | "innovate" | "jobs" | "import" | "settings" | "security";
 type ReaderMode = "markdown" | "pdf" | "figures";
 export type ModelApiFormat = ApiFormat;
 

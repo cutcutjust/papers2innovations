@@ -10,13 +10,11 @@ import {
   LoaderCircle,
   Pencil,
   Plus,
-  RefreshCw,
   ScanText,
   Server,
   ShieldCheck,
   Trash2,
   TriangleAlert,
-  Type,
   Wifi,
   X,
 } from "lucide-react";
@@ -31,11 +29,8 @@ import {
   testProviderConnection,
   testQwenConnection,
 } from "../lib/credentials";
-import { nativeRuntime, uninstallApplication } from "../lib/bridge";
 import { providerIdForModel } from "../lib/providerConfig";
 import { useWorkspace, type ModelApiFormat } from "../store";
-import type { FontSize } from "../lib/fontSize";
-import { CHECK_UPDATE_EVENT } from "./AppUpdater";
 
 type ContextMode = "128000" | "256000" | "1000000" | "custom";
 type SettingsStatus = { kind: "success" | "error" | "info"; message: string };
@@ -74,14 +69,13 @@ export function Settings() {
     autoFormatMarkdown,
     fullPageOcrModelId,
     ocrConsent,
-    fontSize,
+    setView,
     addCustomModel,
     removeCustomModel,
     setMarkdownFormattingModelId,
     setAutoFormatMarkdown,
     setFullPageOcrModelId,
     setOcrConsent,
-    setFontSize,
   } = useWorkspace();
   const [status, setStatus] = useState<SettingsStatus | null>(null);
   const [busyAction, setBusyAction] = useState("");
@@ -297,17 +291,11 @@ export function Settings() {
     setStatus({ kind: "success", message: `${model.displayName} OCR 连接测试成功。` });
   });
 
-  const uninstall = () => {
-    if (!window.confirm("从此电脑卸载 Papers2Innovations？论文库和用户数据会保留。")) return;
-    void run("uninstall", uninstallApplication);
-  };
-
   return <main className="settings-page settings-page-refined">
     <header className="settings-hero">
-      <div className="page-title-block"><div className="page-icon"><ShieldCheck size={20} /></div><div><h1>模型与安全</h1><p>管理 AI 接口、文档处理流程与加密凭据</p></div></div>
+      <div className="page-title-block"><div className="page-icon"><Bot size={20} /></div><div><h1>模型与处理</h1><p>管理 AI 接口、上下文容量与文档处理流程</p></div></div>
       <div className="settings-hero-actions">
-        <div className="font-size-setting"><Type size={15} /><span>字体</span><div className="segmented-control" aria-label="系统字体大小">{(["small", "medium", "large"] as FontSize[]).map((size) => <button key={size} className={fontSize === size ? "active" : ""} onClick={() => setFontSize(size)} aria-pressed={fontSize === size}>{size === "small" ? "小" : size === "medium" ? "中" : "大"}</button>)}</div></div>
-        {nativeRuntime && <button className="secondary-button update-check-button" onClick={() => window.dispatchEvent(new Event(CHECK_UPDATE_EVENT))}><RefreshCw size={14} /> 检查更新</button>}
+        <button className="secondary-button" onClick={() => setView("security")}><ShieldCheck size={14} /> 安全与应用</button>
         <button className="primary-button compact" onClick={openNewModel}><Plus size={15} /> 添加模型</button>
       </div>
     </header>
@@ -358,7 +346,5 @@ export function Settings() {
       <div className="ocr-consent-row"><ShieldCheck size={16} /><span><strong>发送 PDF 页面</strong><small>渲染页会在本地缓存，只有启用后才会发送给所选模型。</small></span><label className="compact-switch"><input type="checkbox" checked={ocrConsent} onChange={(event) => void changeOcrConsent(event.target.checked)} disabled={Boolean(busyAction)} /><span /></label></div>
     </section>
 
-    <section className="security-facts"><div><span>凭据保险库</span><strong>Stronghold + 系统钥匙串</strong></div><div><span>Python 与数据库</span><strong>无法访问密钥</strong></div><div><span>OCR 并发</span><strong>2 页</strong></div><div><span>重试间隔</span><strong>2 / 4 / 8 秒</strong></div></section>
-    {nativeRuntime && <section className="settings-section app-management"><div className="settings-heading"><div><h2>应用管理</h2><p>卸载桌面应用，同时保留论文库与用户数据。</p></div><Trash2 size={18} /></div><button className="danger-button" onClick={uninstall} disabled={Boolean(busyAction)}><Trash2 size={15} /> 卸载 Papers2Innovations</button></section>}
   </main>;
 }

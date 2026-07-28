@@ -16,7 +16,7 @@ def test_rpc_ping_returns_versioned_pong() -> None:
     response = json.loads(output.getvalue())
     assert response["id"] == 7
     assert response["result"]["pong"] is True
-    assert response["result"]["version"] == "0.1.15"
+    assert response["result"]["version"] == "0.1.16"
 
 
 def test_rpc_accepts_windows_utf8_bom() -> None:

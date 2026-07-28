@@ -4,6 +4,7 @@ import { FolderOpen } from "lucide-react";
 import { AppUpdater } from "./components/AppUpdater";
 import { Activity } from "./components/Activity";
 import { Settings } from "./components/Settings";
+import { SecuritySettings } from "./components/SecuritySettings";
 import { ZoteroImport } from "./components/ZoteroImport";
 import { InnovationWorkspace } from "./components/InnovationWorkspace";
 import { Reader } from "./components/Reader";
@@ -143,6 +144,8 @@ export function App() {
 
   const workspaceContent = workspace.view === "settings" ? (
     <Settings />
+  ) : workspace.view === "security" ? (
+    <SecuritySettings />
   ) : workspace.view === "innovate" ? (
     <InnovationWorkspace papers={allPapers} />
   ) : workspace.view === "agents" ? (
