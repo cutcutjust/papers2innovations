@@ -2130,6 +2130,13 @@ class Library:
                 self._write_agent_profile(
                     connection, self._normalize_agent_profile(payload)
                 )
+            connection.execute(
+                "INSERT OR IGNORE INTO agent_prompts(id, agent_profile_id, name, content, "
+                "sort_order, created_at, updated_at) "
+                "SELECT 'prompt:' || id || ':default', id, '默认分析任务', "
+                "'请分析当前研究上下文，提炼最重要且有证据支持的结论，并指出证据不足之处。', "
+                "0, created_at, updated_at FROM agent_profiles"
+            )
 
     def _recover_interrupted_agent_runs(self) -> None:
         now = utc_now()
@@ -2207,6 +2214,19 @@ class Library:
                 {**payload, "id": profile_id}, existing["created_at"] if existing else None
             )
             self._write_agent_profile(connection, record)
+            if not existing:
+                connection.execute(
+                    "INSERT OR IGNORE INTO agent_prompts(id, agent_profile_id, name, content, "
+                    "sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?)",
+                    (
+                        f"prompt:{profile_id}:default",
+                        profile_id,
+                        "默认分析任务",
+                        "请分析当前研究上下文，提炼最重要且有证据支持的结论，并指出证据不足之处。",
+                        record["created_at"],
+                        record["updated_at"],
+                    ),
+                )
         return self._agent_profile_contract(record)
 
     def delete_agent_profile(self, profile_id: str) -> bool:
@@ -2217,6 +2237,83 @@ class Library:
             ).fetchone():
                 raise ValueError("Agent profiles with run history cannot be deleted; disable it instead")
             cursor = connection.execute("DELETE FROM agent_profiles WHERE id = ?", (profile_id,))
+        return bool(cursor.rowcount)
+
+    @staticmethod
+    def _agent_prompt_contract(record: Any) -> dict[str, Any]:
+        return {
+            "id": record["id"],
+            "agentProfileId": record["agent_profile_id"],
+            "name": record["name"],
+            "content": record["content"],
+            "sortOrder": record["sort_order"],
+            "createdAt": record["created_at"],
+            "updatedAt": record["updated_at"],
+        }
+
+    def list_agent_prompts(self, profile_id: str) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.db.connect() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM agent_profiles WHERE id = ?", (profile_id,)
+            ).fetchone():
+                raise ValueError("Unknown agent profile")
+            rows = connection.execute(
+                "SELECT * FROM agent_prompts WHERE agent_profile_id = ? "
+                "ORDER BY sort_order, updated_at DESC, id",
+                (profile_id,),
+            ).fetchall()
+        return [self._agent_prompt_contract(row) for row in rows]
+
+    def upsert_agent_prompt(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        prompt_id = str(payload.get("id") or uuid.uuid4()).strip()
+        profile_id = str(payload.get("agentProfileId", "")).strip()
+        name = str(payload.get("name", "")).strip()
+        content = str(payload.get("content", "")).strip()
+        if not all((prompt_id, profile_id, name, content)):
+            raise ValueError("Prompt id, agent profile, name, and content are required")
+        if len(prompt_id) > 160 or len(name) > 160 or len(content) > 50000:
+            raise ValueError("Agent prompt fields exceed their size limit")
+        sort_order = int(payload.get("sortOrder", 0))
+        if not -10000 <= sort_order <= 10000:
+            raise ValueError("Agent prompt sort order is invalid")
+        now = utc_now()
+        with self.db.connect() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM agent_profiles WHERE id = ?", (profile_id,)
+            ).fetchone():
+                raise ValueError("Unknown agent profile")
+            existing = connection.execute(
+                "SELECT created_at, agent_profile_id FROM agent_prompts WHERE id = ?",
+                (prompt_id,),
+            ).fetchone()
+            if existing and existing["agent_profile_id"] != profile_id:
+                raise ValueError("Agent prompt cannot be moved to another profile")
+            duplicate = connection.execute(
+                "SELECT id FROM agent_prompts WHERE agent_profile_id = ? "
+                "AND name = ? COLLATE NOCASE AND id <> ?",
+                (profile_id, name, prompt_id),
+            ).fetchone()
+            if duplicate:
+                raise ValueError("An agent prompt with this name already exists")
+            created_at = existing["created_at"] if existing else now
+            connection.execute(
+                "INSERT INTO agent_prompts(id, agent_profile_id, name, content, sort_order, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET name = excluded.name, content = excluded.content, "
+                "sort_order = excluded.sort_order, updated_at = excluded.updated_at",
+                (prompt_id, profile_id, name, content, sort_order, created_at, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM agent_prompts WHERE id = ?", (prompt_id,)
+            ).fetchone()
+        return self._agent_prompt_contract(row)
+
+    def delete_agent_prompt(self, prompt_id: str) -> bool:
+        self.initialize()
+        with self.db.connect() as connection:
+            cursor = connection.execute("DELETE FROM agent_prompts WHERE id = ?", (prompt_id,))
         return bool(cursor.rowcount)
 
     def _agent_run_contract(self, record: Any) -> dict[str, Any]:

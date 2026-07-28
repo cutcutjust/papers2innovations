@@ -337,6 +337,16 @@ export interface AgentProfile {
   latestRun?: AgentRun;
 }
 
+export interface AgentPromptTemplate {
+  id: string;
+  agentProfileId: string;
+  name: string;
+  content: string;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type AgentRunStatus = "running" | "completed" | "failed" | "cancelled" | "interrupted";
 
 export interface AgentRun {

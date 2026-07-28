@@ -1,4 +1,4 @@
-import type { AgentProfile, AgentRun, AgentToolCallRecord, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryCollection, LibraryPaper, ModelStreamEvent, ModelStreamRequest, ModelToolDefinition, PaperDocument, ProgressNotification, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, ReaderConversation, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
+import type { AgentProfile, AgentPromptTemplate, AgentRun, AgentToolCallRecord, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryCollection, LibraryPaper, ModelStreamEvent, ModelStreamRequest, ModelToolDefinition, PaperDocument, ProgressNotification, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, ReaderConversation, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { demoMarkdown, demoPapers } from "../demo";
@@ -506,6 +506,15 @@ let demoAgentProfiles: AgentProfile[] = [
     updatedAt: demoAgentNow,
   },
 ];
+let demoAgentPrompts: AgentPromptTemplate[] = demoAgentProfiles.map((profile) => ({
+  id: `prompt:${profile.id}:default`,
+  agentProfileId: profile.id,
+  name: "默认分析任务",
+  content: "请分析当前研究上下文，提炼最重要且有证据支持的结论，并指出证据不足之处。",
+  sortOrder: 0,
+  createdAt: demoAgentNow,
+  updatedAt: demoAgentNow,
+}));
 let demoAgentRuns: AgentRun[] = [];
 
 export async function listAgentProfiles(root: string): Promise<AgentProfile[]> {
@@ -519,8 +528,10 @@ export async function listAgentProfiles(root: string): Promise<AgentProfile[]> {
 export async function upsertAgentProfile(root: string, profile: Omit<AgentProfile, "latestRun">): Promise<AgentProfile> {
   if (!nativeRuntime) {
     const now = new Date().toISOString();
+    const isNew = !demoAgentProfiles.some((item) => item.id === profile.id);
     const saved = { ...profile, createdAt: profile.createdAt || now, updatedAt: now };
     demoAgentProfiles = [...demoAgentProfiles.filter((item) => item.id !== saved.id), saved];
+    if (isNew) demoAgentPrompts = [...demoAgentPrompts, { id: `prompt:${saved.id}:default`, agentProfileId: saved.id, name: "默认分析任务", content: "请分析当前研究上下文，提炼最重要且有证据支持的结论，并指出证据不足之处。", sortOrder: 0, createdAt: now, updatedAt: now }];
     return saved;
   }
   return rpc<AgentProfile>("agent.upsert", { root, ...profile });
@@ -529,9 +540,34 @@ export async function upsertAgentProfile(root: string, profile: Omit<AgentProfil
 export async function deleteAgentProfile(root: string, agentProfileId: string): Promise<void> {
   if (!nativeRuntime) {
     demoAgentProfiles = demoAgentProfiles.filter((item) => item.id !== agentProfileId);
+    demoAgentPrompts = demoAgentPrompts.filter((item) => item.agentProfileId !== agentProfileId);
     return;
   }
   await rpc("agent.delete", { root, agentProfileId });
+}
+
+export async function listAgentPrompts(root: string, agentProfileId: string): Promise<AgentPromptTemplate[]> {
+  if (!nativeRuntime) return demoAgentPrompts.filter((item) => item.agentProfileId === agentProfileId).sort((left, right) => left.sortOrder - right.sortOrder || right.updatedAt.localeCompare(left.updatedAt));
+  return rpc<AgentPromptTemplate[]>("agent.prompt_list", { root, agentProfileId });
+}
+
+export async function upsertAgentPrompt(root: string, input: { id?: string; agentProfileId: string; name: string; content: string; sortOrder?: number }): Promise<AgentPromptTemplate> {
+  if (!nativeRuntime) {
+    const now = new Date().toISOString();
+    const previous = demoAgentPrompts.find((item) => item.id === input.id);
+    const saved: AgentPromptTemplate = { id: input.id ?? crypto.randomUUID(), agentProfileId: input.agentProfileId, name: input.name.trim(), content: input.content.trim(), sortOrder: input.sortOrder ?? previous?.sortOrder ?? 0, createdAt: previous?.createdAt ?? now, updatedAt: now };
+    demoAgentPrompts = [...demoAgentPrompts.filter((item) => item.id !== saved.id), saved];
+    return saved;
+  }
+  return rpc<AgentPromptTemplate>("agent.prompt_upsert", { root, ...input });
+}
+
+export async function deleteAgentPrompt(root: string, promptId: string): Promise<void> {
+  if (!nativeRuntime) {
+    demoAgentPrompts = demoAgentPrompts.filter((item) => item.id !== promptId);
+    return;
+  }
+  await rpc("agent.prompt_delete", { root, promptId });
 }
 
 export async function listAgentRuns(root: string, agentProfileId?: string): Promise<AgentRun[]> {

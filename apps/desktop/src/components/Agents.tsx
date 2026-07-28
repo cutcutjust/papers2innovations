@@ -1,9 +1,10 @@
-import type { AgentProfile, AgentRun, ContextSnapshot, ModelMessage, ModelStreamEvent, ModelToolCall } from "@p2i/contracts";
+import type { AgentProfile, AgentPromptTemplate, AgentRun, ContextSnapshot, ModelMessage, ModelStreamEvent, ModelToolCall } from "@p2i/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bot,
   CheckCircle2,
   Database,
+  FileText,
   History,
   KeyRound,
   LoaderCircle,
@@ -24,10 +25,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   cancelAgentRun,
   deleteAgentProfile,
+  deleteAgentPrompt,
   executeAgentTool,
   getContextCompression,
   getContextDraft,
   listAgentProfiles,
+  listAgentPrompts,
   listAgentRuns,
   listAgentTools,
   nativeRuntime,
@@ -37,6 +40,7 @@ import {
   startModelStream,
   updateAgentRun,
   upsertAgentProfile,
+  upsertAgentPrompt,
   type ModelStreamHandle,
 } from "../lib/bridge";
 import { hydrateProviderCredentials } from "../lib/credentials";
@@ -56,6 +60,7 @@ const AVAILABLE_TOOLS = [
 ] as const;
 
 type EditableProfile = Omit<AgentProfile, "latestRun">;
+type PromptDraft = { id?: string; name: string; content: string; sortOrder: number };
 
 function statusLabel(profile: AgentProfile, credentialConfigured: boolean) {
   if (!credentialConfigured) return "缺少密钥";
@@ -116,13 +121,15 @@ export function Agents() {
   const [selectedId, setSelectedId] = useState("");
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<EditableProfile | null>(null);
-  const [task, setTask] = useState("请分析当前研究上下文，给出最重要且有证据支持的结论。" );
+  const [task, setTask] = useState("请分析当前研究上下文，给出最重要且有证据支持的结论。");
   const [activeRunId, setActiveRunId] = useState("");
   const [liveOutput, setLiveOutput] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [profileSearch, setProfileSearch] = useState("");
-  const [activeTab, setActiveTab] = useState<"run" | "config" | "history">("run");
+  const [activeTab, setActiveTab] = useState<"run" | "prompts" | "config" | "history">("run");
+  const [selectedPromptId, setSelectedPromptId] = useState("");
+  const [promptDraft, setPromptDraft] = useState<PromptDraft | null>(null);
   const streamHandle = useRef<ModelStreamHandle | null>(null);
   const checkpointTimer = useRef<number | null>(null);
   const activeRunIdRef = useRef("");
@@ -153,7 +160,14 @@ export function Agents() {
     retry: false,
     refetchInterval: activeRunId ? 2000 : false,
   });
+  const promptsQuery = useQuery({
+    queryKey: ["agent-prompts", root, selected?.id],
+    queryFn: () => listAgentPrompts(root, selected!.id),
+    enabled: Boolean(root && selected?.id),
+    retry: false,
+  });
   const runs = runsQuery.data ?? [];
+  const prompts = promptsQuery.data ?? [];
   const visibleProfiles = useMemo(() => {
     const needle = profileSearch.trim().toLowerCase();
     return needle ? profiles.filter((profile) => `${profile.name} ${profile.description}`.toLowerCase().includes(needle)) : profiles;
@@ -167,6 +181,18 @@ export function Agents() {
     if (!selectedId && profiles[0]) setSelectedId(profiles[0].id);
     if (selectedId && profiles.length > 0 && !profiles.some((profile) => profile.id === selectedId)) setSelectedId(profiles[0].id);
   }, [profiles, selectedId]);
+
+  useEffect(() => {
+    setPromptDraft(null);
+    setSelectedPromptId("");
+  }, [selected?.id]);
+
+  useEffect(() => {
+    const first = prompts[0];
+    if (!first || prompts.some((prompt) => prompt.id === selectedPromptId)) return;
+    setSelectedPromptId(first.id);
+    setTask(first.content);
+  }, [promptsQuery.data, selectedPromptId]);
 
   useEffect(() => () => {
     if (streamHandle.current) {
@@ -186,6 +212,7 @@ export function Agents() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["agent-profiles", root] }),
       queryClient.invalidateQueries({ queryKey: ["agent-runs", root] }),
+      queryClient.invalidateQueries({ queryKey: ["agent-prompts", root] }),
     ]);
   };
 
@@ -245,6 +272,69 @@ export function Agents() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const editPrompt = (prompt: AgentPromptTemplate) => {
+    setPromptDraft({ id: prompt.id, name: prompt.name, content: prompt.content, sortOrder: prompt.sortOrder });
+    setSelectedPromptId(prompt.id);
+    setActiveTab("prompts");
+    setNotice("");
+  };
+
+  const createPrompt = () => {
+    setPromptDraft({ name: "", content: "", sortOrder: prompts.length });
+    setActiveTab("prompts");
+    setNotice("");
+  };
+
+  const savePrompt = async () => {
+    if (!selected || !promptDraft) return;
+    if (!promptDraft.name.trim() || !promptDraft.content.trim()) {
+      setNotice("请填写提示词名称和正文。");
+      return;
+    }
+    setBusy(true);
+    try {
+      const saved = await upsertAgentPrompt(root, {
+        id: promptDraft.id,
+        agentProfileId: selected.id,
+        name: promptDraft.name.trim(),
+        content: promptDraft.content.trim(),
+        sortOrder: promptDraft.sortOrder,
+      });
+      await queryClient.invalidateQueries({ queryKey: ["agent-prompts", root, selected.id] });
+      setPromptDraft({ id: saved.id, name: saved.name, content: saved.content, sortOrder: saved.sortOrder });
+      setSelectedPromptId(saved.id);
+      setTask(saved.content);
+      setNotice(`提示词“${saved.name}”已保存。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removePrompt = async () => {
+    if (!selected || !promptDraft?.id || !window.confirm(`删除提示词“${promptDraft.name}”？`)) return;
+    setBusy(true);
+    try {
+      await deleteAgentPrompt(root, promptDraft.id);
+      setPromptDraft(null);
+      setSelectedPromptId("");
+      await queryClient.invalidateQueries({ queryKey: ["agent-prompts", root, selected.id] });
+      setNotice("提示词已删除。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const applyPrompt = (prompt: AgentPromptTemplate) => {
+    setSelectedPromptId(prompt.id);
+    setTask(prompt.content);
+    setActiveTab("run");
+    setNotice(`已载入提示词“${prompt.name}”。`);
   };
 
   const assembleContext = async (profile: AgentProfile, expected?: ContextSnapshot) => {
@@ -513,8 +603,25 @@ export function Agents() {
         <footer className="agent-config-actions"><button className="secondary-button" onClick={() => { setEditing(false); setActiveTab("run"); }}>取消</button><button className="primary-button compact" onClick={() => void saveProfile()} disabled={busy || !draft.name.trim()}>{busy ? <LoaderCircle className="spin" size={13} /> : <Save size={13} />} 保存智能体</button></footer>
       </> : selected ? <>
         <header className="agent-workbench-header"><span className="agent-icon large" style={{ color: selected.color, background: `${selected.color}14`, borderColor: `${selected.color}55` }}><Sparkles size={20} /></span><div><h2>{selected.name}</h2><p>{selected.description}</p></div><span className={`tag ${statusClass(statusLabel(selected, selectedConfigured))}`}>{statusLabel(selected, selectedConfigured)}</span></header>
-        <nav className="agent-workbench-tabs"><button className={activeTab === "run" ? "active" : ""} onClick={() => setActiveTab("run")}><Play size={12} /> 运行</button><button className={activeTab === "config" ? "active" : ""} onClick={() => setActiveTab("config")}><Settings2 size={12} /> 配置概览</button><button className={activeTab === "history" ? "active" : ""} onClick={() => setActiveTab("history")}><History size={12} /> 历史 {runs.length > 0 && <b>{runs.length}</b>}</button></nav>
-        {activeTab === "run" && <div className="agent-run-workspace"><section className="agent-readiness"><div className={contextItems ? "ready" : "warning"}><Database size={16} /><span><strong>{contextItems ? "上下文已准备" : "尚未加入论文上下文"}</strong><small>{contextItems ? `${contextItems} 项来源，约 ${(contextTokens / 1000).toFixed(1)}K tokens` : "先从阅读器或上下文工作区加入 MD 原文、AI 压缩原文或自定义文字"}</small></span><button onClick={() => setView("context")}>管理上下文</button></div><div><Wrench size={16} /><span><strong>{selected.allowedTools.length} 个工具可用</strong><small>{selectedModel?.displayName ?? selected.modelId} · {Math.round(selected.maxContextTokens / 1000)}K 上下文</small></span></div></section><section className="agent-task-composer"><header><span><strong>交给智能体一个明确任务</strong><small>结果、调用记录和 token 用量会保存到当前论文库</small></span></header><textarea value={task} onChange={(event) => setTask(event.target.value)} aria-label="智能体任务" disabled={running} placeholder="例如：比较上下文中三篇论文的方法差异，并提出两个可验证的研究空白。" />{liveOutput && <div className="agent-live-output"><span><LoaderCircle className="spin" size={12} /> 实时输出</span><pre>{liveOutput}</pre></div>}<footer>{!selectedConfigured ? <button className="primary-button compact" onClick={() => setView("settings")}><KeyRound size={13} /> 配置模型密钥</button> : running ? <button className="danger-button" onClick={() => void cancel()}><Square size={13} /> 停止运行</button> : <button className="primary-button compact" onClick={() => void start()} disabled={busy || !selected.enabled || !task.trim()}>{busy ? <LoaderCircle className="spin" size={13} /> : <Play size={13} />} 开始运行</button>}</footer></section></div>}
+        <nav className="agent-workbench-tabs">
+          <button className={activeTab === "run" ? "active" : ""} onClick={() => setActiveTab("run")}><Play size={12} /> 运行</button>
+          <button className={activeTab === "prompts" ? "active" : ""} onClick={() => { setActiveTab("prompts"); if (!promptDraft && prompts[0]) editPrompt(prompts[0]); }}><FileText size={12} /> 提示词 {prompts.length > 0 && <b>{prompts.length}</b>}</button>
+          <button className={activeTab === "config" ? "active" : ""} onClick={() => setActiveTab("config")}><Settings2 size={12} /> 配置概览</button>
+          <button className={activeTab === "history" ? "active" : ""} onClick={() => setActiveTab("history")}><History size={12} /> 历史 {runs.length > 0 && <b>{runs.length}</b>}</button>
+        </nav>
+        {activeTab === "run" && <div className="agent-run-workspace">
+          <section className="agent-readiness"><div className={contextItems ? "ready" : "warning"}><Database size={16} /><span><strong>{contextItems ? "上下文已准备" : "尚未加入论文上下文"}</strong><small>{contextItems ? `${contextItems} 项来源，约 ${(contextTokens / 1000).toFixed(1)}K tokens` : "先从阅读器或上下文工作区加入 MD 原文、AI 压缩原文或自定义文字"}</small></span><button onClick={() => setView("context")}>管理上下文</button></div><div><Wrench size={16} /><span><strong>{selected.allowedTools.length} 个工具可用</strong><small>{selectedModel?.displayName ?? selected.modelId} · {Math.round(selected.maxContextTokens / 1000)}K 上下文</small></span></div></section>
+          <section className="agent-task-composer">
+            <div className="agent-task-toolbar"><label><FileText size={13} /><select aria-label="选择提示词模板" value={selectedPromptId} onChange={(event) => { const prompt = prompts.find((item) => item.id === event.target.value); if (prompt) applyPrompt(prompt); }} disabled={running || prompts.length === 0}><option value="">{prompts.length ? "选择提示词" : "暂无提示词模板"}</option>{prompts.map((prompt) => <option key={prompt.id} value={prompt.id}>{prompt.name}</option>)}</select></label><button onClick={() => { setActiveTab("prompts"); if (prompts[0]) editPrompt(prompts.find((prompt) => prompt.id === selectedPromptId) ?? prompts[0]); else createPrompt(); }}><Settings2 size={12} /> 管理提示词</button></div>
+            <textarea value={task} onChange={(event) => setTask(event.target.value)} aria-label="智能体任务" disabled={running} placeholder="输入任务提示词，或从上方选择已保存的模板。" />
+            {liveOutput && <div className="agent-live-output"><span><LoaderCircle className="spin" size={12} /> 实时输出</span><pre>{liveOutput}</pre></div>}
+            <footer>{!selectedConfigured ? <button className="primary-button compact" onClick={() => setView("settings")}><KeyRound size={13} /> 配置模型密钥</button> : running ? <button className="danger-button" onClick={() => void cancel()}><Square size={13} /> 停止运行</button> : <button className="primary-button compact" onClick={() => void start()} disabled={busy || !selected.enabled || !task.trim()}>{busy ? <LoaderCircle className="spin" size={13} /> : <Play size={13} />} 开始运行</button>}</footer>
+          </section>
+        </div>}
+        {activeTab === "prompts" && <div className="agent-prompt-workspace">
+          <aside className="agent-prompt-list"><header><span><strong>自定义提示词</strong><small>{selected.name} 专属模板</small></span><button title="新增提示词" onClick={createPrompt}><Plus size={14} /></button></header>{promptsQuery.isLoading ? <div className="agent-prompt-empty"><LoaderCircle className="spin" size={18} /> 正在读取提示词</div> : prompts.length ? prompts.map((prompt) => <button key={prompt.id} className={promptDraft?.id === prompt.id ? "active" : ""} onClick={() => editPrompt(prompt)}><FileText size={14} /><span><strong>{prompt.name}</strong><small>{prompt.content}</small></span></button>) : <div className="agent-prompt-empty"><FileText size={22} /><span>还没有提示词</span><button onClick={createPrompt}>新建第一个模板</button></div>}</aside>
+          <section className="agent-prompt-editor">{promptDraft ? <><header><label><span>提示词名称</span><input maxLength={160} value={promptDraft.name} onChange={(event) => setPromptDraft({ ...promptDraft, name: event.target.value })} placeholder="例如：方法与实验对比" /></label></header><label className="agent-prompt-content"><span>提示词正文</span><textarea maxLength={50000} value={promptDraft.content} onChange={(event) => setPromptDraft({ ...promptDraft, content: event.target.value })} placeholder="写下希望这个智能体重复执行的完整任务指令。" /><small>{promptDraft.content.length.toLocaleString()} / 50,000</small></label><footer>{promptDraft.id && <button className="danger-link" onClick={() => void removePrompt()} disabled={busy}><Trash2 size={13} /> 删除</button>}{promptDraft.id && <button className="secondary-button" onClick={() => { const saved = prompts.find((prompt) => prompt.id === promptDraft.id); if (saved) applyPrompt(saved); }}><Play size={13} /> 用于运行</button>}<button className="primary-button compact" onClick={() => void savePrompt()} disabled={busy || !promptDraft.name.trim() || !promptDraft.content.trim()}>{busy ? <LoaderCircle className="spin" size={13} /> : <Save size={13} />} 保存提示词</button></footer></> : <div className="agent-prompt-empty editor"><FileText size={28} /><strong>选择或新建提示词</strong><span>每个智能体的模板彼此独立，并保存在当前论文库。</span><button className="primary-button compact" onClick={createPrompt}><Plus size={13} /> 新建提示词</button></div>}</section>
+        </div>}
         {activeTab === "config" && <div className="agent-overview-grid"><section><h3>运行参数</h3><dl><div><dt>模型</dt><dd>{selectedModel?.displayName ?? selected.modelId}</dd></div><div><dt>上下文上限</dt><dd>{Math.round(selected.maxContextTokens / 1000)}K</dd></div><div><dt>联网范围</dt><dd>{selected.networkPolicy === "none" ? "仅本地" : selected.networkPolicy === "academic" ? "学术来源" : "公开网络"}</dd></div><div><dt>写入策略</dt><dd>{selected.writePolicy === "read-only" ? "只读" : selected.writePolicy === "confirm-write" ? "写入前确认" : "可信写入"}</dd></div></dl></section><section><h3>已启用工具</h3><div className="agent-tool-summary">{selected.allowedTools.map((tool) => <span key={tool}><CheckCircle2 size={12} /> {AVAILABLE_TOOLS.find(([id]) => id === tool)?.[1] ?? tool}</span>)}</div></section><footer><button className="secondary-button" onClick={() => beginEdit(selected)} disabled={running}><Pencil size={13} /> 编辑配置</button><button className="danger-link" onClick={() => void removeProfile()} disabled={running || busy}><Trash2 size={13} /> 删除智能体</button></footer></div>}
         {activeTab === "history" && <div className="agent-history-panel">{runs.length === 0 ? <div className="agent-history-empty"><History size={25} /><strong>还没有运行记录</strong><span>完成一次任务后，这里会保留结果、工具调用和 token 用量。</span><button className="secondary-button" onClick={() => setActiveTab("run")}>创建第一次运行</button></div> : runs.map((run) => <article key={run.id} className={`agent-run-row ${run.status}`}><header><span><strong>{runStatusCopy(run)}</strong><small>{new Date(run.createdAt).toLocaleString("zh-CN")}</small></span><code>{run.usage.inputTokens + run.usage.outputTokens} tokens · {(run.usage.durationMs / 1000).toFixed(1)} 秒</code></header><h4>{run.userPrompt}</h4><p>{run.outputText || run.error || "尚无输出"}</p>{run.toolCalls.length > 0 && <div className="agent-run-tools">{run.toolCalls.map((call) => <span className={call.status} key={call.id}><Sparkles size={9} /> {call.toolName}<b>{call.status}</b></span>)}</div>}<footer><span>{run.toolCalls.length} 次工具调用</span>{["failed", "cancelled", "interrupted"].includes(run.status) && <button title="重试运行" onClick={() => void retry(run)} disabled={running || busy}><RotateCcw size={12} /> 重试</button>}</footer></article>)}</div>}
       </> : <div className="agent-welcome-empty"><Bot size={32} /><h2>创建第一个研究智能体</h2><p>选择模型、设定工具权限，然后让它基于你的论文上下文执行可追溯任务。</p><button className="primary-button compact" onClick={() => beginEdit()}><Plus size={13} /> 新建智能体</button></div>}

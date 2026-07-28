@@ -36,7 +36,7 @@ def test_initializes_versioned_library_layout(tmp_path: Path) -> None:
 
     with sqlite3.connect(result["database"]) as connection:
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-    assert version == 10
+        assert version == 11
 
 
 def test_collection_tree_move_filter_and_delete_are_persistent(tmp_path: Path) -> None:
@@ -124,6 +124,56 @@ def test_agent_profiles_runs_retry_and_restart_recovery_are_persistent(tmp_path:
     assert completed["retryOf"] == interrupted["id"]
     assert completed["usage"] == {"inputTokens": 42, "outputTokens": 9, "durationMs": 800}
     assert Library(tmp_path).list_agent_runs(profile["id"])[0]["outputText"] == "Persisted grounded output."
+
+
+def test_agent_prompt_templates_support_scoped_crud(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    profile = library.list_agent_profiles()[0]
+    defaults = library.list_agent_prompts(profile["id"])
+    assert len(defaults) == 1
+    assert defaults[0]["name"] == "默认分析任务"
+
+    created = library.upsert_agent_prompt({
+        "agentProfileId": profile["id"],
+        "name": "方法对比",
+        "content": "比较上下文中的研究方法与实验设置。",
+        "sortOrder": 2,
+    })
+    assert created["agentProfileId"] == profile["id"]
+    updated = library.upsert_agent_prompt({
+        **created,
+        "name": "方法与实验对比",
+        "content": "比较方法、数据集、指标和实验设置。",
+    })
+    assert updated["id"] == created["id"]
+    assert updated["content"].startswith("比较方法")
+    assert [item["name"] for item in library.list_agent_prompts(profile["id"])] == [
+        "默认分析任务",
+        "方法与实验对比",
+    ]
+
+    with pytest.raises(ValueError, match="already exists"):
+        library.upsert_agent_prompt({
+            "agentProfileId": profile["id"],
+            "name": "方法与实验对比",
+            "content": "重复名称",
+        })
+    assert library.delete_agent_prompt(created["id"]) is True
+    assert library.delete_agent_prompt(created["id"]) is False
+
+    new_profile = library.upsert_agent_profile({
+        **profile,
+        "id": "custom-agent",
+        "name": "自定义智能体",
+    })
+    assert len(library.list_agent_prompts(new_profile["id"])) == 1
+    assert library.delete_agent_profile(new_profile["id"]) is True
+    with library.db.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM agent_prompts WHERE agent_profile_id = ?",
+            (new_profile["id"],),
+        ).fetchone()[0] == 0
 
 
 def test_agent_profile_rejects_unknown_tool_and_protects_run_history(tmp_path: Path) -> None:
