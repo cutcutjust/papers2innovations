@@ -1,17 +1,18 @@
-import type { ContextSnapshot, LibraryPaper, ModelStreamEvent, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, TranslationRecord } from "@p2i/contracts";
+import type { ContextSnapshot, LibraryPaper, ModelStreamEvent, PromptTemplateCategory, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, TranslationRecord } from "@p2i/contracts";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpen, Bot, Check, ChevronLeft, FileImage, FileText, Languages, Layers3, LoaderCircle, Maximize2, MessageSquareText, Minimize2, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, RefreshCw, Search, Send, Sparkles, Square, Trash2, TriangleAlert, Volume2, WandSparkles, X } from "lucide-react";
+import { BookOpen, BookOpenText, Bot, Check, ChevronLeft, FileImage, FileText, Languages, Layers3, LoaderCircle, Maximize2, MessageSquareText, Minimize2, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, RefreshCw, Search, Send, Sparkles, Square, Trash2, TriangleAlert, Volume2, WandSparkles, X } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import { addPaperToContext, addSelectionToContext, assetUrl, clearReaderConversation, getContextCompression, getContextDraft, getReaderConversation, listReaderAnalyses, listTranslations, nativeRuntime, readContextItem, readDocument, readMarkdown, removePaperFromContext, saveFormattedDocument, saveReaderAnalysis, saveReaderChatTurn, saveTranslation, startModelStream, type ModelStreamHandle } from "../lib/bridge";
+import { addPaperToContext, addSelectionToContext, assetUrl, clearReaderConversation, getContextCompression, getContextDraft, getReaderConversation, listPromptTemplates, listReaderAnalyses, listTranslations, nativeRuntime, readContextItem, readDocument, readMarkdown, removePaperFromContext, saveFormattedDocument, saveReaderAnalysis, saveReaderChatTurn, saveTranslation, startModelStream, type ModelStreamHandle } from "../lib/bridge";
 import { hydrateProviderCredentials } from "../lib/credentials";
 import { buildReaderSections, compactReaderBlocks, resolveMarkdownAssetPath, type ReaderDisplaySection, type ReaderDocumentBlock } from "../lib/documentBlocks";
 import { MARKDOWN_FORMAT_PROMPT_VERSION, prepareMarkdownForFormatting, restoreFormattedMarkdown, splitMarkdownForFormatting } from "../lib/markdownFormatting";
 import { normalizeMarkdownMath } from "../lib/markdownMath";
+import { resolvePromptTemplate, selectedPromptId, selectPromptTemplate } from "../lib/promptTemplates";
 import { buildWordLookupMessages, isSingleEnglishWord } from "../lib/wordLookup";
 import { useWorkspace } from "../store";
 
@@ -91,6 +92,11 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const [formattingStatus, setFormattingStatus] = useState<"idle" | "formatting" | "saved" | "error">("idle");
   const [formattingProgress, setFormattingProgress] = useState(0);
   const [formattingError, setFormattingError] = useState("");
+  const [promptPickerOpen, setPromptPickerOpen] = useState(false);
+  const [readerPromptId, setReaderPromptId] = useState(() => selectedPromptId("reader"));
+  const [translationPromptId, setTranslationPromptId] = useState(() => selectedPromptId("translation"));
+  const [explanationPromptId, setExplanationPromptId] = useState(() => selectedPromptId("explanation"));
+  const [markdownPromptId, setMarkdownPromptId] = useState(() => selectedPromptId("markdown"));
   const [outlineWidth, setOutlineWidth] = useState(() => {
     if (typeof window === "undefined") return DEFAULT_OUTLINE_WIDTH;
     const persisted = Number(window.localStorage.getItem(READER_OUTLINE_WIDTH_KEY));
@@ -153,12 +159,18 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     queryFn: () => getContextDraft(root),
     retry: false,
   });
+  const promptTemplatesQuery = useQuery({
+    queryKey: ["prompt-templates", root],
+    queryFn: () => listPromptTemplates(root),
+    enabled: Boolean(root),
+    retry: false,
+  });
   const sections = useMemo(
     () => buildReaderSections(documentQuery.data, markdownQuery.data ?? ""),
     [documentQuery.data, markdownQuery.data],
   );
   const persistedTranslations = useMemo(
-    () => Object.fromEntries((translationQuery.data ?? []).map((record) => [record.blockId, { status: "saved", text: record.translatedText, kind: record.promptVersion === WORD_LOOKUP_PROMPT_VERSION ? "word" : "passage", record } satisfies TranslationState])),
+    () => Object.fromEntries((translationQuery.data ?? []).map((record) => [record.blockId, { status: "saved", text: record.translatedText, kind: record.promptVersion.startsWith(WORD_LOOKUP_PROMPT_VERSION) ? "word" : "passage", record } satisfies TranslationState])),
     [translationQuery.data],
   );
   const persistedAnalyses = useMemo(
@@ -175,6 +187,12 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const selectedProvider = providers.find((provider) => provider.id === selectedModel?.providerId);
   const formattingModel = customModels.find((model) => model.id === markdownFormattingModelId) ?? customModels[0];
   const formattingProvider = providers.find((provider) => provider.id === formattingModel?.providerId);
+  const promptTemplates = promptTemplatesQuery.data ?? [];
+  const readerPrompt = resolvePromptTemplate(promptTemplates, "reader", readerPromptId);
+  const translationPrompt = resolvePromptTemplate(promptTemplates, "translation", translationPromptId);
+  const explanationPrompt = resolvePromptTemplate(promptTemplates, "explanation", explanationPromptId);
+  const markdownPrompt = resolvePromptTemplate(promptTemplates, "markdown", markdownPromptId);
+  const markdownPromptVersion = `${MARKDOWN_FORMAT_PROMPT_VERSION}:${markdownPrompt?.id ?? "default"}`;
   const maxContextTokens = selectedModel?.maxContextTokens ?? 128000;
   const tokenBreakdown = contextDraftQuery.data?.tokenBreakdown;
   const contextUsed = tokenBreakdown ? Object.values(tokenBreakdown).reduce((total, value) => total + value, 0) : 36000;
@@ -275,12 +293,20 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   useEffect(() => {
     const document = documentQuery.data;
     if (!autoFormatMarkdown || !paper || !document || !formattingModel || !formattingProvider || !formattingCredentialReady) return;
-    const key = `${paper.id}:${document.source_sha256}:${formattingModel.id}:${MARKDOWN_FORMAT_PROMPT_VERSION}`;
-    if (document.formatting?.model_id === formattingModel.id && document.formatting.prompt_version === MARKDOWN_FORMAT_PROMPT_VERSION) return;
+    const key = `${paper.id}:${document.source_sha256}:${formattingModel.id}:${markdownPromptVersion}`;
+    if (document.formatting?.model_id === formattingModel.id && document.formatting.prompt_version === markdownPromptVersion) return;
     if (autoFormattingKey.current === key) return;
     autoFormattingKey.current = key;
     void formatDocument();
-  }, [autoFormatMarkdown, documentQuery.data, formattingCredentialReady, formattingModel?.id, formattingProvider?.id, paper?.id]);
+  }, [autoFormatMarkdown, documentQuery.data, formattingCredentialReady, formattingModel?.id, formattingProvider?.id, markdownPromptVersion, paper?.id]);
+
+  const choosePrompt = (category: PromptTemplateCategory, id: string) => {
+    selectPromptTemplate(category, id);
+    if (category === "reader") setReaderPromptId(id);
+    else if (category === "translation") setTranslationPromptId(id);
+    else if (category === "explanation") setExplanationPromptId(id);
+    else if (category === "markdown") setMarkdownPromptId(id);
+  };
 
   const toggleFocusMode = async (enabled: boolean) => {
     setReaderFocusMode(enabled);
@@ -373,8 +399,8 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         provider: selectedProvider,
         model: selectedModel,
         temperature: 0.1,
-        messages: kind === "word" ? buildWordLookupMessages(block.text, paperWordContextFor(block)) : [
-          { role: "system", content: "请将科研文本忠实翻译为简体中文。保留 Markdown、LaTeX、专业术语、引用、数字和不确定性，只返回译文，不要添加解释。行内公式使用 $...$，块级公式使用 $$...$$，不要使用 \\(...\\) 或 \\[...\\]。" },
+        messages: kind === "word" ? buildWordLookupMessages(block.text, paperWordContextFor(block)).map((message, index) => index === 0 ? { ...message, content: `${translationPrompt?.content ?? ""}\n\n${message.content}` } : message) : [
+          { role: "system", content: translationPrompt?.content ?? "请将科研文本忠实翻译为简体中文，保留公式、术语、引用和数字，只返回译文。" },
           { role: "user", content: block.text },
         ],
       }, onEvent);
@@ -399,7 +425,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         translatedText: state.text,
         targetLanguage: "zh-CN",
         modelId: selectedModel.id,
-        promptVersion: state.kind === "word" ? WORD_LOOKUP_PROMPT_VERSION : TRANSLATION_PROMPT_VERSION,
+        promptVersion: `${state.kind === "word" ? WORD_LOOKUP_PROMPT_VERSION : TRANSLATION_PROMPT_VERSION}:${translationPrompt?.id ?? "default"}`,
       });
       setTranslations((current) => ({ ...current, [block.id]: { status: "saved", text: record.translatedText, record } }));
       await translationQuery.refetch();
@@ -488,9 +514,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         model: selectedModel,
         temperature: 0.1,
         messages: [
-          { role: "system", content: type === "formula"
-            ? "请用中文严谨解释给定的科研公式：指出准确表达式，定义每个符号，说明量纲与运算，并结合相邻方法文本说明其作用、假设和歧义。保留 LaTeX，并引用提供的章节/文本块/页码锚点。行内公式使用 $...$，块级公式使用 $$...$$，不要使用 \\(...\\) 或 \\[...\\]。"
-            : "请用中文严谨解释给定的科研论断或定理，分别说明命题、假设、推理或证明概要、影响、局限与未解决问题。不得虚构证明，并引用提供的章节/文本块/页码锚点。" },
+          { role: "system", content: `${explanationPrompt?.content ?? "请用中文严谨解释给定科研内容，并引用来源锚点。"}\n\n${type === "formula" ? "本次重点解释公式：定义每个符号、量纲、运算、作用、假设和歧义，保留 LaTeX。" : "本次重点解释论断或定理：说明命题、假设、推理概要、影响和局限。"}` },
           { role: "user", content: `来源锚点：paper=${paper.id}, section=${block.sectionId}, block=${block.id}, page=${block.page ?? "未知"}\n\n目标原文：\n${block.text}\n\n相邻结构化上下文：\n${adjacentContext}` },
         ],
       }, onEvent);
@@ -514,7 +538,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         adjacentContext: state.adjacentContext,
         resultText: state.text,
         modelId: selectedModel.id,
-        promptVersion: ANALYSIS_PROMPT_VERSION,
+        promptVersion: `${ANALYSIS_PROMPT_VERSION}:${explanationPrompt?.id ?? "default"}`,
         inputTokens: state.usage.inputTokens,
         outputTokens: state.usage.outputTokens,
         durationMs: state.usage.durationMs,
@@ -569,7 +593,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         modelId: selectedModel?.id ?? "",
         items: snapshotItems,
         tokenBreakdown: draft.tokenBreakdown,
-        promptVersion: CHAT_PROMPT_VERSION,
+        promptVersion: `${CHAT_PROMPT_VERSION}:${readerPrompt?.id ?? "default"}`,
         toolVersions: { read_paper: "1", read_section: "1", find_evidence: "1" },
         retrievalQueries: [],
         externalResults: [],
@@ -622,7 +646,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
           assistantText: responseText,
           contextSnapshot: retryTurn?.contextSnapshot ?? assembled.snapshot,
           modelId: selectedModel.id,
-          promptVersion: CHAT_PROMPT_VERSION,
+          promptVersion: `${CHAT_PROMPT_VERSION}:${readerPrompt?.id ?? "default"}`,
           status: finalStatus,
           inputTokens: event.usage?.inputTokens,
           outputTokens: event.usage?.outputTokens,
@@ -657,7 +681,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         model: selectedModel,
         temperature: 0.2,
         messages: [
-          { role: "system", content: "你是阅读器中的论文分析助手。请默认使用中文，只根据提供的本地论文上下文回答。每条事实性陈述都要尽可能引用论文、章节、文本块或页码；区分直接证据与推断，上下文不足时明确说明。行内公式使用 $...$，块级公式使用 $$...$$，不要使用 \\(...\\) 或 \\[...\\]。" },
+          { role: "system", content: readerPrompt?.content ?? "请默认使用中文，只根据提供的本地论文上下文回答并引用证据锚点。" },
           ...priorMessages,
           { role: "user", content: `问题：${userMessage}\n\n当前本地研究上下文：\n${assembled.contextText}` },
         ],
@@ -739,7 +763,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       model: formattingModel,
       temperature: 0,
       messages: [
-        { role: "system", content: "你是无损科研 Markdown 整理助手。只改善结构和可读性：重建合理段落与换行，规范标题和列表，让每条参考文献独立成行，并修复明显的 OCR 断词连字符。禁止摘要、翻译、纠正论点、改写措辞、修改引用/数字/名称/公式/表格/图片路径或添加内容。必须原样保留每个 [[P2I_EVIDENCE_ANCHOR_N]] 占位符。只返回 Markdown，不要使用代码围栏。" },
+        { role: "system", content: `${markdownPrompt?.content ?? "请无损整理科研 Markdown 的结构和换行。"}\n\n必须原样保留每个 [[P2I_EVIDENCE_ANCHOR_N]] 占位符，只返回 Markdown，不要使用代码围栏。` },
         { role: "user", content: chunk },
       ],
     }, onEvent).then((handle) => {
@@ -779,7 +803,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         paperId: paper.id,
         sections: formattedSections,
         modelId: formattingModel.id,
-        promptVersion: MARKDOWN_FORMAT_PROMPT_VERSION,
+        promptVersion: markdownPromptVersion,
         sourceSha256: document.source_sha256,
       });
       queryClient.setQueryData(["paper-document", root, paper.id], saved);
@@ -911,7 +935,16 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       <strong title={paper.title}>{paper.title}</strong>
       <div className="reader-mode-switch"><button className={mode === "integrated" ? "active" : ""} onClick={() => changeMode("integrated")}>整合阅读</button><button className={mode === "pdf" ? "active" : ""} onClick={() => changeMode("pdf")}>仅 PDF</button><button className={mode === "figures" ? "active" : ""} onClick={() => changeMode("figures")}>插图</button></div>
       <button className="reader-focus-button" onClick={() => void toggleFocusMode(true)} title="只保留目录、Markdown 正文和论文阅读助手"><Maximize2 size={13} /> 纯享阅读</button>
-      <button><Search size={13} /> 查找</button><button className={formattingStatus === "saved" ? "active" : ""} disabled={formattingStatus === "formatting"} title={formattingError || `使用 ${formattingModel?.displayName ?? "所选模型"} 整理 Markdown`} onClick={() => void formatDocument()}>{formattingStatus === "formatting" ? <LoaderCircle className="spin" size={13} /> : <WandSparkles size={13} />} {formattingStatus === "formatting" ? `${formattingProgress}%` : "整理"}</button><button className={fullText ? "active" : ""} disabled={contextBusy === "paper"} onClick={() => void togglePaperContext()}><Layers3 size={13} /> {fullText ? `MD 上下文 · ${contextPercent}%` : "加入 MD 原文"}</button><button className="reader-agent-toggle" onClick={() => { setAgentOpen(true); setAgentCollapsed(false); }}><Bot size={13} /> 询问 AI</button>
+      <button><Search size={13} /> 查找</button>
+      <div className="reader-prompt-control"><button className={promptPickerOpen ? "active" : ""} onClick={() => setPromptPickerOpen((value) => !value)}><BookOpenText size={13} /> AI 模板</button>{promptPickerOpen && <div className="reader-prompt-picker">
+        {(["translation", "explanation", "markdown"] as PromptTemplateCategory[]).map((category) => {
+          const label = category === "translation" ? "翻译" : category === "explanation" ? "解释" : "Markdown 整理";
+          const selected = category === "translation" ? translationPrompt : category === "explanation" ? explanationPrompt : markdownPrompt;
+          return <label key={category}><span>{label}</span><select value={selected?.id ?? ""} onChange={(event) => choosePrompt(category, event.target.value)}>{promptTemplates.filter((template) => template.category === category).map((template) => <option value={template.id} key={template.id}>{template.name}</option>)}</select></label>;
+        })}
+        <button className="reader-prompt-manage" onClick={() => setView("agents")}>管理提示词</button>
+      </div>}</div>
+      <button className={formattingStatus === "saved" ? "active" : ""} disabled={formattingStatus === "formatting"} title={formattingError || `使用 ${formattingModel?.displayName ?? "所选模型"} 与 ${markdownPrompt?.name ?? "默认提示词"} 整理 Markdown`} onClick={() => void formatDocument()}>{formattingStatus === "formatting" ? <LoaderCircle className="spin" size={13} /> : <WandSparkles size={13} />} {formattingStatus === "formatting" ? `${formattingProgress}%` : "整理"}</button><button className={fullText ? "active" : ""} disabled={contextBusy === "paper"} onClick={() => void togglePaperContext()}><Layers3 size={13} /> {fullText ? `MD 上下文 · ${contextPercent}%` : "加入 MD 原文"}</button><button className="reader-agent-toggle" onClick={() => { setAgentOpen(true); setAgentCollapsed(false); }}><Bot size={13} /> 询问 AI</button>
     </div>
     <div className="reader-main">
       <aside className={`reader-outline ${outlineCollapsed ? "collapsed" : ""}`} style={{ width: renderedOutlineWidth, flexBasis: renderedOutlineWidth }}>
@@ -949,6 +982,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         {!agentCollapsed && <div className="agent-panel-scroll">
           <div className="agent-chat-summary"><div><strong>对话上下文</strong><b>{contextPercent}%</b></div><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><span>{(contextUsed / 1000).toFixed(1)}K / {(maxContextTokens / 1000).toFixed(0)}K · {contextDraftQuery.data?.items.length ?? 0} 项</span><button title="打开上下文工作区" onClick={() => setView("context")}><Layers3 size={11} /></button>{Boolean(chatQuery.data?.turns.length) && <button title="清空对话" onClick={() => void clearChat()}><Trash2 size={11} /></button>}</div>
           <label className="agent-model-field"><span>论文分析模型</span><select value={agentModel} onChange={(event) => setAgentModel(event.target.value)}>{customModels.map((model) => <option key={model.id} value={model.id}>{model.displayName} · {providers.find((provider) => provider.id === model.providerId)?.format ?? "不可用"}</option>)}</select></label>
+          <label className="agent-model-field"><span>阅读助手提示词</span><select value={readerPrompt?.id ?? ""} onChange={(event) => choosePrompt("reader", event.target.value)}>{promptTemplates.filter((template) => template.category === "reader").map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select></label>
           <div className="agent-chat-thread">
             {!chatQuery.data?.turns.length && chatStatus !== "streaming" && <div className="agent-chat-empty"><MessageSquareText size={18} /><strong>询问这篇论文</strong><span>回答基于持久化研究上下文，并保留修订历史。</span></div>}
             {(chatQuery.data?.turns ?? []).map((turn) => <div className="agent-chat-turn" key={turn.id}>
@@ -962,7 +996,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         {!agentCollapsed && <form className="agent-chat-input" onSubmit={(event) => { event.preventDefault(); void sendChat(); }}><MessageSquareText size={13} /><input aria-label="询问这篇论文" value={chatInput} onChange={(event) => setChatInput(event.target.value)} disabled={chatStatus === "streaming"} placeholder="输入关于这篇论文的问题…" /><button title="发送" type="submit" disabled={!chatInput.trim() || chatStatus === "streaming"}><Send size={13} /></button></form>}
       </aside>
     </div>
-    <footer className="reader-context-bar"><Layers3 size={14} /><strong>对话上下文</strong><span className="tag tag-primary">{contextDraftQuery.data?.items.length ?? 0} 个持久化条目</span><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><code>{(contextUsed / 1000).toFixed(1)}K / {(maxContextTokens / 1000).toFixed(0)}K · {contextPercent}%</code><span>由阅读器、上下文、智能体和创新工作台共享。</span><button onClick={() => setView("context")}>打开上下文</button></footer>
+    <footer className="reader-context-bar"><Layers3 size={14} /><strong>对话上下文</strong><span className="tag tag-primary">{contextDraftQuery.data?.items.length ?? 0} 个持久化条目</span><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><code>{(contextUsed / 1000).toFixed(1)}K / {(maxContextTokens / 1000).toFixed(0)}K · {contextPercent}%</code><span>由阅读器、上下文、提示词库和创新工作台共享。</span><button onClick={() => setView("context")}>打开上下文</button></footer>
   </div>;
 }
 

@@ -2316,6 +2316,86 @@ class Library:
             cursor = connection.execute("DELETE FROM agent_prompts WHERE id = ?", (prompt_id,))
         return bool(cursor.rowcount)
 
+    @staticmethod
+    def _prompt_template_contract(record: Any) -> dict[str, Any]:
+        return {
+            "id": record["id"],
+            "category": record["category"],
+            "name": record["name"],
+            "content": record["content"],
+            "sortOrder": record["sort_order"],
+            "createdAt": record["created_at"],
+            "updatedAt": record["updated_at"],
+        }
+
+    def list_prompt_templates(self, category: str | None = None) -> list[dict[str, Any]]:
+        self.initialize()
+        if category is not None and category not in {
+            "reader", "translation", "explanation", "markdown", "innovation"
+        }:
+            raise ValueError("Unknown prompt template category")
+        with self.db.connect() as connection:
+            if category:
+                rows = connection.execute(
+                    "SELECT * FROM prompt_templates WHERE category = ? "
+                    "ORDER BY sort_order, updated_at DESC, id",
+                    (category,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM prompt_templates "
+                    "ORDER BY category, sort_order, updated_at DESC, id"
+                ).fetchall()
+        return [self._prompt_template_contract(row) for row in rows]
+
+    def upsert_prompt_template(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        template_id = str(payload.get("id") or uuid.uuid4()).strip()
+        category = str(payload.get("category", "")).strip()
+        name = str(payload.get("name", "")).strip()
+        content = str(payload.get("content", "")).strip()
+        if category not in {"reader", "translation", "explanation", "markdown", "innovation"}:
+            raise ValueError("Unknown prompt template category")
+        if not all((template_id, name, content)):
+            raise ValueError("Prompt template id, name, and content are required")
+        if len(template_id) > 160 or len(name) > 160 or len(content) > 50000:
+            raise ValueError("Prompt template fields exceed their size limit")
+        sort_order = int(payload.get("sortOrder", 0))
+        if not -10000 <= sort_order <= 10000:
+            raise ValueError("Prompt template sort order is invalid")
+        now = utc_now()
+        with self.db.connect() as connection:
+            existing = connection.execute(
+                "SELECT created_at FROM prompt_templates WHERE id = ?", (template_id,)
+            ).fetchone()
+            duplicate = connection.execute(
+                "SELECT id FROM prompt_templates WHERE category = ? "
+                "AND name = ? COLLATE NOCASE AND id <> ?",
+                (category, name, template_id),
+            ).fetchone()
+            if duplicate:
+                raise ValueError("A prompt template with this name already exists in the category")
+            created_at = existing["created_at"] if existing else now
+            connection.execute(
+                "INSERT INTO prompt_templates(id, category, name, content, sort_order, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+                "category = excluded.category, name = excluded.name, content = excluded.content, "
+                "sort_order = excluded.sort_order, updated_at = excluded.updated_at",
+                (template_id, category, name, content, sort_order, created_at, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM prompt_templates WHERE id = ?", (template_id,)
+            ).fetchone()
+        return self._prompt_template_contract(row)
+
+    def delete_prompt_template(self, template_id: str) -> bool:
+        self.initialize()
+        with self.db.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM prompt_templates WHERE id = ?", (template_id,)
+            )
+        return bool(cursor.rowcount)
+
     def _agent_run_contract(self, record: Any) -> dict[str, Any]:
         with self.db.connect() as connection:
             tool_rows = connection.execute(

@@ -1,10 +1,11 @@
 import type { LibraryCollection, LibraryPaper } from "@p2i/contracts";
 import { BookOpen, CheckCircle2, ChevronRight, FileCheck2, FileText, Filter, FolderOpen, Grid2X2, GripVertical, Layers3, List, LoaderCircle, RefreshCw, Search, ShieldCheck, SortAsc, Upload, X } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Status } from "./Status";
 import { useWorkspace } from "../store";
 import { importPdfs, type PdfImportResult } from "../lib/bridge";
+import { startPointerCollectionDrag, subscribeCollectionDrag } from "../lib/collectionDrag";
 
 interface Props {
   papers: LibraryPaper[];
@@ -25,6 +26,7 @@ export function LibraryWorkspace({ papers, allPapers, collections, selected, sca
   const [importResult, setImportResult] = useState<PdfImportResult | null>(null);
   const [importError, setImportError] = useState("");
   const collectionNames = useMemo(() => new Map(collections.map((item) => [item.id, item.name])), [collections]);
+  useEffect(() => subscribeCollectionDrag((payload) => setDraggingPaperId(payload?.kind === "paper" ? payload.id : "")), []);
   const addPdfs = async () => {
     setImportStatus("importing");
     setImportError("");
@@ -70,7 +72,7 @@ export function LibraryWorkspace({ papers, allPapers, collections, selected, sca
           <div className="paper-table-head"><span>标题</span><span>状态</span><span>页数</span><span>更新时间</span><span /></div>
           <div className="figma-paper-table">
             {papers.map((paper) => (
-              <button key={paper.id} draggable className={`figma-paper-row ${selectedPaperId === paper.id ? "selected" : ""} ${draggingPaperId === paper.id ? "dragging" : ""}`} onClick={() => selectPaper(paper.id)} onDoubleClick={() => openReader(paper.id)} onDragStart={(event) => { selectPaper(paper.id); setDraggingPaperId(paper.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-p2i-paper-id", paper.id); event.dataTransfer.setData("text/plain", paper.id); }} onDragEnd={() => setDraggingPaperId("")} title="拖动到左侧分类完成归组">
+              <button key={paper.id} className={`figma-paper-row ${selectedPaperId === paper.id ? "selected" : ""} ${draggingPaperId === paper.id ? "dragging" : ""}`} onClick={() => selectPaper(paper.id)} onDoubleClick={() => openReader(paper.id)} onPointerDown={(event) => { selectPaper(paper.id); startPointerCollectionDrag({ kind: "paper", id: paper.id }, event); }} title="拖动到左侧分类完成归组">
                 <span className="paper-title-cell"><span className="paper-doc-icon"><FileText size={15} /></span><span><strong>{paper.title}</strong><small>{paper.sourcePath}</small><em>{paper.collectionIds[0] ? collectionNames.get(paper.collectionIds[0]) ?? "已分类" : "未分类"}</em></span></span>
                 <span><Status status={paper.status} /></span>
                 <span className="mono-cell">{paper.pageCount || "—"}</span>

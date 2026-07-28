@@ -36,7 +36,7 @@ def test_initializes_versioned_library_layout(tmp_path: Path) -> None:
 
     with sqlite3.connect(result["database"]) as connection:
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-        assert version == 11
+        assert version == 12
 
 
 def test_collection_tree_move_filter_and_delete_are_persistent(tmp_path: Path) -> None:
@@ -174,6 +174,44 @@ def test_agent_prompt_templates_support_scoped_crud(tmp_path: Path) -> None:
             "SELECT COUNT(*) FROM agent_prompts WHERE agent_profile_id = ?",
             (new_profile["id"],),
         ).fetchone()[0] == 0
+
+
+def test_prompt_library_supports_category_crud(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    defaults = library.list_prompt_templates()
+    assert {item["category"] for item in defaults} == {
+        "reader", "translation", "explanation", "markdown", "innovation"
+    }
+    assert len(defaults) == 5
+
+    created = library.upsert_prompt_template({
+        "category": "translation",
+        "name": "术语优先翻译",
+        "content": "优先保持领域术语一致。",
+        "sortOrder": 2,
+    })
+    assert created["category"] == "translation"
+    updated = library.upsert_prompt_template({
+        **created,
+        "category": "explanation",
+        "name": "术语解释",
+        "content": "解释术语并引用原文锚点。",
+    })
+    assert updated["id"] == created["id"]
+    assert updated["category"] == "explanation"
+    assert any(item["name"] == "术语解释" for item in library.list_prompt_templates("explanation"))
+
+    with pytest.raises(ValueError, match="already exists"):
+        library.upsert_prompt_template({
+            "category": "explanation",
+            "name": "术语解释",
+            "content": "重复名称",
+        })
+    with pytest.raises(ValueError, match="Unknown"):
+        library.list_prompt_templates("agent")
+    assert library.delete_prompt_template(created["id"]) is True
+    assert library.delete_prompt_template(created["id"]) is False
 
 
 def test_agent_profile_rejects_unknown_tool_and_protects_run_history(tmp_path: Path) -> None:

@@ -9,6 +9,7 @@ import {
   getContextCompression,
   getContextDraft,
   getInnovationPrompt,
+  listPromptTemplates,
   listInnovationRuns,
   nativeRuntime,
   readContextItem,
@@ -22,6 +23,7 @@ import {
   type ModelStreamHandle,
 } from "../lib/bridge";
 import { hydrateProviderCredentials } from "../lib/credentials";
+import { resolvePromptTemplate, selectedPromptId, selectPromptTemplate } from "../lib/promptTemplates";
 import { useWorkspace } from "../store";
 
 const PROMPT_VERSION = "innovation-v1";
@@ -66,6 +68,7 @@ export function InnovationWorkspace({ papers }: { papers: LibraryPaper[] }) {
   const { root, customModels, providers, setView } = useWorkspace();
   const queryClient = useQueryClient();
   const [prompt, setPrompt] = useState(defaultPrompt);
+  const [innovationPromptId, setInnovationPromptId] = useState(() => selectedPromptId("innovation"));
   const [routeModels, setRouteModels] = useState<Record<InnovationStageId, string>>(() => Object.fromEntries(routes.map((route) => [route.id, customModels[0]?.id ?? ""])) as Record<InnovationStageId, string>);
   const [notice, setNotice] = useState("准备就绪");
   const [activeRunId, setActiveRunId] = useState("");
@@ -78,6 +81,7 @@ export function InnovationWorkspace({ papers }: { papers: LibraryPaper[] }) {
 
   const contextQuery = useQuery({ queryKey: ["context-draft", root], queryFn: () => getContextDraft(root), enabled: Boolean(root), retry: false });
   const promptQuery = useQuery({ queryKey: ["innovation-prompt", root, PROMPT_VERSION], queryFn: () => getInnovationPrompt(root, PROMPT_VERSION), enabled: Boolean(root), retry: false });
+  const promptTemplatesQuery = useQuery({ queryKey: ["prompt-templates", root], queryFn: () => listPromptTemplates(root, "innovation"), enabled: Boolean(root), retry: false });
   const runsQuery = useQuery({ queryKey: ["innovation-runs", root], queryFn: () => listInnovationRuns(root), enabled: Boolean(root), retry: false, refetchInterval: activeRunId ? 2000 : false });
   const credentialsQuery = useQuery({
     queryKey: ["provider-credentials", providers.map((provider) => provider.credentialId).sort().join(":")],
@@ -87,6 +91,8 @@ export function InnovationWorkspace({ papers }: { papers: LibraryPaper[] }) {
   const configuredCredentials = useMemo(() => new Set((credentialsQuery.data ?? []).filter((item) => item.configured).map((item) => item.credentialId)), [credentialsQuery.data]);
   const latestRun = runsQuery.data?.[0];
   const context = contextQuery.data;
+  const innovationTemplates = promptTemplatesQuery.data ?? [];
+  const innovationTemplate = resolvePromptTemplate(innovationTemplates, "innovation", innovationPromptId);
   const contextItemsByPaper = useMemo(() => new Map(papers.map((paper) => [paper.id, context?.items.filter((item) => item.paperId === paper.id) ?? []])), [context?.items, papers]);
   const includedPapers = papers.filter((paper) => (contextItemsByPaper.get(paper.id)?.length ?? 0) > 0);
   const contextUsed = context ? Object.values(context.tokenBreakdown).reduce((total, value) => total + value, 0) : 0;
@@ -97,6 +103,10 @@ export function InnovationWorkspace({ papers }: { papers: LibraryPaper[] }) {
   useEffect(() => {
     if (promptQuery.data?.promptText) setPrompt(promptQuery.data.promptText);
   }, [promptQuery.data]);
+
+  useEffect(() => {
+    if (!promptQuery.data?.promptText && innovationTemplate?.content) setPrompt(innovationTemplate.content);
+  }, [innovationTemplate?.id, promptQuery.data?.promptText]);
 
   useEffect(() => {
     const available = new Set(customModels.map((model) => model.id));
@@ -316,7 +326,7 @@ export function InnovationWorkspace({ papers }: { papers: LibraryPaper[] }) {
 
     <div className="innovation-layout">
       <aside className="context-panel">
-        <div className="context-panel-heading"><div><strong>共享论文上下文</strong><span>来源模式在阅读器、智能体和创新工作台之间持久化</span></div><button className="icon-button small" title="打开上下文工作区" onClick={() => setView("context")}><Plus size={15} /></button></div>
+        <div className="context-panel-heading"><div><strong>共享论文上下文</strong><span>来源模式在阅读器、提示词库和创新工作台之间持久化</span></div><button className="icon-button small" title="打开上下文工作区" onClick={() => setView("context")}><Plus size={15} /></button></div>
         <div className="context-meter"><div className="context-meter-label"><span>当前流水线上下文</span><strong>{(contextUsed / 1000).toFixed(1)}K / {Math.round(modelLimit / 1000)}K</strong></div><div className="context-meter-track"><i style={{ width: `${contextPercent}%` }} /></div><div className="context-meter-meta"><span>{context?.items.length ?? 0} 个来源块</span><span>已用 {contextPercent}%</span></div></div>
         <div className="context-paper-list">
           {papers.slice(0, 30).map((paper) => {
@@ -331,7 +341,7 @@ export function InnovationWorkspace({ papers }: { papers: LibraryPaper[] }) {
       </aside>
 
       <div className="innovation-main-scroll"><div className="innovation-content">
-        <section className="workbench-panel prompt-panel"><div className="workbench-panel-heading"><div><h2>综合提示词</h2><p>修订版保存在本地论文库中，并且只发送到想法生成阶段。</p></div><span className="agent-badge">修订 {promptQuery.data?.revision ?? 0}</span></div><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} spellCheck={false} aria-label="综合提示词" disabled={running} /><div className="prompt-footer"><code>{"{paper_context}"}</code><span>解析为持久化证据台账</span><div><small>{prompt.length} 个字符</small><button onClick={() => setPrompt(defaultPrompt)} disabled={running}><RotateCcw size={12} /> 重置</button><button onClick={() => void savePrompt()} disabled={running}><Save size={12} /> 保存修订</button></div></div></section>
+        <section className="workbench-panel prompt-panel"><div className="workbench-panel-heading"><div><h2>综合提示词</h2><p>修订版保存在本地论文库中，并且只发送到想法生成阶段。</p></div><div className="innovation-prompt-select"><select aria-label="创新工作台提示词" value={innovationTemplate?.id ?? ""} disabled={running} onChange={(event) => { const template = innovationTemplates.find((item) => item.id === event.target.value); if (!template) return; setInnovationPromptId(template.id); selectPromptTemplate("innovation", template.id); setPrompt(template.content); }}><option value="">选择提示词库模板</option>{innovationTemplates.map((template) => <option value={template.id} key={template.id}>{template.name}</option>)}</select><button title="管理提示词" onClick={() => setView("agents")}><Settings2 size={13} /></button><span className="agent-badge">修订 {promptQuery.data?.revision ?? 0}</span></div></div><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} spellCheck={false} aria-label="综合提示词" disabled={running} /><div className="prompt-footer"><code>{"{paper_context}"}</code><span>解析为持久化证据台账</span><div><small>{prompt.length} 个字符</small><button onClick={() => setPrompt(innovationTemplate?.content ?? defaultPrompt)} disabled={running}><RotateCcw size={12} /> 重置</button><button onClick={() => void savePrompt()} disabled={running}><Save size={12} /> 保存修订</button></div></div></section>
 
         <section className="workbench-panel model-routing-panel"><div className="workbench-panel-heading"><div><h2>AI 处理阶段</h2><p>流水线失败后恢复时，已完成阶段会继续保留。</p></div>{latestRun && <span className={`agent-badge ${latestRun.status}`}>{stageStatusText(latestRun.status)}</span>}</div><div className="route-list">{routes.map((route) => {
           const status = activeStage === route.id ? "running" : stageStatusLabel(latestRun, route.id);

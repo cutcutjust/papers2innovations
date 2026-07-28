@@ -1,9 +1,10 @@
 import type { LibraryCollection, LibraryPaper } from "@p2i/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { BookOpen, Bot, Check, ChevronRight, Clock3, FileText, Folder, FolderInput, FolderOpen, FolderPlus, GripVertical, History, Inbox, Layers3, Network, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings2, Star, Trash2, TriangleAlert, Users, X } from "lucide-react";
+import { BookOpen, BookOpenText, Bot, Check, ChevronRight, Clock3, FileText, Folder, FolderInput, FolderOpen, FolderPlus, GripVertical, History, Inbox, Layers3, Network, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings2, Star, Trash2, TriangleAlert, Users, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createCollection, deleteCollection, movePaperToCollection, updateCollection } from "../lib/bridge";
 import { buildCollectionTree, collectionScopeIds, type CollectionTreeNode } from "../lib/collectionTree";
+import { finishCollectionDrag, readCollectionDrag, startPointerCollectionDrag, subscribeCollectionDrag, subscribeCollectionDrop, type CollectionDragPayload } from "../lib/collectionDrag";
 import { useWorkspace } from "../store";
 
 const colors = ["#4f6bed", "#3984d8", "#28a06a", "#7357d8", "#d64545", "#d98916"];
@@ -24,6 +25,7 @@ export function Sidebar({ root, papers, collections }: { root: string; papers: L
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [dropTarget, setDropTarget] = useState("");
   const [draggingCollectionId, setDraggingCollectionId] = useState("");
+  const [activeDrag, setActiveDrag] = useState<CollectionDragPayload | null>(null);
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [collapsed, setCollapsed] = useState(() => window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true");
@@ -50,6 +52,11 @@ export function Sidebar({ root, papers, collections }: { root: string; papers: L
 
   useEffect(() => window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth)), [sidebarWidth]);
   useEffect(() => window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(collapsed)), [collapsed]);
+  useEffect(() => subscribeCollectionDrag((payload, targetId) => {
+    setActiveDrag(payload);
+    setDraggingCollectionId(payload?.kind === "collection" ? payload.id : "");
+    setDropTarget(targetId || "");
+  }), []);
 
   const resizeSidebar = (event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = sidebarDrag.current;
@@ -121,43 +128,47 @@ export function Sidebar({ root, papers, collections }: { root: string; papers: L
       if (selectedCollectionId && collectionScopeIds(collections, collection.id).has(selectedCollectionId)) setSelectedCollectionId(undefined);
     });
   };
-  const dropItem = (event: ReactDragEvent, collectionId?: string) => {
-    event.preventDefault();
-    const collectionToMove = event.dataTransfer.getData("application/x-p2i-collection-id");
-    if (collectionToMove) {
+  const movePayload = (payload: CollectionDragPayload | null, targetId?: string) => {
+    const resolvedCollectionId = targetId === "__root__" || targetId === "__uncategorized__" ? undefined : targetId;
+    if (payload?.kind === "collection") {
+      const collectionToMove = payload.id;
       setDropTarget("");
-      if (collectionToMove === collectionId) return;
+      if (collectionToMove === resolvedCollectionId) return;
       const moving = collections.find((item) => item.id === collectionToMove);
-      const destination = collectionId ? collectionNames.get(collectionId) ?? "所选分类" : "分类根目录";
+      const destination = resolvedCollectionId ? collectionNames.get(resolvedCollectionId) ?? "所选分类" : "分类根目录";
       if (!moving) return;
       void run(`move-collection:${collectionToMove}`, async () => {
-        await updateCollection(root, collectionToMove, { parentId: collectionId ?? null });
+        await updateCollection(root, collectionToMove, { parentId: resolvedCollectionId ?? null });
+        if (resolvedCollectionId) setExpanded((current) => new Set(current).add(resolvedCollectionId));
         setNotice({ kind: "success", text: `文件夹“${moving.name}”已移动到${destination}` });
       });
       return;
     }
-    const paperId = event.dataTransfer.getData("application/x-p2i-paper-id") || event.dataTransfer.getData("text/plain");
+    const paperId = payload?.kind === "paper" ? payload.id : "";
     setDropTarget("");
     if (!paperId || !papers.some((paper) => paper.id === paperId)) return;
     const paper = papers.find((item) => item.id === paperId)!;
-    const destination = collectionId ? collectionNames.get(collectionId) ?? "所选分类" : "未分类";
+    const destination = resolvedCollectionId ? collectionNames.get(resolvedCollectionId) ?? "所选分类" : "未分类";
     void run(`move:${paperId}`, async () => {
-      await movePaperToCollection(root, paperId, collectionId);
+      await movePaperToCollection(root, paperId, resolvedCollectionId);
+      if (resolvedCollectionId) setExpanded((current) => new Set(current).add(resolvedCollectionId));
       setNotice({ kind: "success", text: `“${paper.title}”已移动到${destination}` });
     });
   };
-  const allowDrop = (event: ReactDragEvent, target: string, hasChildren = false) => {
+  useEffect(() => subscribeCollectionDrop((payload, targetId) => movePayload(payload, targetId)), [collectionNames, collections, papers, root]);
+  const dropItem = (event: ReactDragEvent, collectionId?: string) => {
     event.preventDefault();
+    event.stopPropagation();
+    const hitTarget = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-collection-drop-id]")?.dataset.collectionDropId;
+    const payload = readCollectionDrag(event.dataTransfer);
+    finishCollectionDrag();
+    movePayload(payload, hitTarget || collectionId);
+  };
+  const allowDrop = (event: ReactDragEvent, target: string) => {
+    event.preventDefault();
+    event.stopPropagation();
     event.dataTransfer.dropEffect = "move";
     setDropTarget(target);
-    if (hasChildren) setExpanded((current) => new Set(current).add(target));
-  };
-
-  const startCollectionDrag = (event: ReactDragEvent, collectionId: string) => {
-    setDraggingCollectionId(collectionId);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("application/x-p2i-collection-id", collectionId);
-    event.dataTransfer.setData("text/plain", collectionId);
   };
 
   const renderEditor = (parentId?: string, collectionId?: string) => editor && (
@@ -175,13 +186,13 @@ export function Sidebar({ root, papers, collections }: { root: string; papers: L
     const canExpand = node.children.length > 0 || directPapers.length > 0;
     const active = view === "library" && selectedCollectionId === node.id;
     return <div className="collection-tree-node" key={node.id}>
-      <div draggable className={`collection-tree-row ${active ? "active" : ""} ${dropTarget === node.id ? "drop-target" : ""} ${draggingCollectionId === node.id ? "dragging" : ""}`} style={{ paddingLeft: `${8 + depth * 14}px` }} onDragStart={(event) => startCollectionDrag(event, node.id)} onDragEnd={() => { setDraggingCollectionId(""); setDropTarget(""); }} onDragOver={(event) => allowDrop(event, node.id, canExpand)} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDropTarget(""); }} onDrop={(event) => dropItem(event, node.id)}>
+      <div data-collection-drop-id={node.id} className={`collection-tree-row ${active ? "active" : ""} ${dropTarget === node.id ? "drop-target" : ""} ${draggingCollectionId === node.id ? "dragging" : ""}`} style={{ paddingLeft: `${8 + depth * 14}px` }} onDragOver={(event) => allowDrop(event, node.id)} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDropTarget(""); }} onDrop={(event) => dropItem(event, node.id)}>
         <button className="collection-expand" onClick={() => setExpanded((current) => { const next = new Set(current); if (next.has(node.id)) next.delete(node.id); else next.add(node.id); return next; })} disabled={!canExpand} title={isExpanded ? "折叠" : "展开"}><ChevronRight size={13} className={isExpanded ? "expanded" : ""} /></button>
-        <button className="collection-main" onClick={() => goLibrary("all", node.id)} title={`${node.name} · ${node.totalPaperCount} 篇论文`}>{isExpanded && canExpand ? <FolderOpen size={15} style={{ color: node.color }} /> : <Folder size={15} style={{ color: node.color }} />}<span>{node.name}</span><b>{node.totalPaperCount}</b></button>
-        <div className="collection-actions"><span title="拖动文件夹改变层级"><GripVertical size={12} /></span><button onClick={() => openCreate(node.id)} title="新建子分类"><FolderPlus size={12} /></button><button onClick={() => openRename(node)} title="重命名"><Pencil size={12} /></button><button onClick={() => remove(node)} disabled={busy === `delete:${node.id}`} title="删除"><Trash2 size={12} /></button></div>
+        <button data-collection-drop-id={node.id} className="collection-main" onClick={() => goLibrary("all", node.id)} title={`${node.name} · ${node.totalPaperCount} 篇论文`}>{isExpanded && canExpand ? <FolderOpen size={15} style={{ color: node.color }} /> : <Folder size={15} style={{ color: node.color }} />}<span>{node.name}</span><b>{node.totalPaperCount}</b></button>
+        <div className="collection-actions"><span title="拖动文件夹改变层级" onPointerDown={(event) => startPointerCollectionDrag({ kind: "collection", id: node.id }, event)}><GripVertical size={12} /></span><button onClick={() => openCreate(node.id)} title="新建子分类"><FolderPlus size={12} /></button><button onClick={() => openRename(node)} title="重命名"><Pencil size={12} /></button><button onClick={() => remove(node)} disabled={busy === `delete:${node.id}`} title="删除"><Trash2 size={12} /></button></div>
       </div>
       {renderEditor(node.parentId, node.id)}
-      {isExpanded && <div className="collection-tree-children">{node.children.map((child) => renderNode(child, depth + 1))}{directPapers.map((paper) => <button draggable key={paper.id} className={`collection-paper-leaf ${selectedPaperId === paper.id ? "selected" : ""}`} style={{ paddingLeft: `${32 + (depth + 1) * 14}px` }} title={`${paper.title}\n双击打开，或拖动到其他分类`} onClick={() => { selectPaper(paper.id); setView("library"); }} onDoubleClick={() => openReader(paper.id)} onDragStart={(event) => { selectPaper(paper.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-p2i-paper-id", paper.id); event.dataTransfer.setData("text/plain", paper.id); }}><FileText size={13} /><span>{paper.title}</span></button>)}{renderEditor(node.id)}</div>}
+      {isExpanded && <div className="collection-tree-children">{node.children.map((child) => renderNode(child, depth + 1))}{directPapers.map((paper) => <button key={paper.id} className={`collection-paper-leaf ${selectedPaperId === paper.id ? "selected" : ""}`} style={{ paddingLeft: `${32 + (depth + 1) * 14}px` }} title={`${paper.title}\n双击打开，或拖动到其他分类`} onClick={() => { selectPaper(paper.id); setView("library"); }} onDoubleClick={() => openReader(paper.id)} onPointerDown={(event) => { selectPaper(paper.id); startPointerCollectionDrag({ kind: "paper", id: paper.id }, event); }}><FileText size={13} /><span>{paper.title}</span></button>)}{renderEditor(node.id)}</div>}
     </div>;
   };
 
@@ -196,15 +207,16 @@ export function Sidebar({ root, papers, collections }: { root: string; papers: L
       <button className="research-nav-item" onClick={() => goLibrary("all")}><Inbox size={14} /><span>收件箱 / 未读</span></button>
 
       <div className="sidebar-divider" />
-      <div className={`sidebar-section-title collection-root-drop ${dropTarget === "__root__" ? "drop-target" : ""}`} onDragOver={(event) => allowDrop(event, "__root__")} onDragLeave={() => setDropTarget("")} onDrop={(event) => dropItem(event)} title="把文件夹拖到这里可移到分类根目录"><span>分类</span><button title="新建分类" onClick={() => openCreate()}><Plus size={12} /></button></div>
-      <div className="collection-tree" aria-label="论文分类树">{tree.map((node) => renderNode(node, 0))}{renderEditor(undefined)}{!tree.length && !editor && <button className="collection-empty" onClick={() => openCreate()}><FolderPlus size={16} /><span>新建第一个分类</span></button>}
-        <div className={`collection-tree-row uncategorized ${selectedCollectionId === "__uncategorized__" ? "active" : ""} ${dropTarget === "__uncategorized__" ? "drop-target" : ""}`} onDragOver={(event) => allowDrop(event, "__uncategorized__")} onDragLeave={() => setDropTarget("")} onDrop={(event) => dropItem(event)}><span className="collection-expand" /><button className="collection-main" onClick={() => goLibrary("all", "__uncategorized__")}><Inbox size={14} /><span>未分类</span><b>{uncategorizedCount}</b></button></div>
+      <div data-collection-drop-id="__root__" className={`sidebar-section-title collection-root-drop ${dropTarget === "__root__" ? "drop-target" : ""}`} onDragOver={(event) => allowDrop(event, "__root__")} onDragLeave={() => setDropTarget("")} onDrop={(event) => dropItem(event)} title="把文件夹拖到这里可移到分类根目录"><span>分类</span><button title="新建分类" onClick={() => openCreate()}><Plus size={12} /></button></div>
+      {activeDrag && <div className="collection-drag-hint"><FolderInput size={13} /><span>{activeDrag.kind === "paper" ? "拖到分类文件夹完成归组" : "拖到文件夹调整层级"}</span></div>}
+      <div className={`collection-tree ${activeDrag ? "drag-active" : ""}`} aria-label="论文分类树">{tree.map((node) => renderNode(node, 0))}{renderEditor(undefined)}{!tree.length && !editor && <button className="collection-empty" onClick={() => openCreate()}><FolderPlus size={16} /><span>新建第一个分类</span></button>}
+        <div data-collection-drop-id="__uncategorized__" className={`collection-tree-row uncategorized ${selectedCollectionId === "__uncategorized__" ? "active" : ""} ${dropTarget === "__uncategorized__" ? "drop-target" : ""}`} onDragOver={(event) => allowDrop(event, "__uncategorized__")} onDragLeave={() => setDropTarget("")} onDrop={(event) => dropItem(event)}><span className="collection-expand" /><button data-collection-drop-id="__uncategorized__" className="collection-main" onClick={() => goLibrary("all", "__uncategorized__")}><Inbox size={14} /><span>未分类</span><b>{uncategorizedCount}</b></button></div>
       </div>
       {notice && <div className={`collection-notice ${notice.kind}`}>{notice.kind === "success" ? <Check size={12} /> : <TriangleAlert size={12} />}<span>{notice.text}</span><button onClick={() => setNotice(null)}><X size={11} /></button></div>}
 
       <div className="sidebar-divider" />
-      <div className="sidebar-section-title"><span>智能体</span></div>
-      {[["论文分析", "#4f6bed"], ["翻译", "#3984d8"], ["图表分析", "#7357d8"], ["创新分析", "#28a06a"]].map(([name, color], index) => <button className={`agent-row ${view === "agents" && index === 0 ? "active" : ""}`} key={name} onClick={() => setView("agents")}><i style={{ background: color }} /><span>{name}</span>{index === 0 && <em />}</button>)}
+      <div className="sidebar-section-title"><span>AI 模板</span></div>
+      <button className={`research-nav-item ${view === "agents" ? "active" : ""}`} onClick={() => setView("agents")}><BookOpenText size={14} /><span>提示词库</span></button>
 
       <div className="sidebar-divider" />
       <div className="sidebar-section-title"><span>本地工具</span></div>

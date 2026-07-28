@@ -1,8 +1,9 @@
-import type { AgentProfile, AgentPromptTemplate, AgentRun, AgentToolCallRecord, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryCollection, LibraryPaper, ModelStreamEvent, ModelStreamRequest, ModelToolDefinition, PaperDocument, ProgressNotification, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, ReaderConversation, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
+import type { AgentProfile, AgentPromptTemplate, AgentRun, AgentToolCallRecord, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryCollection, LibraryPaper, ModelStreamEvent, ModelStreamRequest, ModelToolDefinition, PaperDocument, ProgressNotification, PromptTemplate, PromptTemplateCategory, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, ReaderConversation, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { demoMarkdown, demoPapers } from "../demo";
 import { sanitizeProviderConfig } from "./providerConfig";
+import { DEFAULT_PROMPT_TEMPLATES } from "./promptTemplates";
 
 export const nativeRuntime = isTauri();
 
@@ -516,6 +517,33 @@ let demoAgentPrompts: AgentPromptTemplate[] = demoAgentProfiles.map((profile) =>
   updatedAt: demoAgentNow,
 }));
 let demoAgentRuns: AgentRun[] = [];
+let demoPromptTemplates: PromptTemplate[] = DEFAULT_PROMPT_TEMPLATES.map((template) => ({ ...template }));
+
+export async function listPromptTemplates(root: string, category?: PromptTemplateCategory): Promise<PromptTemplate[]> {
+  if (!nativeRuntime) return demoPromptTemplates.filter((template) => !category || template.category === category).sort((left, right) => left.sortOrder - right.sortOrder || right.updatedAt.localeCompare(left.updatedAt));
+  return rpc<PromptTemplate[]>("prompt.list", { root, category });
+}
+
+export async function upsertPromptTemplate(root: string, input: { id?: string; category: PromptTemplateCategory; name: string; content: string; sortOrder?: number }): Promise<PromptTemplate> {
+  if (!nativeRuntime) {
+    const now = new Date().toISOString();
+    const previous = demoPromptTemplates.find((template) => template.id === input.id);
+    const duplicate = demoPromptTemplates.some((template) => template.category === input.category && template.name.toLowerCase() === input.name.trim().toLowerCase() && template.id !== input.id);
+    if (duplicate) throw new Error("该分类中已存在同名提示词。");
+    const saved: PromptTemplate = { id: input.id ?? crypto.randomUUID(), category: input.category, name: input.name.trim(), content: input.content.trim(), sortOrder: input.sortOrder ?? previous?.sortOrder ?? 0, createdAt: previous?.createdAt ?? now, updatedAt: now };
+    demoPromptTemplates = [...demoPromptTemplates.filter((template) => template.id !== saved.id), saved];
+    return saved;
+  }
+  return rpc<PromptTemplate>("prompt.upsert", { root, ...input });
+}
+
+export async function deletePromptTemplate(root: string, templateId: string): Promise<void> {
+  if (!nativeRuntime) {
+    demoPromptTemplates = demoPromptTemplates.filter((template) => template.id !== templateId);
+    return;
+  }
+  await rpc("prompt.delete", { root, templateId });
+}
 
 export async function listAgentProfiles(root: string): Promise<AgentProfile[]> {
   if (!nativeRuntime) return demoAgentProfiles.map((profile) => ({

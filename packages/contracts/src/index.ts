@@ -347,6 +347,18 @@ export interface AgentPromptTemplate {
   updatedAt: string;
 }
 
+export type PromptTemplateCategory = "reader" | "translation" | "explanation" | "markdown" | "innovation";
+
+export interface PromptTemplate {
+  id: string;
+  category: PromptTemplateCategory;
+  name: string;
+  content: string;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type AgentRunStatus = "running" | "completed" | "failed" | "cancelled" | "interrupted";
 
 export interface AgentRun {

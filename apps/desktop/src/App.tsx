@@ -13,7 +13,7 @@ import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
 import { LibraryStartup } from "./components/LibraryStartup";
 import { LibraryWorkspace } from "./components/LibraryWorkspace";
-import { Agents } from "./components/Agents";
+import { PromptLibrary } from "./components/PromptLibrary";
 import { ContextWorkspace } from "./components/ContextWorkspace";
 import { CitationGraph } from "./components/CitationGraph";
 import { chooseLibrary, initializeLibrary, listCollections, listJobs, listPapers, nativeRuntime, onEngineProgress, scanLibrary, startLibraryWatcher } from "./lib/bridge";
@@ -174,7 +174,7 @@ export function App() {
   ) : workspace.view === "innovate" ? (
     <InnovationWorkspace papers={allPapers} />
   ) : workspace.view === "agents" ? (
-    <Agents />
+    <PromptLibrary />
   ) : workspace.view === "context" ? (
     <ContextWorkspace papers={allPapers} root={root} />
   ) : workspace.view === "graph" ? (

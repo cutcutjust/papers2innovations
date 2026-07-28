@@ -16,7 +16,7 @@
 
 Papers2Innovations addresses two practical barriers: English terminology, equations, and long-form structure interrupt reading for Chinese speakers; newcomers may finish a paper yet still struggle to compare methods, locate gaps, and formulate a research question. It reconstructs PDFs as section-based Markdown linked to source pages, then keeps translation, explanation, evidence context, and innovation analysis in one recoverable local workspace.
 
-> Current release: `v0.1.19` for Windows x64. The project remains in active `0.1.x` development; keep backups of irreplaceable source PDFs.
+> Current release: `v0.1.20` for Windows x64. The project remains in active `0.1.x` development; keep backups of irreplaceable source PDFs.
 
 ## Why Papers2Innovations exists
 
@@ -39,8 +39,8 @@ The system does not claim to replace research judgment. It makes sources, limita
 | Library | Watch `Papers/`, import Zotero read-only, deduplicate by SHA-256, and organize papers in a persistent nested tree with drag-to-group. |
 | Parse | Generate section Markdown, page anchors, figures, tables, and normalized coordinates; resume interrupted jobs by stage. |
 | Read | Navigate Markdown/PDF by section or enter fullscreen focus mode with only outline, Markdown body, and paper assistant visible. |
-| Context | Share evidence-bound context across Reader, Agents, and Innovate, with expandable system prompts, tool schemas, paper text, and token budgets. |
-| Agents | Configure a model, prompt, tool permissions, network/write policy, cancellation, retries, and checkpoints per agent. |
+| Context | Share evidence-bound context across Reader and Innovate, with expandable system prompts, paper text, and token budgets. |
+| Prompt library | Organize templates for Reader chat, translation, explanation, Markdown cleanup, and Innovate; select them directly in each workspace. |
 | Innovate | Run context compression, evidence extraction, idea generation, novelty review, and experiment critique. |
 | Maintain | Receive signed GitHub update prompts or check manually from Settings without losing local configuration. |
 
@@ -71,11 +71,9 @@ Focus mode hides global navigation, the library sidebar, toolbar, and context fo
 
 ![Papers2Innovations focus reading mode](docs/images/focus-reading.png)
 
-### Agent Center
+### Prompt library
 
-Agents execute only explicitly allowed local tools. Default prompts request Chinese output and require paper, section, block, or page anchors for factual claims; prompts remain fully editable.
-
-![Papers2Innovations Agent Center](docs/images/agent-center.png)
+Templates support create, edit, recategorize, and delete workflows. Reader chat, translation, explanation, Markdown cleanup, and Innovate remember their selected template, while upgrades preserve legacy custom prompts.
 
 ### Evidence to experiments
 
@@ -91,9 +89,9 @@ The innovation workbench binds each run to an exact context snapshot. Stages may
 4. Track hashing, layout, OCR, image, table, and indexing stages in **Activity**; failed stages can be retried.
 5. Create nested collections and drag papers into the research-topic tree.
 6. In **Models & Processing**, add a model with a custom Base URL, context size, and API key, then assign Markdown/OCR workflows.
-7. Read by section or enter Focus mode, add key evidence to shared Context, and continue in Agents or Innovate.
+7. Read by section or enter Focus mode, choose templates for reading, translation, explanation, or cleanup, then continue in Innovate.
 
-Local ingestion and fallback parsing do not require a model key. Translation, explanation, Markdown cleanup, OCR, agents, and synthesis use only models configured by the user.
+Local ingestion and fallback parsing do not require a model key. Translation, explanation, Markdown cleanup, OCR, Reader chat, and synthesis use only models configured by the user.
 
 ## Data boundaries
 

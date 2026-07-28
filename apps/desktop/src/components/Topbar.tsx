@@ -5,7 +5,7 @@ import { useWorkspace, type View } from "../store";
 const primaryViews: Array<{ view: View; label: string }> = [
   { view: "library", label: "论文库" },
   { view: "reader", label: "阅读器" },
-  { view: "agents", label: "智能体" },
+  { view: "agents", label: "提示词库" },
   { view: "graph", label: "引用图谱" },
   { view: "innovate", label: "创新工作台" },
 ];

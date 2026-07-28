@@ -219,6 +219,16 @@ class RpcServer:
                     params["promptId"]
                 )
             }
+        if method == "prompt.list":
+            return self.library(params["root"]).list_prompt_templates(params.get("category"))
+        if method == "prompt.upsert":
+            return self.library(params["root"]).upsert_prompt_template(params)
+        if method == "prompt.delete":
+            return {
+                "deleted": self.library(params["root"]).delete_prompt_template(
+                    params["templateId"]
+                )
+            }
         if method == "agent.run_list":
             return self.library(params["root"]).list_agent_runs(
                 params.get("agentProfileId"), int(params.get("limit", 50))
