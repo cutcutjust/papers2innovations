@@ -6,11 +6,11 @@ export function contextCompressionMessages(source: ContextSourceItem): ModelMess
   return [
     {
       role: "system",
-      content: "Compress scientific paper context for downstream research agents. Preserve claims, methods, datasets, quantitative results, limitations, uncertainty, citations, and every available section/page/block anchor. Use concise Markdown with evidence-oriented headings. Do not add facts or resolve missing information. Return only the compressed context.",
+      content: "请将科研论文上下文压缩为供后续研究智能体使用的中文 Markdown。完整保留论点、方法、数据集、定量结果、局限性、不确定性、引用，以及所有可用的章节/页码/文本块锚点。使用简洁且以证据为中心的标题，不得补充事实或擅自填补缺失信息。只返回压缩后的上下文。",
     },
     {
       role: "user",
-      content: `Paper: ${source.paperTitle}\nSource hash: ${source.sourceHash}\n\n${source.sourceText}`,
+      content: `论文：${source.paperTitle}\n来源哈希：${source.sourceHash}\n\n${source.sourceText}`,
     },
   ];
 }
@@ -19,5 +19,5 @@ export function contextCompressionBudgetError(sourceTokens: number, maxContextTo
   const fixedReserve = 12_000;
   const available = Math.max(0, maxContextTokens - maxOutputTokens - fixedReserve);
   if (sourceTokens <= available) return undefined;
-  return `This source needs about ${sourceTokens.toLocaleString()} input tokens, but the selected model has room for about ${available.toLocaleString()}. Choose a longer-context model or add selected sections instead.`;
+  return `该来源约需 ${sourceTokens.toLocaleString()} 个输入 token，但所选模型仅剩约 ${available.toLocaleString()} 个。请选择更长上下文的模型，或只添加所需章节。`;
 }

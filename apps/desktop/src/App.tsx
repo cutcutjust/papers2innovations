@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FolderOpen } from "lucide-react";
 import { AppUpdater } from "./components/AppUpdater";
@@ -15,12 +15,14 @@ import { Agents } from "./components/Agents";
 import { ContextWorkspace } from "./components/ContextWorkspace";
 import { CitationGraph } from "./components/CitationGraph";
 import { chooseLibrary, initializeLibrary, listJobs, listPapers, nativeRuntime, onEngineProgress, scanLibrary, startLibraryWatcher } from "./lib/bridge";
-import { hydrateOcrCredential, hydrateProviderCredentials } from "./lib/credentials";
-import { useWorkspace } from "./store";
+import { hydrateOcrCredential, hydrateProviderCredentials, loadWorkspaceSettingsSnapshot, saveWorkspaceSettingsSnapshot } from "./lib/credentials";
+import { hasPersistedWorkspaceSettings, useWorkspace } from "./store";
 
 export function App() {
   const workspace = useWorkspace();
   const queryClient = useQueryClient();
+  const settingsRecoveryStarted = useRef(false);
+  const [settingsRecovered, setSettingsRecovered] = useState(!nativeRuntime);
   const defaultRoot = nativeRuntime ? "E:/Papers2Innovations-Library" : "D:/Research/Papers2Innovations-Library";
   const root = workspace.root || defaultRoot;
   const papersQuery = useQuery({
@@ -51,11 +53,35 @@ export function App() {
   }, [root, workspace]);
 
   useEffect(() => {
-    if (nativeRuntime) {
-      void hydrateOcrCredential().catch(() => undefined);
-      void hydrateProviderCredentials(workspace.providers).catch(() => undefined);
-    }
-  }, [workspace.providers]);
+    if (!nativeRuntime || settingsRecoveryStarted.current) return;
+    settingsRecoveryStarted.current = true;
+    void loadWorkspaceSettingsSnapshot()
+      .then((snapshot) => {
+        if (snapshot && !hasPersistedWorkspaceSettings) workspace.restoreWorkspaceSettings(snapshot);
+      })
+      .then(async () => {
+        const providers = useWorkspace.getState().providers;
+        await hydrateOcrCredential().catch(() => undefined);
+        await hydrateProviderCredentials(providers).catch(() => undefined);
+      })
+      .finally(() => setSettingsRecovered(true));
+  }, []);
+
+  useEffect(() => {
+    if (!nativeRuntime || !settingsRecovered) return;
+    void saveWorkspaceSettingsSnapshot({
+      version: 1,
+      root: workspace.root,
+      providers: workspace.providers,
+      customModels: workspace.customModels,
+      contextCompressionModelId: workspace.contextCompressionModelId,
+      markdownFormattingModelId: workspace.markdownFormattingModelId,
+      autoFormatMarkdown: workspace.autoFormatMarkdown,
+      fullPageOcrModelId: workspace.fullPageOcrModelId,
+      ocrConsent: workspace.ocrConsent,
+      fontSize: workspace.fontSize,
+    }).catch(() => undefined);
+  }, [settingsRecovered, workspace.root, workspace.providers, workspace.customModels, workspace.contextCompressionModelId, workspace.markdownFormattingModelId, workspace.autoFormatMarkdown, workspace.fullPageOcrModelId, workspace.ocrConsent, workspace.fontSize]);
 
   useEffect(() => {
     let cleanup: () => void = () => {};
@@ -141,7 +167,7 @@ export function App() {
   ) : papersQuery.isLoading ? (
     <LibraryStartup onRetry={() => void papersQuery.refetch()} />
   ) : papersQuery.isError ? (
-    <LibraryStartup error={new Error(papersQuery.error instanceof Error ? papersQuery.error.message : String(papersQuery.error ?? "Unable to open the local index"))} onRetry={() => void papersQuery.refetch()} />
+    <LibraryStartup error={new Error(papersQuery.error instanceof Error ? papersQuery.error.message : String(papersQuery.error ?? "无法打开本地索引"))} onRetry={() => void papersQuery.refetch()} />
   ) : (
     <LibraryWorkspace papers={papers} allPapers={allPapers} selected={selected} scanning={scanMutation.isPending} onScan={() => scanMutation.mutate()} onChooseLibrary={choose} />
   );
@@ -150,9 +176,9 @@ export function App() {
     return (
       <div className="setup-screen">
         <div className="setup-mark"><FolderOpen size={24} /></div>
-        <h1>Open your paper library</h1>
-        <p>Choose a folder. Papers2Innovations will create and manage the <code>Papers/</code> and <code>.p2i/</code> structure inside it.</p>
-        <button className="primary-button" onClick={choose}><FolderOpen size={17} /> Choose folder</button>
+        <h1>打开论文库</h1>
+        <p>选择一个文件夹，Papers2Innovations 会在其中创建并管理 <code>Papers/</code> 和 <code>.p2i/</code> 目录。</p>
+        <button className="primary-button" onClick={choose}><FolderOpen size={17} /> 选择文件夹</button>
       </div>
     );
   }

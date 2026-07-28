@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type { ApiFormat, ModelConfig, ProviderConfig } from "@p2i/contracts";
 import { sanitizeProviderConfig } from "./lib/providerConfig";
 import { normalizeFontSize, type FontSize } from "./lib/fontSize";
+import type { WorkspaceSettingsSnapshot } from "./lib/settingsSnapshot";
 
 export type View = "library" | "reader" | "agents" | "context" | "graph" | "innovate" | "jobs" | "import" | "settings";
 type ReaderMode = "markdown" | "pdf" | "figures";
@@ -19,7 +20,7 @@ export const defaultCustomModels: ModelConfig[] = [
   { id: "custom-reasoning-model", providerId: "provider-openai-demo", displayName: "Reasoning", model: "custom-reasoning-model", maxContextTokens: 128000, maxOutputTokens: 8192 },
 ];
 
-interface WorkspaceState {
+export interface WorkspaceState {
   root: string;
   selectedPaperId?: string;
   view: View;
@@ -52,9 +53,13 @@ interface WorkspaceState {
   setFullPageOcrModelId: (modelId: string) => void;
   setOcrConsent: (enabled: boolean) => void;
   setFontSize: (size: FontSize) => void;
+  restoreWorkspaceSettings: (snapshot: WorkspaceSettingsSnapshot) => void;
 }
 
 const savedRoot = localStorage.getItem("p2i.libraryRoot") ?? "";
+export const hasPersistedWorkspaceSettings = Boolean(
+  localStorage.getItem("p2i.providers") || localStorage.getItem("p2i.models") || localStorage.getItem("p2i.libraryRoot"),
+);
 const loadModelRegistry = (): { providers: ProviderConfig[]; models: ModelConfig[] } => {
   try {
     const providers = JSON.parse(localStorage.getItem("p2i.providers") ?? "null");
@@ -176,5 +181,28 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   setFontSize: (fontSize) => {
     localStorage.setItem("p2i.fontSize", fontSize);
     set({ fontSize });
+  },
+  restoreWorkspaceSettings: (snapshot) => {
+    const providers = snapshot.providers.map(sanitizeProviderConfig);
+    const customModels = snapshot.customModels;
+    persistModelRegistry(providers, customModels);
+    localStorage.setItem("p2i.libraryRoot", snapshot.root);
+    localStorage.setItem("p2i.contextCompressionModelId", snapshot.contextCompressionModelId);
+    localStorage.setItem("p2i.markdownFormattingModelId", snapshot.markdownFormattingModelId);
+    localStorage.setItem("p2i.autoFormatMarkdown", String(snapshot.autoFormatMarkdown));
+    localStorage.setItem("p2i.fullPageOcrModelId", snapshot.fullPageOcrModelId);
+    localStorage.setItem("p2i.ocrConsent", String(snapshot.ocrConsent));
+    localStorage.setItem("p2i.fontSize", snapshot.fontSize);
+    set({
+      root: snapshot.root,
+      providers,
+      customModels,
+      contextCompressionModelId: snapshot.contextCompressionModelId,
+      markdownFormattingModelId: snapshot.markdownFormattingModelId,
+      autoFormatMarkdown: snapshot.autoFormatMarkdown,
+      fullPageOcrModelId: snapshot.fullPageOcrModelId,
+      ocrConsent: snapshot.ocrConsent,
+      fontSize: snapshot.fontSize,
+    });
   },
 }));

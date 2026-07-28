@@ -4,6 +4,7 @@ import { Stronghold, type Client } from "@tauri-apps/plugin-stronghold";
 import type { CredentialSummary, ModelConfig, ProviderConfig } from "@p2i/contracts";
 import { nativeRuntime } from "./bridge";
 import { sanitizeProviderConfig } from "./providerConfig";
+import { isWorkspaceSettingsSnapshot, type WorkspaceSettingsSnapshot } from "./settingsSnapshot";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -11,6 +12,7 @@ const clientName = "p2i-settings";
 let cachedSummary: OcrCredentialSummary | undefined;
 let hydrationPromise: Promise<OcrCredentialSummary> | undefined;
 const providerSummaryCache = new Map<string, CredentialSummary>();
+const settingsSnapshotKey = "workspace-settings:v1";
 
 async function openStore() {
   const vaultPath = await join(await appDataDir(), "p2i-vault.hold");
@@ -190,4 +192,28 @@ export async function deleteProviderCredential(credentialId: string): Promise<vo
 export async function testProviderConnection(provider: ProviderConfig, model: ModelConfig): Promise<{ ok: boolean; status: number }> {
   if (!nativeRuntime) return { ok: true, status: 200 };
   return invoke("provider_test_connection", { input: { provider: sanitizeProviderConfig(provider), model } });
+}
+
+export async function loadWorkspaceSettingsSnapshot(): Promise<WorkspaceSettingsSnapshot | null> {
+  if (!nativeRuntime) return null;
+  const { stronghold, store } = await openStore();
+  try {
+    const bytes = await store.get(settingsSnapshotKey);
+    if (!bytes) return null;
+    const value: unknown = JSON.parse(decoder.decode(bytes));
+    return isWorkspaceSettingsSnapshot(value) ? value : null;
+  } finally {
+    await stronghold.unload();
+  }
+}
+
+export async function saveWorkspaceSettingsSnapshot(snapshot: WorkspaceSettingsSnapshot): Promise<void> {
+  if (!nativeRuntime) return;
+  const { stronghold, store } = await openStore();
+  try {
+    await store.insert(settingsSnapshotKey, Array.from(encoder.encode(JSON.stringify(snapshot))));
+    await stronghold.save();
+  } finally {
+    await stronghold.unload();
+  }
 }

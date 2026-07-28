@@ -236,7 +236,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     void formatDocument();
   }, [autoFormatMarkdown, documentQuery.data, formattingCredentialReady, formattingModel?.id, formattingProvider?.id, paper?.id]);
 
-  if (!paper) return <main className="reader-empty"><BookOpen size={34} /><h2>No paper selected</h2><p>Choose a paper in Library, then open it in Reader.</p><button className="primary-button compact" onClick={() => setView("library")}>Open Library</button></main>;
+  if (!paper) return <main className="reader-empty"><BookOpen size={34} /><h2>尚未选择论文</h2><p>请先在论文库中选择一篇论文，再用阅读器打开。</p><button className="primary-button compact" onClick={() => setView("library")}>打开论文库</button></main>;
 
   const credentialReady = !nativeRuntime || Boolean(selectedProvider && providerCredentialQuery.data?.some(
     (summary) => summary.credentialId === selectedProvider.credentialId && summary.configured,
@@ -286,7 +286,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         model: selectedModel,
         temperature: 0.1,
         messages: [
-          { role: "system", content: "Translate scientific prose faithfully into Simplified Chinese. Preserve Markdown, LaTeX, terminology, citations, numbers, and uncertainty. Return only the translation." },
+          { role: "system", content: "请将科研文本忠实翻译为简体中文。保留 Markdown、LaTeX、专业术语、引用、数字和不确定性，只返回译文，不要添加解释。" },
           { role: "user", content: block.text },
         ],
       }, onEvent);
@@ -401,9 +401,9 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         temperature: 0.1,
         messages: [
           { role: "system", content: type === "formula"
-            ? "Explain the supplied scientific formula rigorously. Identify the exact expression, define every symbol, explain dimensions and operations, connect it to adjacent method text, and state assumptions or ambiguities. Preserve LaTeX and cite the provided section/block/page anchor."
-            : "Explain the supplied scientific claim or theorem rigorously. Separate statement, assumptions, reasoning or proof sketch, implications, limitations, and unresolved gaps. Do not invent a proof. Cite the provided section/block/page anchor." },
-          { role: "user", content: `Source anchor: paper=${paper.id}, section=${block.sectionId}, block=${block.id}, page=${block.page ?? "unknown"}\n\nTarget source:\n${block.text}\n\nAdjacent structured context:\n${adjacentContext}` },
+            ? "请用中文严谨解释给定的科研公式：指出准确表达式，定义每个符号，说明量纲与运算，并结合相邻方法文本说明其作用、假设和歧义。保留 LaTeX，并引用提供的章节/文本块/页码锚点。"
+            : "请用中文严谨解释给定的科研论断或定理，分别说明命题、假设、推理或证明概要、影响、局限与未解决问题。不得虚构证明，并引用提供的章节/文本块/页码锚点。" },
+          { role: "user", content: `来源锚点：paper=${paper.id}, section=${block.sectionId}, block=${block.id}, page=${block.page ?? "未知"}\n\n目标原文：\n${block.text}\n\n相邻结构化上下文：\n${adjacentContext}` },
         ],
       }, onEvent);
       if (terminal) handle.dispose();
@@ -569,9 +569,9 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         model: selectedModel,
         temperature: 0.2,
         messages: [
-          { role: "system", content: "You are the Reader paper analyst. Answer from the supplied local paper context. Every factual claim must cite paper, section, block, or page when available. Distinguish direct evidence from inference and say when the context is insufficient." },
+          { role: "system", content: "你是阅读器中的论文分析助手。请默认使用中文，只根据提供的本地论文上下文回答。每条事实性陈述都要尽可能引用论文、章节、文本块或页码；区分直接证据与推断，上下文不足时明确说明。" },
           ...priorMessages,
-          { role: "user", content: `Question: ${userMessage}\n\nCurrent local research context:\n${assembled.contextText}` },
+          { role: "user", content: `问题：${userMessage}\n\n当前本地研究上下文：\n${assembled.contextText}` },
         ],
       }, onEvent);
       if (terminal) handle.dispose();
@@ -647,7 +647,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       model: formattingModel,
       temperature: 0,
       messages: [
-        { role: "system", content: "You are a lossless scientific Markdown editor. Improve only structure and readability: reconstruct sensible paragraphs and line breaks, normalize headings and lists, put bibliography entries on separate lines, and repair obvious OCR word-wrap hyphenation. Never summarize, translate, correct claims, change wording, alter citations, numbers, names, formulas, tables, image paths, or add content. Preserve every [[P2I_EVIDENCE_ANCHOR_N]] placeholder exactly. Return Markdown only, without a code fence." },
+        { role: "system", content: "你是无损科研 Markdown 整理助手。只改善结构和可读性：重建合理段落与换行，规范标题和列表，让每条参考文献独立成行，并修复明显的 OCR 断词连字符。禁止摘要、翻译、纠正论点、改写措辞、修改引用/数字/名称/公式/表格/图片路径或添加内容。必须原样保留每个 [[P2I_EVIDENCE_ANCHOR_N]] 占位符。只返回 Markdown，不要使用代码围栏。" },
         { role: "user", content: chunk },
       ],
     }, onEvent).then((handle) => {
@@ -727,21 +727,21 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   return <div className="reader-workspace">
     {selection && <div ref={selectionToolbar} className={`selection-popover ${selection.placement}`} style={{ left: selection.left, top: selection.top }} role="toolbar" aria-label="Selected text actions"><button title="Translate selected text" onClick={() => void translate(selection)}><Languages size={14} /> Translate</button><button title="Explain selected text" onClick={() => void explain("theorem", selection)}><Sparkles size={14} /> Explain</button><button className="icon-button" title="Close" onClick={() => setSelection(null)}><X size={14} /></button></div>}
     <div className="reader-toolbar">
-      <button onClick={() => setView("library")}><ChevronLeft size={13} /> Library</button>
+      <button onClick={() => setView("library")}><ChevronLeft size={13} /> 论文库</button>
       <strong title={paper.title}>{paper.title}</strong>
-      <div className="reader-mode-switch"><button className={mode === "integrated" ? "active" : ""} onClick={() => setMode("integrated")}>Integrated Reading</button><button className={mode === "pdf" ? "active" : ""} onClick={() => setMode("pdf")}>PDF Only</button><button className={mode === "figures" ? "active" : ""} onClick={() => setMode("figures")}>Figures</button></div>
-      <button><Search size={13} /> Find</button><button className={formattingStatus === "saved" ? "active" : ""} disabled={formattingStatus === "formatting"} title={formattingError || `Format Markdown with ${formattingModel?.displayName ?? "the selected model"}`} onClick={() => void formatDocument()}>{formattingStatus === "formatting" ? <LoaderCircle className="spin" size={13} /> : <WandSparkles size={13} />} {formattingStatus === "formatting" ? `${formattingProgress}%` : "Format"}</button><button className={fullText ? "active" : ""} disabled={contextBusy === "paper"} onClick={() => void togglePaperContext()}><Layers3 size={13} /> {fullText ? `Paper Context · ${contextPercent}%` : "Load Full Text"}</button><button className="reader-agent-toggle" onClick={() => setAgentOpen(true)}><Bot size={13} /> Ask AI</button>
+      <div className="reader-mode-switch"><button className={mode === "integrated" ? "active" : ""} onClick={() => setMode("integrated")}>整合阅读</button><button className={mode === "pdf" ? "active" : ""} onClick={() => setMode("pdf")}>仅 PDF</button><button className={mode === "figures" ? "active" : ""} onClick={() => setMode("figures")}>插图</button></div>
+      <button><Search size={13} /> 查找</button><button className={formattingStatus === "saved" ? "active" : ""} disabled={formattingStatus === "formatting"} title={formattingError || `使用 ${formattingModel?.displayName ?? "所选模型"} 整理 Markdown`} onClick={() => void formatDocument()}>{formattingStatus === "formatting" ? <LoaderCircle className="spin" size={13} /> : <WandSparkles size={13} />} {formattingStatus === "formatting" ? `${formattingProgress}%` : "整理"}</button><button className={fullText ? "active" : ""} disabled={contextBusy === "paper"} onClick={() => void togglePaperContext()}><Layers3 size={13} /> {fullText ? `论文上下文 · ${contextPercent}%` : "加载全文"}</button><button className="reader-agent-toggle" onClick={() => setAgentOpen(true)}><Bot size={13} /> 询问 AI</button>
     </div>
     <div className="reader-main">
-      <aside className="reader-outline"><span>Sections</span>{sections.map((section, index) => <button key={section.id} className={activeSection === section.id ? "active" : ""} style={{ paddingLeft: `${10 + Math.max(0, section.level - 1) * 12}px` }} onClick={() => { setActiveSection(section.id); document.getElementById(`reader-section-${section.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" }); }}><b>{String(index + 1).padStart(2, "0")}</b><span>{section.title}</span><small>{section.pageStart ? section.pageStart === section.pageEnd ? `p. ${section.pageStart}` : `pp. ${section.pageStart}-${section.pageEnd}` : `${section.blocks.length}`}</small></button>)}</aside>
+      <aside className="reader-outline"><span>章节</span>{sections.map((section, index) => <button key={section.id} className={activeSection === section.id ? "active" : ""} style={{ paddingLeft: `${10 + Math.max(0, section.level - 1) * 12}px` }} onClick={() => { setActiveSection(section.id); document.getElementById(`reader-section-${section.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" }); }}><b>{String(index + 1).padStart(2, "0")}</b><span>{section.title}</span><small>{section.pageStart ? section.pageStart === section.pageEnd ? `第 ${section.pageStart} 页` : `第 ${section.pageStart}-${section.pageEnd} 页` : `${section.blocks.length}`}</small></button>)}</aside>
       <main className="reader-canvas" ref={readerCanvas}>
         {mode === "integrated" && <article className="integrated-paper">
-          <header className="paper-reading-header"><span className="tag tag-primary">STRUCTURED DOCUMENT</span><h1>{paper.title}</h1><p>Local document · {paper.pageCount || "—"} pages · Updated {new Date(paper.updatedAt).toLocaleDateString()}</p></header>
+          <header className="paper-reading-header"><span className="tag tag-primary">结构化文档</span><h1>{paper.title}</h1><p>本地文档 · {paper.pageCount || "—"} 页 · 更新于 {new Date(paper.updatedAt).toLocaleDateString("zh-CN")}</p></header>
           {formattingStatus === "error" && <div className="formatting-notice error"><TriangleAlert size={13} /> {formattingError}</div>}
           {markdownQuery.isLoading || documentQuery.isLoading ? <div className="document-loading">Loading structured document…</div> : sections.map((section, sectionIndex) => {
             const displayBlocks = compactReaderBlocks(section.blocks);
             return <section id={`reader-section-${section.id}`} data-section-id={section.id} className={`reading-section ${activeSection === section.id ? "active" : ""}`} key={section.id}>
-            <header><div className="section-heading"><span className="section-kicker">Section {String(sectionIndex + 1).padStart(2, "0")}</span><h2>{section.title}</h2><span>{section.pageStart ? section.pageStart === section.pageEnd ? `Page ${section.pageStart}` : `Pages ${section.pageStart}-${section.pageEnd}` : "Structured content"}</span></div><button disabled={contextBusy === section.id} onClick={() => void addContext(section.id, undefined, section.blocks.map((block) => block.text).join("\n\n"))}><Layers3 size={12} /> {contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.sectionId === section.id && !item.blockId) ? "Added" : "Add Section"}</button></header>
+            <header><div className="section-heading"><span className="section-kicker">章节 {String(sectionIndex + 1).padStart(2, "0")}</span><h2>{section.title}</h2><span>{section.pageStart ? section.pageStart === section.pageEnd ? `第 ${section.pageStart} 页` : `第 ${section.pageStart}-${section.pageEnd} 页` : "结构化内容"}</span></div><button disabled={contextBusy === section.id} onClick={() => void addContext(section.id, undefined, section.blocks.map((block) => block.text).join("\n\n"))}><Layers3 size={12} /> {contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.sectionId === section.id && !item.blockId) ? "已添加" : "添加章节"}</button></header>
             <div className="paragraph-stack">{displayBlocks.map((block) => {
               const state = translations[block.id] ?? persistedTranslations[block.id];
               const hasFormula = /\$|\\\[|\\begin\{equation/.test(block.text);
@@ -757,15 +757,15 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
           </section>;})}
         </article>}
         {mode === "pdf" && <div className="integrated-pdf">{assetUrl(paper.sourcePath) ? <iframe title="Source PDF" src={assetUrl(paper.sourcePath)} /> : <div className="pdf-placeholder"><FileText size={38} /><h2>Native PDF preview</h2><p>The source PDF is displayed here in the Windows desktop build.</p></div>}</div>}
-        {mode === "figures" && <div className="reader-figures">{paper.figures.length ? paper.figures.map((figure) => <figure key={figure.id}>{assetUrl(`${paper.markdownPath?.replace(/[\\/][^\\/]+$/, "")}/${figure.relativePath}`) ? <img src={assetUrl(`${paper.markdownPath?.replace(/[\\/][^\\/]+$/, "")}/${figure.relativePath}`)} alt={figure.caption ?? "Extracted figure"} /> : <div><FileImage size={32} /></div>}<figcaption>{figure.caption ?? "Extracted figure"}</figcaption></figure>) : <div className="pdf-placeholder"><FileImage size={36} /><h2>No extracted figures</h2><p>Figures will appear after the parser finishes extraction.</p></div>}</div>}
+        {mode === "figures" && <div className="reader-figures">{paper.figures.length ? paper.figures.map((figure) => <figure key={figure.id}>{assetUrl(`${paper.markdownPath?.replace(/[\\/][^\\/]+$/, "")}/${figure.relativePath}`) ? <img src={assetUrl(`${paper.markdownPath?.replace(/[\\/][^\\/]+$/, "")}/${figure.relativePath}`)} alt={figure.caption ?? "提取的插图"} /> : <div><FileImage size={32} /></div>}<figcaption>{figure.caption ?? "提取的插图"}</figcaption></figure>) : <div className="pdf-placeholder"><FileImage size={36} /><h2>暂无提取的插图</h2><p>解析器完成图像提取后，插图会显示在这里。</p></div>}</div>}
       </main>
       <aside className={`reader-agent-panel ${agentOpen ? "open" : ""}`}>
-        <header><Bot size={15} /><strong>Paper Analyst Agent</strong><span className={`tag ${credentialReady ? "tag-success" : "tag-warning"}`}>{credentialReady ? "Gateway ready" : selectedProvider ? "Needs key" : "Needs model"}</span><button className="reader-agent-close" title="Close agent" onClick={() => setAgentOpen(false)}><ChevronLeft size={13} /></button></header>
+        <header><Bot size={15} /><strong>论文分析助手</strong><span className={`tag ${credentialReady ? "tag-success" : "tag-warning"}`}>{credentialReady ? "接口就绪" : selectedProvider ? "缺少密钥" : "缺少模型"}</span><button className="reader-agent-close" title="关闭助手" onClick={() => setAgentOpen(false)}><ChevronLeft size={13} /></button></header>
         <div className="agent-panel-scroll">
-          <div className="agent-chat-summary"><div><strong>Conversation Context</strong><b>{contextPercent}%</b></div><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><span>{(contextUsed / 1000).toFixed(1)}K / {(maxContextTokens / 1000).toFixed(0)}K · {contextDraftQuery.data?.items.length ?? 0} items</span><button title="Open Context Workspace" onClick={() => setView("context")}><Layers3 size={11} /></button>{Boolean(chatQuery.data?.turns.length) && <button title="Clear conversation" onClick={() => void clearChat()}><Trash2 size={11} /></button>}</div>
-          <label className="agent-model-field"><span>Paper analyst model</span><select value={agentModel} onChange={(event) => setAgentModel(event.target.value)}>{customModels.map((model) => <option key={model.id} value={model.id}>{model.displayName} · {providers.find((provider) => provider.id === model.providerId)?.format ?? "unavailable"}</option>)}</select></label>
+          <div className="agent-chat-summary"><div><strong>对话上下文</strong><b>{contextPercent}%</b></div><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><span>{(contextUsed / 1000).toFixed(1)}K / {(maxContextTokens / 1000).toFixed(0)}K · {contextDraftQuery.data?.items.length ?? 0} 项</span><button title="打开上下文工作区" onClick={() => setView("context")}><Layers3 size={11} /></button>{Boolean(chatQuery.data?.turns.length) && <button title="清空对话" onClick={() => void clearChat()}><Trash2 size={11} /></button>}</div>
+          <label className="agent-model-field"><span>论文分析模型</span><select value={agentModel} onChange={(event) => setAgentModel(event.target.value)}>{customModels.map((model) => <option key={model.id} value={model.id}>{model.displayName} · {providers.find((provider) => provider.id === model.providerId)?.format ?? "不可用"}</option>)}</select></label>
           <div className="agent-chat-thread">
-            {!chatQuery.data?.turns.length && chatStatus !== "streaming" && <div className="agent-chat-empty"><MessageSquareText size={18} /><strong>Ask this paper</strong><span>Answers use the persisted research context and retain revision history.</span></div>}
+            {!chatQuery.data?.turns.length && chatStatus !== "streaming" && <div className="agent-chat-empty"><MessageSquareText size={18} /><strong>询问这篇论文</strong><span>回答基于持久化研究上下文，并保留修订历史。</span></div>}
             {(chatQuery.data?.turns ?? []).map((turn) => <div className="agent-chat-turn" key={turn.id}>
               <div className="chat-message user"><span>You</span><p>{turn.userMessage}</p></div>
               <div className={`chat-message assistant ${turn.response?.status ?? "pending"}`}><span>Paper Analyst{turn.response ? ` · Revision ${turn.response.revision}` : ""}</span>{turn.response?.assistantText ? <div className="chat-markdown"><MarkdownBlock value={turn.response.assistantText} /></div> : <p>{turn.response?.error ?? "No response was produced."}</p>}<footer><small>{turn.response?.status ?? "pending"}{turn.response?.usage ? ` · ${turn.response.usage.outputTokens} tokens · ${(turn.response.usage.durationMs / 1000).toFixed(1)}s` : ""}</small>{turn.response && turn.response.status !== "completed" && <button onClick={() => void sendChat(turn)}><RefreshCw size={10} /> Retry</button>}</footer></div>
@@ -774,10 +774,10 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
             {chatError && <p className="agent-chat-error"><TriangleAlert size={12} /> {chatError}</p>}
           </div>
         </div>
-        <form className="agent-chat-input" onSubmit={(event) => { event.preventDefault(); void sendChat(); }}><MessageSquareText size={13} /><input aria-label="Ask about this paper" value={chatInput} onChange={(event) => setChatInput(event.target.value)} disabled={chatStatus === "streaming"} placeholder="Ask about this paper…" /><button title="Send" type="submit" disabled={!chatInput.trim() || chatStatus === "streaming"}><Send size={13} /></button></form>
+        <form className="agent-chat-input" onSubmit={(event) => { event.preventDefault(); void sendChat(); }}><MessageSquareText size={13} /><input aria-label="询问这篇论文" value={chatInput} onChange={(event) => setChatInput(event.target.value)} disabled={chatStatus === "streaming"} placeholder="输入关于这篇论文的问题…" /><button title="发送" type="submit" disabled={!chatInput.trim() || chatStatus === "streaming"}><Send size={13} /></button></form>
       </aside>
     </div>
-    <footer className="reader-context-bar"><Layers3 size={14} /><strong>Conversation Context</strong><span className="tag tag-primary">{contextDraftQuery.data?.items.length ?? 0} persisted items</span><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><code>{(contextUsed / 1000).toFixed(1)}K / {(maxContextTokens / 1000).toFixed(0)}K · {contextPercent}%</code><span>Shared by Reader, Context, Agents and Innovate.</span><button onClick={() => setView("context")}>Open Context</button></footer>
+    <footer className="reader-context-bar"><Layers3 size={14} /><strong>对话上下文</strong><span className="tag tag-primary">{contextDraftQuery.data?.items.length ?? 0} 个持久化条目</span><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><code>{(contextUsed / 1000).toFixed(1)}K / {(maxContextTokens / 1000).toFixed(0)}K · {contextPercent}%</code><span>由阅读器、上下文、智能体和创新工作台共享。</span><button onClick={() => setView("context")}>打开上下文</button></footer>
   </div>;
 }
 

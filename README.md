@@ -1,128 +1,96 @@
 <div align="center">
-  <img src="apps/desktop/src-tauri/icons/128x128.png" width="88" alt="Papers2Innovations icon" />
+  <img src="apps/desktop/src-tauri/icons/128x128.png" width="88" alt="Papers2Innovations 图标" />
   <h1>Papers2Innovations</h1>
-  <p><strong>A local-first research workspace that turns paper collections into structured evidence, reusable context, and testable ideas.</strong></p>
+  <p><strong>本地优先的论文研究工作台：把 PDF 变成结构化证据、可复用上下文与可验证的研究想法。</strong></p>
+  <p><a href="README.md">中文</a> · <a href="README.en.md">English</a></p>
   <p>
-    <a href="https://github.com/cutcutjust/papers2innovations/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/cutcutjust/papers2innovations?style=flat-square&color=5865df" /></a>
-    <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078d4?style=flat-square&logo=windows" />
+    <a href="https://github.com/cutcutjust/papers2innovations/releases/latest"><img alt="最新版本" src="https://img.shields.io/github/v/release/cutcutjust/papers2innovations?style=flat-square&color=5865df" /></a>
+    <img alt="Windows 10 和 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078d4?style=flat-square&logo=windows" />
     <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24c8db?style=flat-square&logo=tauri&logoColor=white" />
-    <img alt="Local first" src="https://img.shields.io/badge/data-local--first-238636?style=flat-square" />
+    <img alt="本地优先" src="https://img.shields.io/badge/data-local--first-238636?style=flat-square" />
   </p>
-  <p>
-    <a href="https://github.com/cutcutjust/papers2innovations/releases/latest"><strong>Download for Windows</strong></a>
-    &nbsp;&middot;&nbsp;
-    <a href="#quick-start">Quick start</a>
-    &nbsp;&middot;&nbsp;
-    <a href="#development">Build from source</a>
-  </p>
+  <p><a href="https://github.com/cutcutjust/papers2innovations/releases/latest"><strong>下载 Windows 安装包</strong></a></p>
 </div>
 
-![Papers2Innovations section-based Reader](docs/images/reader-workspace.png)
+![按章节组织的 Papers2Innovations 阅读器](docs/images/reader-workspace.png)
 
-Papers2Innovations keeps PDFs, generated Markdown, evidence anchors, model usage, and research runs in one persistent workspace. It combines a native desktop shell, a recoverable local parsing engine, secure model access, section-based reading, citation analysis, research agents, and a resumable innovation pipeline.
+Papers2Innovations 将 PDF、结构化 Markdown、证据锚点、模型调用和研究运行记录放在一个可恢复的本地工作区中。它由 Tauri 原生桌面端、Python 解析引擎与 React 界面组成，支持 Zotero 导入、章节阅读、图表提取、上下文管理、研究智能体和分阶段创新综合。
 
-> **Current release:** `v0.1.13` for Windows x64. The project is in active `0.1.x` development; keep backups of irreplaceable source PDFs.
+> 当前版本：Windows x64 `v0.1.14`。项目仍处于 `0.1.x` 快速迭代阶段，请保留不可替代源 PDF 的备份。
 
-## What it does
+## 核心能力
 
-| Area | Capability |
+| 模块 | 能力 |
 | --- | --- |
-| **Ingest** | Watch a local `Papers/` folder, import selected Zotero collections without modifying Zotero, deduplicate by SHA-256, and resume interrupted jobs. |
-| **Parse** | Produce structured Markdown, sections, page anchors, figures, tables, and normalized bounding boxes. The compact installer uses a marked `pypdf` fallback; Docling is available in the full development build. |
-| **Read** | Navigate by paper section instead of raw PDF pages, render math, open source pages, format extracted Markdown with a chosen model, and keep translations or explanations revisioned. |
-| **Context** | Share an evidence-bound context draft across Reader, Agents, and Innovate, with per-model context limits, compression records, and visible token usage. |
-| **Analyze** | Build cached two-level citation graphs, preserve unresolved references, inspect provenance, and connect local papers by stable identities. |
-| **Automate** | Configure persistent research agents with tool allowlists, network/write policies, checkpoints, usage records, cancellation, and retry. |
-| **Innovate** | Run a five-stage pipeline for context compression, evidence extraction, idea generation, novelty verification, and experiment critique. |
-| **Maintain** | Install and uninstall normally on Windows, receive signed in-app updates from GitHub Releases, and keep the independent paper library during app upgrades. |
+| 导入 | 监听本地 `Papers/`，只读预览并导入 Zotero，SHA-256 去重，原子复制并记录来源。 |
+| 解析 | 生成章节 Markdown、页码锚点、插图、表格和规范化坐标；中断任务可从失败阶段恢复。 |
+| 阅读 | 按论文章节而非 PDF 页拆分正文，渲染公式，跳转源页，并保存翻译、解释和修订历史。 |
+| 上下文 | Reader、Agents 和 Innovate 共享绑定证据的上下文；显示 token 用量并支持压缩。 |
+| 智能体 | 为每个研究智能体设置模型、提示词、工具权限、网络/写入策略、取消、重试和检查点。 |
+| 创新 | 依次执行上下文压缩、证据提取、想法生成、创新性验证与实验批判。 |
+| 更新 | 自动提示 GitHub 新版本，也可在设置页手动检查；签名更新完成后自动重启。 |
 
-## Research workspaces
+## 模型与安全
 
-### Grounded agents
+![Papers2Innovations 模型设置](docs/images/model-settings.png)
 
-Agent profiles keep their own model, context limit, system prompt, tool permissions, and run history. Model calls pass through the Rust host; local tools are executed from an explicit allowlist and recorded with provenance.
+- 接口格式只分为 **OpenAI-compatible** 与 **Anthropic-compatible**，`Base URL` 始终由用户自定义。
+- 模型上下文可选 `128K`、`256K`、`1M`，也可输入 `4,096` 到 `2,000,000` 的自定义整数。
+- 每个模型可独立用于普通对话、Markdown 整理或全文 OCR；Markdown 整理会保留公式、引用、图片路径和证据锚点。
+- API Key 加密保存在 Tauri Stronghold，保险库密码由系统钥匙串保护；Python、SQLite 和日志均无法读取密钥。
+- 自定义模型、上下文限制、任务模型、OCR 授权、字号和论文库路径会同时保存在 WebView 设置与 Stronghold 非敏感快照中。
+- **覆盖安装与应用内更新不会清空已有设置或密钥。** 只有用户明确删除模型/密钥时才会移除对应凭据。
 
-![Papers2Innovations Agent Center](docs/images/agent-center.png)
+## 研究工作区
 
-### From evidence to experiments
+### 智能体中心
 
-The innovation workbench binds every run to an exact context snapshot. Each stage can use a different model, persists its checkpoint and usage, and resumes from the failed stage instead of starting over.
+智能体只使用显式允许的本地工具。系统提示词默认要求中文输出，并要求事实性结论引用论文、章节、文本块或页码锚点。
 
-![Papers2Innovations innovation pipeline](docs/images/innovation-pipeline.png)
+![Papers2Innovations 智能体中心](docs/images/agent-center.png)
 
-## How it fits together
+### 从证据到实验
 
-```mermaid
-flowchart LR
-    A["PDF folder or Zotero"] --> B["Tauri desktop host"]
-    B --> C["Python paper engine"]
-    C --> D[("Local library and SQLite")]
-    C --> E["Hash, layout, OCR, figures, tables, index"]
-    E --> D
-    D --> F["Reader and citation graph"]
-    F --> G["Shared evidence context"]
-    G --> H["Research agents"]
-    G --> I["Five-stage innovation pipeline"]
-    B --> J["Secure model gateway"]
-    J -. "optional" .-> K["OpenAI-compatible or Anthropic providers"]
-    J -. "explicit OCR consent" .-> L["Qwen full-page OCR"]
-```
+创新工作台把每次运行绑定到确定的上下文快照。各阶段可选择不同模型，已完成检查点会保留，失败后从中断阶段继续。
 
-- **React + TypeScript** renders the desktop workspace and maintains transient UI state.
-- **Rust + Tauri 2** owns the native window, file watcher, sidecar lifecycle, updater, Stronghold credentials, path restrictions, and model gateway.
-- **Python** handles discovery, hashing, parsing, job recovery, provenance, SQLite migrations, and research runtime persistence.
-- **JSON-RPC 2.0 over stdio** keeps the Rust host and Python sidecar contract explicit and testable.
+![Papers2Innovations 创新流水线](docs/images/innovation-pipeline.png)
 
-## Quick start
+## 快速开始
 
-1. Download the latest installer from [GitHub Releases](https://github.com/cutcutjust/papers2innovations/releases/latest) and complete the Windows installation.
-2. Open Papers2Innovations and select or create a library directory. The recommended default is `E:\Papers2Innovations-Library`.
-3. Add PDFs directly, place them under the library's `Papers/` folder, or use **Zotero Import**. Close Zotero before a formal import so its database is not locked.
-4. Follow hashing, layout, OCR, figure, table, and indexing progress in **Activity**. Failed stages can be retried without repeating completed work.
-5. Open a paper in **Reader**, add sections to the shared Context, then use Graph, Agents, or Innovate as needed.
+1. 从 [GitHub Releases](https://github.com/cutcutjust/papers2innovations/releases/latest) 下载最新 Windows 安装包。
+2. 打开应用并选择论文库目录，推荐使用独立目录，如 `E:\Papers2Innovations-Library`。
+3. 将 PDF 放入 `Papers/`，或关闭 Zotero 后使用“导入 Zotero”。
+4. 在“任务活动”查看哈希、版面、OCR、图像、表格和索引进度；失败阶段可重试。
+5. 在“设置”中添加模型、自定义 Base URL、上下文长度和 API Key，再分配 Markdown/OCR 模型。
+6. 在阅读器中按章节阅读，将证据加入共享上下文，然后使用智能体或创新工作台。
 
-AI features are optional. Local ingestion and fallback parsing do not require a model key. Add a provider only when you want translation, explanation, Markdown formatting, agents, or synthesis.
+本地导入与降级解析无需模型密钥。翻译、解释、Markdown 整理、OCR、智能体和综合功能才会调用用户配置的模型。
 
-## Data and privacy
-
-The library is independent from the installed application:
+## 数据边界
 
 ```text
 Papers2Innovations-Library/
-|-- Papers/                 # PDFs managed by the user or copied from Zotero
+|-- Papers/                 # 用户管理或从 Zotero 复制的 PDF
 |-- Exports/
-|   |-- bibtex/
-|   `-- markdown/
 `-- .p2i/
-    |-- library.sqlite      # jobs, sections, provenance, context, and runs
-    |-- generated/          # Markdown, figures, tables, and thumbnails
-    |-- cache/              # OCR pages and citation graph cache
+    |-- library.sqlite      # 任务、章节、来源、上下文和运行记录
+    |-- generated/          # Markdown、插图、表格和缩略图
+    |-- cache/              # OCR 页面和引用图谱缓存
     |-- components/
     `-- logs/
 ```
 
-- Provider and OCR API keys are encrypted in Tauri Stronghold; the vault key is held by the operating system credential store.
-- Keys are not sent to Python, stored in SQLite, written to logs, or persisted in frontend state.
-- Remote full-page OCR is disabled until the user explicitly consents. Rendered pages are cached by paper hash, page, model, and prompt version.
-- Model requests use the native Rust gateway with timeouts, cancellation, usage accounting, and error redaction.
-- Uninstalling the application does not remove the paper library.
+论文库独立于应用安装目录。升级或卸载 Papers2Innovations 不会删除论文库。全文 OCR 默认关闭，只有用户明确授权后才会发送渲染页面，且已缓存页面不会重复计费调用。
 
-## Updates and uninstalling
+## 更新与卸载
 
-The native app checks the repository's signed `latest.json` shortly after startup. When a newer version is available, the update banner downloads the signed installer, installs it, and relaunches the app. Updates never block access to the local workspace when GitHub is unavailable.
+应用启动后会检查签名的 GitHub `latest.json`。发现新版本时可直接下载、安装并重启；也可在“模型与安全”页面点击“检查更新”。GitHub 暂时不可用时不会阻止本地功能。
 
-Use either Windows **Installed apps**, the Start menu uninstall shortcut, or **Models & security > Application > Uninstall Papers2Innovations**. Library data remains in its separate directory.
+卸载可通过 Windows“已安装的应用”、开始菜单卸载快捷方式，或“设置 > 应用管理”。卸载程序仅移除应用文件，保留论文库与用户数据。
 
-## Development
+## 本地开发
 
-### Prerequisites
-
-- Node.js 20 or newer
-- Python 3.11
-- Rust stable with `rustfmt` and `clippy`
-- Tauri 2 platform prerequisites and Microsoft WebView2 on Windows
-
-### Native development setup
+需要 Node.js 20+、Python 3.11、Rust stable（含 `rustfmt`、`clippy`）以及 Tauri 2 的 Windows 构建依赖。
 
 ```powershell
 git clone https://github.com/cutcutjust/papers2innovations.git
@@ -134,33 +102,13 @@ py -3.11 -m venv .venv
 npm run tauri:dev --workspace @p2i/desktop
 ```
 
-Build the optional Docling-enabled sidecar when local layout and table models are required:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e "services/paper-engine[docling,dev]"
-.\scripts\build-sidecar.ps1 -Flavor full
-```
-
-The default `core` sidecar deliberately excludes Docling, Torch, Transformers, and related model packages. This keeps the Windows installer and first launch substantially smaller; fallback parse results are labeled `PARTIAL` instead of being presented as full layout extraction.
-
-### Repository layout
-
-```text
-apps/desktop/               React UI and Tauri host
-packages/contracts/         Shared TypeScript contracts
-services/paper-engine/      Python engine, migrations, parsing, and tests
-scripts/                    Sidecar build and Windows release automation
-docs/images/                Sanitized screenshots from the native app
-```
-
-### Validation
+质量门：
 
 ```powershell
 npm run typecheck
 npm test
 npm run build
 .\.venv\Scripts\python.exe -m pytest services/paper-engine/tests
-
 cd apps/desktop/src-tauri
 cargo fmt --check
 cargo check
@@ -168,17 +116,4 @@ cargo clippy -- -D warnings
 cargo test
 ```
 
-Build a production Windows package after creating the sidecar:
-
-```powershell
-.\scripts\build-sidecar.ps1
-npm run tauri build --workspace @p2i/desktop
-```
-
-Updater signing keys and passwords stay outside the repository. Maintainers can publish the signed NSIS installer, signature, and update manifest with `scripts/publish-windows.ps1`.
-
-## Contributing
-
-Bug reports and focused pull requests are welcome. Before changing a cross-process contract, update the TypeScript contracts, Rust bridge, Python RPC implementation, browser fallback, and relevant tests together. Please avoid committing PDFs, local manifests, model caches, Stronghold files, generated libraries, or credentials.
-
-Use [GitHub Issues](https://github.com/cutcutjust/papers2innovations/issues) for reproducible bugs and feature proposals.
+仓库不会提交 PDF、本地 manifest、论文库、Stronghold 文件、密钥、组件缓存或打包生成物。问题和功能建议请提交到 [GitHub Issues](https://github.com/cutcutjust/papers2innovations/issues)。

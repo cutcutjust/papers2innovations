@@ -19,6 +19,8 @@ describe("Context compression", () => {
 
   it("rejects sources that would consume the output and safety reserve", () => {
     expect(contextCompressionBudgetError(1000, 128000, 4096)).toBeUndefined();
-    expect(contextCompressionBudgetError(120000, 128000, 4096)).toContain("longer-context model");
+    const error = contextCompressionBudgetError(120000, 128000, 4096);
+    expect(error).toContain("更长上下文的模型");
+    expect(error).toContain("120,000");
   });
 });

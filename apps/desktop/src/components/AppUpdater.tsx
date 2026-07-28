@@ -4,7 +4,8 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import { nativeRuntime } from "../lib/bridge";
 
-type UpdatePhase = "hidden" | "available" | "downloading" | "installing" | "error";
+type UpdatePhase = "hidden" | "checking" | "current" | "available" | "downloading" | "installing" | "error";
+export const CHECK_UPDATE_EVENT = "p2i:check-update";
 
 export function updatePercent(downloaded: number, total: number): number | undefined {
   if (total <= 0) return undefined;
@@ -19,22 +20,37 @@ export function AppUpdater() {
   const [total, setTotal] = useState(0);
   const [error, setError] = useState("");
 
-  const checkForUpdate = async () => {
+  const checkForUpdate = async (manual = false) => {
     if (!nativeRuntime) return;
+    if (manual) setPhase("checking");
     try {
       const candidate = await check({ timeout: 10_000 });
-      if (!candidate) return;
+      if (!candidate) {
+        if (manual) {
+          setPhase("current");
+          window.setTimeout(() => setPhase((value) => value === "current" ? "hidden" : value), 3_000);
+        }
+        return;
+      }
       updateRef.current = candidate;
       setVersion(candidate.version);
       setPhase("available");
-    } catch {
-      // Update checks never block the local workspace.
+    } catch (reason) {
+      if (manual) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+        setPhase("error");
+      }
     }
   };
 
   useEffect(() => {
     const timer = window.setTimeout(() => void checkForUpdate(), 2_500);
-    return () => window.clearTimeout(timer);
+    const manualCheck = () => void checkForUpdate(true);
+    window.addEventListener(CHECK_UPDATE_EVENT, manualCheck);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener(CHECK_UPDATE_EVENT, manualCheck);
+    };
   }, []);
 
   const install = async () => {
@@ -76,12 +92,12 @@ export function AppUpdater() {
   const percent = updatePercent(downloaded, total);
   return <aside className={`update-banner ${phase}`} aria-live="polite">
     <div className="update-copy">
-      <strong>{phase === "available" ? `Version ${version} is available` : phase === "downloading" ? "Downloading update" : phase === "installing" ? "Installing update" : "Update failed"}</strong>
-      <span>{phase === "available" ? "Signed Windows update" : phase === "downloading" ? (percent === undefined ? "Downloading..." : `${percent}%`) : phase === "installing" ? "The app will restart automatically" : error}</span>
+      <strong>{phase === "checking" ? "正在检查更新" : phase === "current" ? "当前已是最新版本" : phase === "available" ? `发现新版本 ${version}` : phase === "downloading" ? "正在下载更新" : phase === "installing" ? "正在安装更新" : "更新失败"}</strong>
+      <span>{phase === "checking" ? "正在连接 GitHub Releases" : phase === "current" ? "无需执行任何操作" : phase === "available" ? "已验证签名的 Windows 更新" : phase === "downloading" ? (percent === undefined ? "下载中..." : `${percent}%`) : phase === "installing" ? "安装完成后应用将自动重启" : error}</span>
       {phase === "downloading" && <i className="update-progress"><b style={{ width: `${percent ?? 12}%` }} /></i>}
     </div>
-    {phase === "available" && <button className="primary-button compact" onClick={() => void install()}><Download size={15} /> Update</button>}
-    {phase === "error" && <button className="secondary-button" onClick={() => void install()}><RefreshCw size={14} /> Retry</button>}
-    {(phase === "available" || phase === "error") && <button className="icon-button small" title="Remind me later" onClick={dismiss}><X size={14} /></button>}
+    {phase === "available" && <button className="primary-button compact" onClick={() => void install()}><Download size={15} /> 立即更新</button>}
+    {phase === "error" && <button className="secondary-button" onClick={() => void checkForUpdate(true)}><RefreshCw size={14} /> 重试</button>}
+    {(phase === "available" || phase === "error") && <button className="icon-button small" title="稍后提醒" onClick={dismiss}><X size={14} /></button>}
   </aside>;
 }
