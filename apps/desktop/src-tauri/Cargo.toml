@@ -26,7 +26,7 @@ sha2 = "0.10"
 rust-argon2 = "1"
 tauri-plugin-stronghold = "2"
 getrandom = "0.3"
-tauri-plugin-updater = "2"
+tauri-plugin-updater = { version = "2", default-features = false, features = ["native-tls", "zip"] }
 tauri-plugin-process = "2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
