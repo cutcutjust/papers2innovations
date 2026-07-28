@@ -1,10 +1,10 @@
 import { create } from "zustand";
 import type { ApiFormat, ModelConfig, ProviderConfig } from "@p2i/contracts";
 import { sanitizeProviderConfig } from "./lib/providerConfig";
+import { normalizeFontSize, type FontSize } from "./lib/fontSize";
 
 export type View = "library" | "reader" | "agents" | "context" | "graph" | "innovate" | "jobs" | "import" | "settings";
 type ReaderMode = "markdown" | "pdf" | "figures";
-
 export type ModelApiFormat = ApiFormat;
 
 export const defaultProviders: ProviderConfig[] = [
@@ -34,6 +34,7 @@ interface WorkspaceState {
   autoFormatMarkdown: boolean;
   fullPageOcrModelId: string;
   ocrConsent: boolean;
+  fontSize: FontSize;
   setRoot: (root: string) => void;
   selectPaper: (paperId: string) => void;
   openReader: (paperId?: string) => void;
@@ -50,6 +51,7 @@ interface WorkspaceState {
   setAutoFormatMarkdown: (enabled: boolean) => void;
   setFullPageOcrModelId: (modelId: string) => void;
   setOcrConsent: (enabled: boolean) => void;
+  setFontSize: (size: FontSize) => void;
 }
 
 const savedRoot = localStorage.getItem("p2i.libraryRoot") ?? "";
@@ -116,6 +118,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   autoFormatMarkdown: localStorage.getItem("p2i.autoFormatMarkdown") === "true",
   fullPageOcrModelId: localStorage.getItem("p2i.fullPageOcrModelId") ?? "",
   ocrConsent: localStorage.getItem("p2i.ocrConsent") === "true",
+  fontSize: normalizeFontSize(localStorage.getItem("p2i.fontSize")),
   setRoot: (root) => {
     localStorage.setItem("p2i.libraryRoot", root);
     set({ root });
@@ -169,5 +172,9 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   setOcrConsent: (ocrConsent) => {
     localStorage.setItem("p2i.ocrConsent", String(ocrConsent));
     set({ ocrConsent });
+  },
+  setFontSize: (fontSize) => {
+    localStorage.setItem("p2i.fontSize", fontSize);
+    set({ fontSize });
   },
 }));

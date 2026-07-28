@@ -158,7 +158,7 @@ export function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-font-size={workspace.fontSize}>
       <Topbar />
       <div className="app-main">
         <Sidebar paperCount={allPapers.length} />
