@@ -93,7 +93,7 @@ export function AppUpdater() {
   return <aside className={`update-banner ${phase}`} aria-live="polite">
     <div className="update-copy">
       <strong>{phase === "checking" ? "正在检查更新" : phase === "current" ? "当前已是最新版本" : phase === "available" ? `发现新版本 ${version}` : phase === "downloading" ? "正在下载更新" : phase === "installing" ? "正在安装更新" : "更新失败"}</strong>
-      <span>{phase === "checking" ? "正在连接 GitHub Releases" : phase === "current" ? "无需执行任何操作" : phase === "available" ? "已验证签名的 Windows 更新" : phase === "downloading" ? (percent === undefined ? "下载中..." : `${percent}%`) : phase === "installing" ? "安装完成后应用将自动重启" : error}</span>
+      <span>{phase === "checking" ? "正在连接 GitHub Releases" : phase === "current" ? "无需执行任何操作" : phase === "available" ? "已验证签名的应用更新" : phase === "downloading" ? (percent === undefined ? "下载中..." : `${percent}%`) : phase === "installing" ? "安装完成后应用将自动重启" : error}</span>
       {phase === "downloading" && <i className="update-progress"><b style={{ width: `${percent ?? 12}%` }} /></i>}
     </div>
     {phase === "available" && <button className="primary-button compact" onClick={() => void install()}><Download size={15} /> 立即更新</button>}

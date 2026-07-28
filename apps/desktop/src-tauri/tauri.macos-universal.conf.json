@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["app", "dmg"],
+    "createUpdaterArtifacts": false,
+    "icon": ["icons/icon.icns"],
+    "resources": {
+      "binaries/macos/p2i-paper-engine-arm64": "macos/p2i-paper-engine-arm64",
+      "binaries/macos/p2i-paper-engine-x86_64": "macos/p2i-paper-engine-x86_64"
+    },
+    "category": "Productivity",
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-",
+      "dmg": {
+        "windowSize": { "width": 660, "height": 400 },
+        "appPosition": { "x": 180, "y": 190 },
+        "applicationFolderPosition": { "x": 480, "y": 190 }
+      }
+    }
+  }
+}

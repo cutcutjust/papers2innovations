@@ -1,3 +1,7 @@
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -28,9 +32,23 @@ def render(size: int) -> Image.Image:
 def main() -> None:
     output = Path(__file__).resolve().parents[1] / "apps" / "desktop" / "src-tauri" / "icons"
     output.mkdir(parents=True, exist_ok=True)
-    for size, name in ((32, "32x32.png"), (128, "128x128.png"), (256, "128x128@2x.png")):
-        render(size).save(output / name, "PNG")
-    render(256).save(output / "icon.ico", format="ICO", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+    if "--macos-only" not in sys.argv:
+        for size, name in ((32, "32x32.png"), (128, "128x128.png"), (256, "128x128@2x.png")):
+            render(size).save(output / name, "PNG")
+        render(256).save(output / "icon.ico", format="ICO", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+    render(1024).save(output / "icon.png", "PNG")
+    iconutil = shutil.which("iconutil")
+    if iconutil:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            iconset = Path(temporary_directory) / "icon.iconset"
+            iconset.mkdir()
+            for size in (16, 32, 128, 256, 512):
+                render(size).save(iconset / f"icon_{size}x{size}.png", "PNG")
+                render(size * 2).save(iconset / f"icon_{size}x{size}@2x.png", "PNG")
+            subprocess.run(
+                [iconutil, "--convert", "icns", str(iconset), "--output", str(output / "icon.icns")],
+                check=True,
+            )
 
 
 if __name__ == "__main__":

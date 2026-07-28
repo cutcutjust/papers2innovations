@@ -11,6 +11,7 @@ export function SecuritySettings() {
   const { fontSize, setFontSize, setView } = useWorkspace();
   const [status, setStatus] = useState<SecurityStatus | null>(null);
   const [uninstalling, setUninstalling] = useState(false);
+  const supportsNativeUninstall = nativeRuntime && navigator.userAgent.includes("Windows");
 
   const uninstall = async () => {
     if (!window.confirm("从此电脑卸载 Papers2Innovations？论文库、模型设置与用户数据会保留。")) return;
@@ -51,6 +52,6 @@ export function SecuritySettings() {
 
     <section className="security-facts"><div><span>凭据保险库</span><strong>Stronghold + 系统钥匙串</strong></div><div><span>密钥可见范围</span><strong>仅原生进程内存</strong></div><div><span>OCR 并发</span><strong>2 页</strong></div><div><span>失败重试</span><strong>2 / 4 / 8 秒</strong></div></section>
 
-    {nativeRuntime && <section className="settings-section app-management"><div className="settings-heading"><div><h2>应用管理</h2><p>卸载程序本体，同时保留论文库、模型设置和加密凭据，便于以后重新安装。</p></div><Trash2 size={18} /></div><button className="danger-button" onClick={() => void uninstall()} disabled={uninstalling}><Trash2 size={15} /> {uninstalling ? "正在启动卸载程序…" : "卸载 Papers2Innovations"}</button></section>}
+    {supportsNativeUninstall && <section className="settings-section app-management"><div className="settings-heading"><div><h2>应用管理</h2><p>卸载程序本体，同时保留论文库、模型设置和加密凭据，便于以后重新安装。</p></div><Trash2 size={18} /></div><button className="danger-button" onClick={() => void uninstall()} disabled={uninstalling}><Trash2 size={15} /> {uninstalling ? "正在启动卸载程序…" : "卸载 Papers2Innovations"}</button></section>}
   </main>;
 }

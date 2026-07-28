@@ -6,17 +6,18 @@
   <p>
     <a href="https://github.com/cutcutjust/papers2innovations/releases/latest"><img alt="最新版本" src="https://img.shields.io/github/v/release/cutcutjust/papers2innovations?style=flat-square&color=5865df" /></a>
     <img alt="Windows 10 和 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078d4?style=flat-square&logo=windows" />
+    <img alt="macOS 11 或更高版本" src="https://img.shields.io/badge/macOS-11%2B-111111?style=flat-square&logo=apple" />
     <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24c8db?style=flat-square&logo=tauri&logoColor=white" />
     <img alt="本地优先" src="https://img.shields.io/badge/data-local--first-238636?style=flat-square" />
   </p>
-  <p><a href="https://github.com/cutcutjust/papers2innovations/releases/latest"><strong>下载 Windows 安装包</strong></a></p>
+  <p><a href="https://github.com/cutcutjust/papers2innovations/releases/latest"><strong>下载安装包</strong></a></p>
 </div>
 
 ![按章节组织的 Papers2Innovations 阅读器](docs/images/reader-workspace.png)
 
 Papers2Innovations 面向两类真实困难：中文母语者阅读英文论文时容易被语言、公式和长篇结构阻断；刚进入科研的人即使读完论文，也常常不知道如何比较工作、定位空白并形成研究问题。它把 PDF 解析成按章节组织、可定位回原页的 Markdown，再把翻译、解释、证据上下文和创新分析放到同一个可恢复的本地工作区中。
 
-> 当前版本：Windows x64 `v0.1.17`。项目仍处于 `0.1.x` 快速迭代阶段，请保留不可替代源 PDF 的备份。
+> 当前源码版本：`v0.1.17`，支持 Windows x64 与 macOS 通用应用（Apple Silicon + Intel）。项目仍处于 `0.1.x` 快速迭代阶段，请保留不可替代源 PDF 的备份。
 
 ## 为什么做 Papers2Innovations
 
@@ -87,8 +88,8 @@ Papers2Innovations 采用一条可检查的研究路径：
 
 ## 快速开始
 
-1. 从 [GitHub Releases](https://github.com/cutcutjust/papers2innovations/releases/latest) 下载最新 Windows 安装包。
-2. 打开应用并选择论文库目录，推荐使用独立目录，如 `E:\Papers2Innovations-Library`。
+1. 从 [GitHub Releases](https://github.com/cutcutjust/papers2innovations/releases/latest) 下载对应平台的最新安装包；macOS 使用通用 `.dmg`。
+2. 打开应用并选择独立论文库目录，如 `~/Documents/Papers2Innovations-Library`。
 3. 将 PDF 放入 `Papers/`，或关闭 Zotero 后使用“导入 Zotero”。
 4. 在“任务活动”查看哈希、版面、OCR、图像、表格和索引进度；失败阶段可重试。
 5. 在侧栏新建分类或子分类，把论文拖入相应文件夹，建立自己的研究主题树。
@@ -117,11 +118,23 @@ Papers2Innovations-Library/
 
 应用启动后会检查签名的 GitHub `latest.json`。发现新版本时可直接下载、安装并重启；也可在“安全与应用”页面点击“检查新版本”。GitHub 暂时不可用时不会阻止本地功能。
 
-卸载可通过 Windows“已安装的应用”、开始菜单卸载快捷方式，或“设置 > 应用管理”。卸载程序仅移除应用文件，保留论文库与用户数据。
+Windows 可通过“已安装的应用”、开始菜单卸载快捷方式或应用设置卸载；macOS 可将应用从“应用程序”移到废纸篓。两种方式都只移除应用本体，保留独立的论文库与用户数据。
 
 ## 本地开发
 
-需要 Node.js 20+、Python 3.11、Rust stable（含 `rustfmt`、`clippy`）以及 Tauri 2 的 Windows 构建依赖。
+需要 Node.js 20+、Python 3.11、Rust stable（含 `rustfmt`、`clippy`）以及对应平台的 Tauri 2 构建依赖。
+
+在 Apple Silicon Mac 上安装 Xcode Command Line Tools、Rust 与 Rosetta 2 后，可直接生成同时支持 Apple Silicon 和 Intel 的 `.app` 与 `.dmg`。脚本会下载并校验官方 universal Python，不修改系统 Python。
+
+```bash
+git clone https://github.com/cutcutjust/papers2innovations.git
+cd papers2innovations
+npm run macos:build
+```
+
+产物位于 `apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/`。
+
+Windows 开发环境：
 
 ```powershell
 git clone https://github.com/cutcutjust/papers2innovations.git
