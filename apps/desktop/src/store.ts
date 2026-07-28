@@ -30,6 +30,8 @@ interface WorkspaceState {
   providers: ProviderConfig[];
   customModels: ModelConfig[];
   contextCompressionModelId: string;
+  markdownFormattingModelId: string;
+  autoFormatMarkdown: boolean;
   setRoot: (root: string) => void;
   selectPaper: (paperId: string) => void;
   openReader: (paperId?: string) => void;
@@ -39,8 +41,11 @@ interface WorkspaceState {
   setStatusFilter: (filter: WorkspaceState["statusFilter"]) => void;
   openPdfAt: (page: number) => void;
   addCustomModel: (provider: ProviderConfig, model: ModelConfig) => void;
+  updateCustomModel: (modelId: string, patch: Partial<Pick<ModelConfig, "displayName" | "maxContextTokens" | "maxOutputTokens">>) => void;
   removeCustomModel: (modelId: string) => void;
   setContextCompressionModelId: (modelId: string) => void;
+  setMarkdownFormattingModelId: (modelId: string) => void;
+  setAutoFormatMarkdown: (enabled: boolean) => void;
 }
 
 const savedRoot = localStorage.getItem("p2i.libraryRoot") ?? "";
@@ -53,7 +58,12 @@ const loadModelRegistry = (): { providers: ProviderConfig[]; models: ModelConfig
       if (JSON.stringify(safeProviders) !== JSON.stringify(providers)) {
         localStorage.setItem("p2i.providers", JSON.stringify(safeProviders));
       }
-      return { providers: safeProviders, models: models as ModelConfig[] };
+      const safeModels = (models as ModelConfig[]).map((model) => ({
+        ...model,
+        maxContextTokens: Number.isFinite(model.maxContextTokens) && model.maxContextTokens >= 4096 ? model.maxContextTokens : 128000,
+        maxOutputTokens: Number.isFinite(model.maxOutputTokens) && model.maxOutputTokens >= 256 ? model.maxOutputTokens : 4096,
+      }));
+      return { providers: safeProviders, models: safeModels };
     }
     const legacy = JSON.parse(localStorage.getItem("p2i.customModels") ?? "null") as Array<Record<string, string>> | null;
     if (Array.isArray(legacy) && legacy.length > 0) {
@@ -98,6 +108,8 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   providers: initialRegistry.providers,
   customModels: initialRegistry.models,
   contextCompressionModelId: localStorage.getItem("p2i.contextCompressionModelId") ?? initialRegistry.models[0]?.id ?? "",
+  markdownFormattingModelId: localStorage.getItem("p2i.markdownFormattingModelId") ?? initialRegistry.models[0]?.id ?? "",
+  autoFormatMarkdown: localStorage.getItem("p2i.autoFormatMarkdown") === "true",
   setRoot: (root) => {
     localStorage.setItem("p2i.libraryRoot", root);
     set({ root });
@@ -116,15 +128,30 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
     persistModelRegistry(providers, customModels);
     return { providers, customModels };
   }),
+  updateCustomModel: (modelId, patch) => set((state) => {
+    const customModels = state.customModels.map((model) => model.id === modelId ? { ...model, ...patch } : model);
+    persistModelRegistry(state.providers, customModels);
+    return { customModels };
+  }),
   removeCustomModel: (modelId) => set((state) => {
     const customModels = state.customModels.filter((model) => model.id !== modelId);
     const usedProviders = new Set(customModels.map((model) => model.providerId));
     const providers = state.providers.filter((provider) => usedProviders.has(provider.id));
     persistModelRegistry(providers, customModels);
-    return { providers, customModels };
+    const markdownFormattingModelId = state.markdownFormattingModelId === modelId ? customModels[0]?.id ?? "" : state.markdownFormattingModelId;
+    localStorage.setItem("p2i.markdownFormattingModelId", markdownFormattingModelId);
+    return { providers, customModels, markdownFormattingModelId };
   }),
   setContextCompressionModelId: (contextCompressionModelId) => {
     localStorage.setItem("p2i.contextCompressionModelId", contextCompressionModelId);
     set({ contextCompressionModelId });
+  },
+  setMarkdownFormattingModelId: (markdownFormattingModelId) => {
+    localStorage.setItem("p2i.markdownFormattingModelId", markdownFormattingModelId);
+    set({ markdownFormattingModelId });
+  },
+  setAutoFormatMarkdown: (autoFormatMarkdown) => {
+    localStorage.setItem("p2i.autoFormatMarkdown", String(autoFormatMarkdown));
+    set({ autoFormatMarkdown });
   },
 }));

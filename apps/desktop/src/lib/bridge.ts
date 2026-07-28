@@ -58,6 +58,24 @@ export async function readDocument(root: string, paperId: string): Promise<Paper
   return rpc<PaperDocument>("paper.read_document", { root, paperId });
 }
 
+export async function saveFormattedDocument(root: string, input: {
+  paperId: string;
+  sections: Array<{ id: string; markdown: string }>;
+  modelId: string;
+  promptVersion: string;
+  sourceSha256: string;
+}): Promise<PaperDocument> {
+  if (!nativeRuntime) {
+    const document = await readDocument(root, input.paperId);
+    return {
+      ...document,
+      sections: document.sections.map((section) => ({ ...section, markdown: input.sections.find((item) => item.id === section.id)?.markdown ?? section.markdown })),
+      formatting: { model_id: input.modelId, prompt_version: input.promptVersion, source_sha256: input.sourceSha256, updated_at: new Date().toISOString() },
+    };
+  }
+  return rpc<PaperDocument>("paper.format_markdown_save", { root, ...input });
+}
+
 export async function readReferences(root: string, paperId: string): Promise<CitationReference[]> {
   if (!nativeRuntime) return [];
   return rpc<CitationReference[]>("paper.read_references", { root, paperId });

@@ -1080,6 +1080,87 @@ class Library:
             raise FileNotFoundError(f"No structured document exists for paper {paper_id}")
         return json.loads(Path(row["document_path"]).read_text(encoding="utf-8"))
 
+    def save_formatted_document(
+        self,
+        paper_id: str,
+        sections: list[dict[str, Any]],
+        model_id: str,
+        prompt_version: str,
+        source_sha256: str,
+    ) -> dict[str, Any]:
+        if not model_id.strip() or not prompt_version.strip():
+            raise ValueError("Formatting model and prompt version are required")
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT canonical_sha256, markdown_path, document_path FROM papers WHERE id = ?",
+                (paper_id,),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Unknown paper: {paper_id}")
+        if row["canonical_sha256"] != source_sha256:
+            raise ValueError("Paper content changed while Markdown was being formatted")
+        if not row["markdown_path"] or not row["document_path"]:
+            raise FileNotFoundError(f"No parsed document exists for paper {paper_id}")
+
+        document_path = Path(row["document_path"])
+        markdown_path = Path(row["markdown_path"])
+        document = json.loads(document_path.read_text(encoding="utf-8"))
+        current_sections = document.get("sections", [])
+        supplied = {str(section.get("id", "")): str(section.get("markdown", "")).strip() for section in sections}
+        expected_ids = {str(section.get("id", "")) for section in current_sections}
+        if set(supplied) != expected_ids or not expected_ids:
+            raise ValueError("Formatted Markdown must include every document section exactly once")
+        if sum(len(markdown) for markdown in supplied.values()) > 20_000_000:
+            raise ValueError("Formatted Markdown exceeds the document size limit")
+
+        for section in current_sections:
+            section_id = str(section.get("id", ""))
+            formatted = supplied[section_id]
+            if not formatted:
+                raise ValueError(f"Formatted section is empty: {section_id}")
+            for anchor in section.get("anchors", []):
+                block_id = str(anchor.get("block_id", ""))
+                if block_id and f'data-block-id="{block_id}"' not in formatted:
+                    raise ValueError(f"Formatted section lost evidence anchor: {block_id}")
+            section["markdown"] = formatted
+
+        now = utc_now()
+        document["formatting"] = {
+            "model_id": model_id,
+            "prompt_version": prompt_version,
+            "source_sha256": source_sha256,
+            "updated_at": now,
+        }
+        document["generated_at"] = now
+        frontmatter = (
+            "---\n"
+            f"paper_id: {paper_id}\n"
+            f"source_sha256: {source_sha256}\n"
+            f"formatter: {model_id}@{prompt_version}\n"
+            "---\n\n"
+            f"# {document.get('title', 'Paper')}\n\n"
+        )
+        full_markdown = frontmatter + "\n\n".join(
+            str(section["markdown"]) for section in current_sections
+        )
+        document_temp = document_path.with_suffix(".json.tmp")
+        markdown_temp = markdown_path.with_suffix(".md.tmp")
+        document_temp.write_text(
+            json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        markdown_temp.write_text(full_markdown, encoding="utf-8")
+        document_temp.replace(document_path)
+        markdown_temp.replace(markdown_path)
+        with self.db.connect() as connection:
+            connection.executemany(
+                "UPDATE sections SET markdown = ? WHERE paper_id = ? AND id = ?",
+                [(supplied[section_id], paper_id, section_id) for section_id in expected_ids],
+            )
+            connection.execute(
+                "UPDATE papers SET updated_at = ? WHERE id = ?", (now, paper_id)
+            )
+        return document
+
     def read_references(self, paper_id: str) -> list[dict[str, Any]]:
         self.initialize()
         with self.db.connect() as connection:

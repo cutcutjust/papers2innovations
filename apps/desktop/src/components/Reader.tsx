@@ -1,20 +1,21 @@
 import type { ContextSnapshot, LibraryPaper, ModelStreamEvent, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, TranslationRecord } from "@p2i/contracts";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpen, Bot, Check, ChevronLeft, FileImage, FileText, Languages, Layers3, LoaderCircle, MessageSquareText, RefreshCw, Search, Send, Sparkles, Square, Trash2, TriangleAlert } from "lucide-react";
+import { BookOpen, Bot, Check, ChevronLeft, FileImage, FileText, Languages, Layers3, LoaderCircle, MessageSquareText, RefreshCw, Search, Send, Sparkles, Square, Trash2, TriangleAlert, WandSparkles, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import { addPaperToContext, addSelectionToContext, assetUrl, clearReaderConversation, getContextCompression, getContextDraft, getReaderConversation, listReaderAnalyses, listTranslations, nativeRuntime, readContextItem, readDocument, readMarkdown, removePaperFromContext, saveReaderAnalysis, saveReaderChatTurn, saveTranslation, startModelStream, type ModelStreamHandle } from "../lib/bridge";
+import { addPaperToContext, addSelectionToContext, assetUrl, clearReaderConversation, getContextCompression, getContextDraft, getReaderConversation, listReaderAnalyses, listTranslations, nativeRuntime, readContextItem, readDocument, readMarkdown, removePaperFromContext, saveFormattedDocument, saveReaderAnalysis, saveReaderChatTurn, saveTranslation, startModelStream, type ModelStreamHandle } from "../lib/bridge";
 import { hydrateProviderCredentials } from "../lib/credentials";
 import { buildReaderSections, type ReaderDisplaySection, type ReaderDocumentBlock } from "../lib/documentBlocks";
+import { MARKDOWN_FORMAT_PROMPT_VERSION, prepareMarkdownForFormatting, restoreFormattedMarkdown, splitMarkdownForFormatting } from "../lib/markdownFormatting";
 import { useWorkspace } from "../store";
 
 type ReaderMode = "integrated" | "pdf" | "figures";
 type ReaderBlock = ReaderDocumentBlock;
 type ReaderSection = ReaderDisplaySection;
-type SelectionSource = ReaderBlock & { start: number; end: number };
+type SelectionSource = ReaderBlock & { start: number; end: number; left: number; top: number; placement: "above" | "below" };
 type TranslationState = {
   status: "streaming" | "unsaved" | "saved" | "cancelled" | "error";
   text: string;
@@ -40,7 +41,7 @@ function MarkdownBlock({ value }: { value: string }) {
 }
 
 export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) {
-  const { setView, customModels, providers } = useWorkspace();
+  const { setView, customModels, providers, markdownFormattingModelId, autoFormatMarkdown } = useWorkspace();
   const queryClient = useQueryClient();
   const [mode, setMode] = useState<ReaderMode>("integrated");
   const [selection, setSelection] = useState<SelectionSource | null>(null);
@@ -57,8 +58,14 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const [chatStatus, setChatStatus] = useState<"idle" | "streaming" | "error">("idle");
   const [chatError, setChatError] = useState("");
   const [agentOpen, setAgentOpen] = useState(false);
+  const [formattingStatus, setFormattingStatus] = useState<"idle" | "formatting" | "saved" | "error">("idle");
+  const [formattingProgress, setFormattingProgress] = useState(0);
+  const [formattingError, setFormattingError] = useState("");
   const streamHandles = useRef(new Map<string, ModelStreamHandle>());
   const chatHandle = useRef<ModelStreamHandle | null>(null);
+  const formattingHandle = useRef<ModelStreamHandle | null>(null);
+  const autoFormattingKey = useRef("");
+  const selectionToolbar = useRef<HTMLDivElement | null>(null);
   const readerCanvas = useRef<HTMLElement | null>(null);
   const readable = Boolean(paper?.id && paper && ["READY", "PARTIAL"].includes(paper.status));
   const markdownQuery = useQuery({
@@ -120,12 +127,17 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   );
   const selectedModel = customModels.find((model) => model.id === agentModel) ?? customModels[0];
   const selectedProvider = providers.find((provider) => provider.id === selectedModel?.providerId);
+  const formattingModel = customModels.find((model) => model.id === markdownFormattingModelId) ?? customModels[0];
+  const formattingProvider = providers.find((provider) => provider.id === formattingModel?.providerId);
   const maxContextTokens = selectedModel?.maxContextTokens ?? 128000;
   const tokenBreakdown = contextDraftQuery.data?.tokenBreakdown;
   const contextUsed = tokenBreakdown ? Object.values(tokenBreakdown).reduce((total, value) => total + value, 0) : 36000;
   const contextPercent = Math.min(100, Math.round(contextUsed / maxContextTokens * 100));
   const fullText = Boolean(paper && contextDraftQuery.data?.items.some(
     (item) => item.paperId === paper.id && !item.sectionId && !item.blockId,
+  ));
+  const formattingCredentialReady = !nativeRuntime || Boolean(formattingProvider && providerCredentialQuery.data?.some(
+    (summary) => summary.credentialId === formattingProvider.credentialId && summary.configured,
   ));
 
   useEffect(() => {
@@ -141,12 +153,21 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     setChatStatus("idle");
     setChatError("");
     setAgentOpen(false);
+    setFormattingStatus("idle");
+    setFormattingProgress(0);
+    setFormattingError("");
+    autoFormattingKey.current = "";
     for (const handle of streamHandles.current.values()) void handle.cancel();
     streamHandles.current.clear();
     if (chatHandle.current) {
       void chatHandle.current.cancel();
       chatHandle.current.dispose();
       chatHandle.current = null;
+    }
+    if (formattingHandle.current) {
+      void formattingHandle.current.cancel();
+      formattingHandle.current.dispose();
+      formattingHandle.current = null;
     }
   }, [paper?.id]);
 
@@ -174,7 +195,36 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       chatHandle.current.dispose();
       void chatHandle.current.cancel();
     }
+    if (formattingHandle.current) {
+      formattingHandle.current.dispose();
+      void formattingHandle.current.cancel();
+    }
   }, []);
+
+  useEffect(() => {
+    if (!selection) return;
+    const dismiss = (event: PointerEvent) => {
+      if (selectionToolbar.current?.contains(event.target as Node)) return;
+      setSelection(null);
+    };
+    const dismissOnScroll = () => setSelection(null);
+    document.addEventListener("pointerdown", dismiss, true);
+    readerCanvas.current?.addEventListener("scroll", dismissOnScroll, { passive: true });
+    return () => {
+      document.removeEventListener("pointerdown", dismiss, true);
+      readerCanvas.current?.removeEventListener("scroll", dismissOnScroll);
+    };
+  }, [selection]);
+
+  useEffect(() => {
+    const document = documentQuery.data;
+    if (!autoFormatMarkdown || !paper || !document || !formattingModel || !formattingProvider || !formattingCredentialReady) return;
+    const key = `${paper.id}:${document.source_sha256}:${formattingModel.id}:${MARKDOWN_FORMAT_PROMPT_VERSION}`;
+    if (document.formatting?.model_id === formattingModel.id && document.formatting.prompt_version === MARKDOWN_FORMAT_PROMPT_VERSION) return;
+    if (autoFormattingKey.current === key) return;
+    autoFormattingKey.current = key;
+    void formatDocument();
+  }, [autoFormatMarkdown, documentQuery.data, formattingCredentialReady, formattingModel?.id, formattingProvider?.id, paper?.id]);
 
   if (!paper) return <main className="reader-empty"><BookOpen size={34} /><h2>No paper selected</h2><p>Choose a paper in Library, then open it in Reader.</p><button className="primary-button compact" onClick={() => setView("library")}>Open Library</button></main>;
 
@@ -556,28 +606,128 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       setContextBusy("");
     }
   };
-  const captureSelection = (block: ReaderBlock) => {
+  const streamFormattedChunk = (chunk: string): Promise<string> => new Promise((resolve, reject) => {
+    if (!formattingModel || !formattingProvider) {
+      reject(new Error("Choose a Markdown formatting model in Settings."));
+      return;
+    }
+    let output = "";
+    let terminal = false;
+    const onEvent = (event: ModelStreamEvent) => {
+      if (event.kind === "delta" && event.text) output += event.text;
+      if (event.kind === "done") {
+        terminal = true;
+        if (output.trim()) resolve(output);
+        else reject(new Error("Formatting model returned empty Markdown."));
+      } else if (event.kind === "cancelled") {
+        terminal = true;
+        reject(new Error("Markdown formatting was cancelled."));
+      } else if (event.kind === "error") {
+        terminal = true;
+        reject(new Error(event.error ?? "Markdown formatting failed."));
+      }
+      if (terminal) {
+        formattingHandle.current?.dispose();
+        formattingHandle.current = null;
+      }
+    };
+    void startModelStream({
+      requestId: crypto.randomUUID(),
+      provider: formattingProvider,
+      model: formattingModel,
+      temperature: 0,
+      messages: [
+        { role: "system", content: "You are a lossless scientific Markdown editor. Improve only structure and readability: reconstruct sensible paragraphs and line breaks, normalize headings and lists, put bibliography entries on separate lines, and repair obvious OCR word-wrap hyphenation. Never summarize, translate, correct claims, change wording, alter citations, numbers, names, formulas, tables, image paths, or add content. Preserve every [[P2I_EVIDENCE_ANCHOR_N]] placeholder exactly. Return Markdown only, without a code fence." },
+        { role: "user", content: chunk },
+      ],
+    }, onEvent).then((handle) => {
+      if (terminal) handle.dispose();
+      else formattingHandle.current = handle;
+    }).catch(reject);
+  });
+
+  async function formatDocument() {
+    const document = documentQuery.data;
+    if (!paper || !document || !formattingModel || !formattingProvider) return;
+    if (!formattingCredentialReady) {
+      setFormattingStatus("error");
+      setFormattingError("Store this formatting model's API key in Settings first.");
+      return;
+    }
+    setFormattingStatus("formatting");
+    setFormattingProgress(0);
+    setFormattingError("");
+    try {
+      const formattedSections: Array<{ id: string; markdown: string }> = [];
+      const totalSections = Math.max(1, document.sections.length);
+      for (let sectionIndex = 0; sectionIndex < document.sections.length; sectionIndex += 1) {
+        const section = document.sections[sectionIndex];
+        const prepared = prepareMarkdownForFormatting(section.markdown);
+        const outputLimit = Math.max(2000, (formattingModel.maxOutputTokens - 512) * 3);
+        const contextLimit = Math.max(2000, (formattingModel.maxContextTokens - formattingModel.maxOutputTokens - 2000) * 3);
+        const chunks = splitMarkdownForFormatting(prepared.promptText, Math.min(outputLimit, contextLimit, 12000));
+        const outputs: string[] = [];
+        for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+          outputs.push(await streamFormattedChunk(chunks[chunkIndex]));
+          setFormattingProgress(Math.round(((sectionIndex + (chunkIndex + 1) / chunks.length) / totalSections) * 100));
+        }
+        formattedSections.push({ id: section.id, markdown: restoreFormattedMarkdown(outputs.join("\n\n"), prepared.anchors) });
+      }
+      const saved = await saveFormattedDocument(root, {
+        paperId: paper.id,
+        sections: formattedSections,
+        modelId: formattingModel.id,
+        promptVersion: MARKDOWN_FORMAT_PROMPT_VERSION,
+        sourceSha256: document.source_sha256,
+      });
+      queryClient.setQueryData(["paper-document", root, paper.id], saved);
+      await markdownQuery.refetch();
+      setFormattingProgress(100);
+      setFormattingStatus("saved");
+    } catch (error) {
+      setFormattingStatus("error");
+      setFormattingError(error instanceof Error ? error.message : String(error));
+    } finally {
+      formattingHandle.current?.dispose();
+      formattingHandle.current = null;
+    }
+  }
+
+  const captureSelection = (block: ReaderBlock, event: ReactMouseEvent<HTMLElement>) => {
     const selected = window.getSelection();
     const text = selected?.toString().trim();
     if (!text) return;
+    const range = selected?.rangeCount ? selected.getRangeAt(0) : undefined;
+    const rect = range?.getBoundingClientRect();
     const start = Math.min(selected?.anchorOffset ?? 0, selected?.focusOffset ?? 0);
     const end = Math.max(selected?.anchorOffset ?? text.length, selected?.focusOffset ?? text.length);
-    setSelection({ ...block, id: `${block.id}:selection-${start}-${end}`, text: text.slice(0, 500), start, end });
+    const center = rect && rect.width > 0 ? rect.left + rect.width / 2 : event.clientX;
+    const placeAbove = (rect?.top ?? event.clientY) > 64;
+    setSelection({
+      ...block,
+      text: text.slice(0, 2000),
+      start,
+      end,
+      left: Math.max(120, Math.min(window.innerWidth - 120, center)),
+      top: placeAbove ? (rect?.top ?? event.clientY) - 8 : (rect?.bottom ?? event.clientY) + 8,
+      placement: placeAbove ? "above" : "below",
+    });
   };
 
   return <div className="reader-workspace">
+    {selection && <div ref={selectionToolbar} className={`selection-popover ${selection.placement}`} style={{ left: selection.left, top: selection.top }} role="toolbar" aria-label="Selected text actions"><button title="Translate selected text" onClick={() => void translate(selection)}><Languages size={14} /> Translate</button><button title="Explain selected text" onClick={() => void explain("theorem", selection)}><Sparkles size={14} /> Explain</button><button className="icon-button" title="Close" onClick={() => setSelection(null)}><X size={14} /></button></div>}
     <div className="reader-toolbar">
       <button onClick={() => setView("library")}><ChevronLeft size={13} /> Library</button>
       <strong title={paper.title}>{paper.title}</strong>
       <div className="reader-mode-switch"><button className={mode === "integrated" ? "active" : ""} onClick={() => setMode("integrated")}>Integrated Reading</button><button className={mode === "pdf" ? "active" : ""} onClick={() => setMode("pdf")}>PDF Only</button><button className={mode === "figures" ? "active" : ""} onClick={() => setMode("figures")}>Figures</button></div>
-      <button><Search size={13} /> Find</button><button className={fullText ? "active" : ""} disabled={contextBusy === "paper"} onClick={() => void togglePaperContext()}><Layers3 size={13} /> {fullText ? `Paper Context · ${contextPercent}%` : "Load Full Text"}</button><button className="reader-agent-toggle" onClick={() => setAgentOpen(true)}><Bot size={13} /> Ask AI</button>
+      <button><Search size={13} /> Find</button><button className={formattingStatus === "saved" ? "active" : ""} disabled={formattingStatus === "formatting"} title={formattingError || `Format Markdown with ${formattingModel?.displayName ?? "the selected model"}`} onClick={() => void formatDocument()}>{formattingStatus === "formatting" ? <LoaderCircle className="spin" size={13} /> : <WandSparkles size={13} />} {formattingStatus === "formatting" ? `${formattingProgress}%` : "Format"}</button><button className={fullText ? "active" : ""} disabled={contextBusy === "paper"} onClick={() => void togglePaperContext()}><Layers3 size={13} /> {fullText ? `Paper Context · ${contextPercent}%` : "Load Full Text"}</button><button className="reader-agent-toggle" onClick={() => setAgentOpen(true)}><Bot size={13} /> Ask AI</button>
     </div>
     <div className="reader-main">
       <aside className="reader-outline"><span>Sections</span>{sections.map((section, index) => <button key={section.id} className={activeSection === section.id ? "active" : ""} style={{ paddingLeft: `${10 + Math.max(0, section.level - 1) * 12}px` }} onClick={() => { setActiveSection(section.id); document.getElementById(`reader-section-${section.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" }); }}><b>{String(index + 1).padStart(2, "0")}</b><span>{section.title}</span><small>{section.pageStart ? section.pageStart === section.pageEnd ? `p. ${section.pageStart}` : `pp. ${section.pageStart}-${section.pageEnd}` : `${section.blocks.length}`}</small></button>)}</aside>
       <main className="reader-canvas" ref={readerCanvas}>
         {mode === "integrated" && <article className="integrated-paper">
           <header className="paper-reading-header"><span className="tag tag-primary">STRUCTURED DOCUMENT</span><h1>{paper.title}</h1><p>Local document · {paper.pageCount || "—"} pages · Updated {new Date(paper.updatedAt).toLocaleDateString()}</p></header>
-          {selection && <div className="selection-toolbar"><span className="tag tag-ai">Selected {selection.start}:{selection.end}</span><strong>“{selection.text.slice(0, 64)}”</strong><button onClick={() => void translate(selection)}><Languages size={12} /> Translate word</button><button onClick={() => void explain("theorem", selection)}><Sparkles size={12} /> Explain</button><button onClick={() => setSelection(null)}>Close</button></div>}
+          {formattingStatus === "error" && <div className="formatting-notice error"><TriangleAlert size={13} /> {formattingError}</div>}
           {markdownQuery.isLoading || documentQuery.isLoading ? <div className="document-loading">Loading structured document…</div> : sections.map((section, sectionIndex) => <section id={`reader-section-${section.id}`} data-section-id={section.id} className={`reading-section ${activeSection === section.id ? "active" : ""}`} key={section.id}>
             <header><div className="section-heading"><span className="section-kicker">Section {String(sectionIndex + 1).padStart(2, "0")}</span><h2>{section.title}</h2><span>{section.blocks.length} paragraphs{section.pageStart ? ` · ${section.pageStart === section.pageEnd ? `page ${section.pageStart}` : `pages ${section.pageStart}-${section.pageEnd}`}` : ""}</span></div><button disabled={contextBusy === section.id} onClick={() => void addContext(section.id, undefined, section.blocks.map((block) => block.text).join("\n\n"))}><Layers3 size={12} /> {contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.sectionId === section.id && !item.blockId) ? "Added" : "Add Section"}</button></header>
             <div className="paragraph-stack">{section.blocks.map((block, blockIndex) => {
@@ -585,8 +735,9 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
               const hasFormula = /\$|\\\[|\\begin\{equation/.test(block.text);
               const explanationType = activeAnalysis?.blockId === block.id ? activeAnalysis.type : hasFormula ? "formula" : "theorem";
               const explanation = analysisStates[analysisKey(block.id, explanationType)] ?? persistedAnalyses[analysisKey(block.id, explanationType)];
-              return <div className={`paragraph-card ${activeBlock === block.id ? "active" : ""}`} key={block.id} onMouseUp={() => captureSelection(block)}>
-                <div className="paragraph-main"><span className="paragraph-number">{sectionIndex ? `${sectionIndex}.${blockIndex + 1}` : `A${blockIndex + 1}`}</span><div className="paragraph-markdown"><MarkdownBlock value={block.text} /></div><div className="paragraph-actions"><button onClick={() => void translate(block)}><Languages size={12} /> Translate</button><button onClick={() => void explain(hasFormula ? "formula" : "theorem", block)}><Sparkles size={12} /> Explain</button><button disabled={contextBusy === block.id} onClick={() => void addContext(block.sectionId, block.id, block.text)}><Layers3 size={12} /> {contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.blockId === block.id) ? "Added" : "Add"}</button></div></div>
+              return <div className={`paragraph-card ${activeBlock === block.id ? "active" : ""}`} key={block.id} onMouseUp={(event) => captureSelection(block, event)}>
+                <div className="paragraph-main"><span className="paragraph-number">{sectionIndex ? `${sectionIndex}.${blockIndex + 1}` : `A${blockIndex + 1}`}</span><div className="paragraph-markdown"><MarkdownBlock value={block.text} /></div></div>
+                <div className="paragraph-actions"><button title="Translate paragraph" aria-label="Translate paragraph" onClick={() => void translate(block)}><Languages size={14} /></button><button title={hasFormula ? "Explain formula" : "Explain paragraph"} aria-label={hasFormula ? "Explain formula" : "Explain paragraph"} onClick={() => void explain(hasFormula ? "formula" : "theorem", block)}><Sparkles size={14} /></button><button className={contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.blockId === block.id) ? "active" : ""} title="Add paragraph to context" aria-label="Add paragraph to context" disabled={contextBusy === block.id} onClick={() => void addContext(block.sectionId, block.id, block.text)}><Layers3 size={14} /></button></div>
                 {state && <TranslationPanel block={block} state={state} onSave={() => void persistTranslation(block, state)} onRetry={() => void translate(block)} onCancel={() => void cancelTranslation(block.id)} />}
                 {explanation && <AnalysisCard block={block} type={explanationType} state={explanation} onSave={() => void persistAnalysis(block, explanationType, explanation)} onRetry={() => void explain(explanationType, block)} onCancel={() => void streamHandles.current.get(`analysis:${analysisKey(block.id, explanationType)}`)?.cancel()} onFollowUp={() => { setChatInput(`Follow up on the ${explanationType} explanation for ${block.sectionId}/${block.id}: `); setAgentOpen(true); }} />}
               </div>;

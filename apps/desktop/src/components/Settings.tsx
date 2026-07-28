@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Bot, CheckCircle2, Eye, EyeOff, LoaderCircle, Plus, ShieldCheck, Trash2, Wifi } from "lucide-react";
+import { Bot, CheckCircle2, Eye, EyeOff, FileText, LoaderCircle, Plus, ShieldCheck, Trash2, Wifi } from "lucide-react";
 import type { CredentialSummary, ProviderConfig } from "@p2i/contracts";
 import {
   deleteOcrCredential,
@@ -15,7 +15,17 @@ import { nativeRuntime, uninstallApplication } from "../lib/bridge";
 import { useWorkspace, type ModelApiFormat } from "../store";
 
 export function Settings() {
-  const { customModels, providers, addCustomModel, removeCustomModel } = useWorkspace();
+  const {
+    customModels,
+    providers,
+    markdownFormattingModelId,
+    autoFormatMarkdown,
+    addCustomModel,
+    updateCustomModel,
+    removeCustomModel,
+    setMarkdownFormattingModelId,
+    setAutoFormatMarkdown,
+  } = useWorkspace();
   const [configured, setConfigured] = useState(false);
   const [workspaceId, setWorkspaceId] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -29,6 +39,7 @@ export function Settings() {
   const [modelBaseUrl, setModelBaseUrl] = useState("");
   const [modelFormat, setModelFormat] = useState<ModelApiFormat>("openai");
   const [modelApiKey, setModelApiKey] = useState("");
+  const [modelMaxContext, setModelMaxContext] = useState(128000);
   const [providerSummaries, setProviderSummaries] = useState<Record<string, CredentialSummary>>({});
 
   const run = async (action: () => Promise<void>) => {
@@ -109,7 +120,7 @@ export function Settings() {
       providerId: provider.id,
       displayName: modelName.trim() || id,
       model: id,
-      maxContextTokens: 128000,
+      maxContextTokens: Math.max(4096, Math.min(2_000_000, modelMaxContext)),
       maxOutputTokens: 4096,
     };
     await saveProviderCredential(provider, modelApiKey);
@@ -119,6 +130,7 @@ export function Settings() {
     setModelId("");
     setModelBaseUrl("");
     setModelApiKey("");
+    setModelMaxContext(128000);
     setStatus(`Custom model ${id} is available to every AI stage.`);
   });
 
@@ -150,6 +162,7 @@ export function Settings() {
           return <div className="model-registry-row" key={model.id}>
             <span className="model-format-badge">{provider?.format === "anthropic" ? "Anthropic" : "OpenAI"}</span>
             <span className="model-registry-copy"><strong>{model.displayName}</strong><small>{model.model} / {provider?.baseUrl ?? "Missing provider"} / {providerConfigured ? "Credential stored" : "Needs key"}</small></span>
+            <label className="model-context-limit"><span>Context</span><input aria-label={`${model.displayName} maximum context tokens`} type="number" min={4096} max={2000000} step={1024} defaultValue={model.maxContextTokens} onBlur={(event) => { const value = Math.max(4096, Math.min(2_000_000, Number(event.target.value) || 128000)); event.currentTarget.value = String(value); updateCustomModel(model.id, { maxContextTokens: value }); }} /><small>tokens</small></label>
             <button className="icon-button small" onClick={() => void testModel(model.id)} title={`Test ${model.displayName}`} disabled={busy || !providerConfigured}><Wifi size={14} /></button>
             <button className="icon-button small" onClick={() => void removeModel(model.id)} title={`Remove ${model.displayName}`} disabled={busy || customModels.length === 1}><Trash2 size={14} /></button>
           </div>;
@@ -160,16 +173,23 @@ export function Settings() {
         <label><span>Model ID</span><input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="custom-reasoning-model" /></label>
         <label className="model-url-field"><span>Base URL</span><input value={modelBaseUrl} onChange={(event) => setModelBaseUrl(event.target.value)} placeholder="https://gateway.example.com/v1" /></label>
         <label><span>API format</span><select value={modelFormat} onChange={(event) => setModelFormat(event.target.value as ModelApiFormat)}><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option></select></label>
+        <label><span>Maximum context tokens</span><input type="number" min={4096} max={2000000} step={1024} value={modelMaxContext} onChange={(event) => setModelMaxContext(Number(event.target.value))} /></label>
         <label className="model-url-field"><span>API key</span><input type="password" value={modelApiKey} onChange={(event) => setModelApiKey(event.target.value)} placeholder="Stored only in Stronghold" autoComplete="off" /></label>
         <button className="primary-button compact model-add-button" onClick={() => void addModel()} disabled={busy}><Plus size={14} /> Add model</button>
       </div>
     </section>
-    <section className="settings-section"><div className="settings-heading"><div><h2>Stronghold vault</h2><p>Automatically unlocked with a random key held by the operating system credential store.</p></div><ShieldCheck size={18} /></div><div className="vault-state"><span>{configured ? "Qwen credential stored" : "Vault ready"}</span><strong>{configured ? "Configured" : "Not configured"}</strong></div></section>
-    <section className="settings-section"><div className="settings-heading"><div><h2>Alibaba Cloud Model Studio</h2><p>Beijing region | OpenAI-compatible API | qwen3.5-ocr</p></div><Wifi size={18} /></div>
-      <div className="form-grid"><label><span>Workspace ID <small>optional</small></span><input value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)} placeholder="Only required for dedicated business spaces" /></label><label><span>Custom Base URL <small>optional</small></span><input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="Public Beijing endpoint by default" /></label><label className="full-field"><span>DashScope API key</span><div className="secret-input"><input type={showKey ? "text" : "password"} value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={configured ? "Enter a new key to replace the stored credential" : "sk-..."} autoComplete="off" /><button type="button" onClick={() => setShowKey((value) => !value)} title={showKey ? "Hide key" : "Show key"}>{showKey ? <EyeOff size={16} /> : <Eye size={16} />}</button></div></label></div>
-      <label className="consent-box"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} /><span><strong>Allow all PDF pages to be sent to Alibaba Cloud for OCR</strong><small>Each page is rendered locally, cached by hash, and sent only after consent.</small></span></label>
-      <div className="settings-actions"><button className="primary-button" onClick={save} disabled={busy || !apiKey || !consent}>{busy ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={15} />} Save securely</button><button className="secondary-button" onClick={test} disabled={busy || !configured}><Wifi size={15} /> Test connection</button><button className="danger-button" onClick={remove} disabled={busy || !configured}><Trash2 size={15} /> Remove</button></div>
-      {status && <div className="settings-status"><CheckCircle2 size={15} /> {status}</div>}
+    {status && <div className="settings-status settings-global-status"><CheckCircle2 size={15} /> {status}</div>}
+    <section className="settings-section document-processing-section"><div className="settings-heading"><div><h2>Document processing</h2><p>Choose how extracted Markdown is cleaned and configure optional full-page OCR.</p></div><FileText size={18} /></div>
+      <div className="document-formatting-controls">
+        <label><span>Markdown formatting model</span><select value={markdownFormattingModelId} onChange={(event) => setMarkdownFormattingModelId(event.target.value)}>{customModels.map((model) => <option key={model.id} value={model.id}>{model.displayName} · {(model.maxContextTokens / 1000).toFixed(0)}K context</option>)}</select></label>
+        <label className="processing-toggle"><input type="checkbox" checked={autoFormatMarkdown} onChange={(event) => setAutoFormatMarkdown(event.target.checked)} /><span><strong>Automatically format parsed Markdown</strong><small>Runs once per paper and selected model. Formatting preserves wording, citations, formulas and evidence anchors.</small></span></label>
+      </div>
+      <details className="ocr-settings-inline">
+        <summary><span><strong>Full-page OCR</strong><small>qwen3.5-ocr · encrypted credential · Beijing endpoint</small></span><em className={`tag ${configured ? "tag-success" : ""}`}>{configured ? "Configured" : "Optional"}</em></summary>
+        <div className="form-grid"><label><span>Workspace ID <small>optional</small></span><input value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)} placeholder="Only required for dedicated business spaces" /></label><label><span>Custom Base URL <small>optional</small></span><input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="Public Beijing endpoint by default" /></label><label className="full-field"><span>OCR API key</span><div className="secret-input"><input type={showKey ? "text" : "password"} value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={configured ? "Enter a new key to replace the stored credential" : "sk-..."} autoComplete="off" /><button type="button" onClick={() => setShowKey((value) => !value)} title={showKey ? "Hide key" : "Show key"}>{showKey ? <EyeOff size={16} /> : <Eye size={16} />}</button></div></label></div>
+        <label className="consent-box"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} /><span><strong>Allow PDF pages to be sent to Alibaba Cloud for OCR</strong><small>Each page is rendered locally, cached by hash, and sent only after consent.</small></span></label>
+        <div className="settings-actions"><button className="primary-button" onClick={save} disabled={busy || !apiKey || !consent}>{busy ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={15} />} Save securely</button><button className="secondary-button" onClick={test} disabled={busy || !configured}><Wifi size={15} /> Test connection</button><button className="danger-button" onClick={remove} disabled={busy || !configured}><Trash2 size={15} /> Remove</button></div>
+      </details>
     </section>
     <section className="security-facts"><div><span>Python engine</span><strong>No API key access</strong></div><div><span>SQLite & logs</span><strong>Secret redacted</strong></div><div><span>Request concurrency</span><strong>2 pages</strong></div><div><span>Retry policy</span><strong>2 / 4 / 8 seconds</strong></div></section>
     {nativeRuntime && <section className="settings-section app-management"><div className="settings-heading"><div><h2>Application</h2><p>Remove the desktop app while keeping the independent paper library.</p></div><Trash2 size={18} /></div><button className="danger-button" onClick={uninstall} disabled={busy}><Trash2 size={15} /> Uninstall Papers2Innovations</button></section>}

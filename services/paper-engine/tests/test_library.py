@@ -575,3 +575,41 @@ def test_engine_restart_resumes_interrupted_job(tmp_path: Path) -> None:
     assert restarted.list_papers()[0]["status"] == "PARTIAL"
     with restarted.db.connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM parse_runs").fetchone()[0] == 2
+
+
+def test_ai_formatted_markdown_is_validated_and_persisted(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    make_pdf(library.papers_dir / "format-me.pdf", pages=2)
+    library.scan()
+    paper = library.list_papers()[0]
+    document = library.read_document(paper["id"])
+    formatted_sections = [
+        {
+            "id": section["id"],
+            "markdown": f'{section["markdown"]}\n\nAI formatted paragraph.',
+        }
+        for section in document["sections"]
+    ]
+
+    saved = library.save_formatted_document(
+        paper["id"],
+        formatted_sections,
+        "model-format",
+        "markdown-format-v1",
+        document["source_sha256"],
+    )
+
+    assert saved["formatting"]["model_id"] == "model-format"
+    assert saved["formatting"]["prompt_version"] == "markdown-format-v1"
+    assert "AI formatted paragraph" in library.read_markdown(paper["id"])
+    with library.db.connect() as connection:
+        stored = connection.execute(
+            "SELECT markdown FROM sections WHERE paper_id = ?", (paper["id"],)
+        ).fetchone()["markdown"]
+    assert "AI formatted paragraph" in stored
+
+    with pytest.raises(ValueError, match="content changed"):
+        library.save_formatted_document(
+            paper["id"], formatted_sections, "model-format", "markdown-format-v1", "wrong"
+        )

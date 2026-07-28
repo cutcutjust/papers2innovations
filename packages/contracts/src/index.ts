@@ -59,6 +59,13 @@ export interface PaperDocumentFigure {
   mime_type: string;
 }
 
+export interface MarkdownFormattingInfo {
+  model_id: string;
+  prompt_version: string;
+  source_sha256: string;
+  updated_at: string;
+}
+
 export interface PaperDocument {
   schema_version: "1.0";
   paper_id: string;
@@ -72,6 +79,7 @@ export interface PaperDocument {
   figures: PaperDocumentFigure[];
   tables: Array<{ id: string; caption?: string; markdown: string; page?: number }>;
   parser: { name: string; version: string };
+  formatting?: MarkdownFormattingInfo;
   generated_at: string;
 }
 

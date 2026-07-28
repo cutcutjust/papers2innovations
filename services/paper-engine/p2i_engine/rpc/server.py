@@ -121,6 +121,14 @@ class RpcServer:
             }
         if method == "paper.read_document":
             return self.library(params["root"]).read_document(params["paperId"])
+        if method == "paper.format_markdown_save":
+            return self.library(params["root"]).save_formatted_document(
+                params["paperId"],
+                params.get("sections", []),
+                params["modelId"],
+                params["promptVersion"],
+                params["sourceSha256"],
+            )
         if method == "paper.read_references":
             return self.library(params["root"]).read_references(params["paperId"])
         if method == "graph.build":
