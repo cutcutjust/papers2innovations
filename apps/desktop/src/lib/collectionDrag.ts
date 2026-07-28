@@ -6,7 +6,13 @@ const DRAG_EVENT = "p2i:collection-drag";
 const DROP_EVENT = "p2i:collection-pointer-drop";
 let activePayload: CollectionDragPayload | null = null;
 let activeTargetId = "";
-let pointerSession: { payload: CollectionDragPayload; pointerId: number; startX: number; startY: number; dragging: boolean } | null = null;
+type PointerCaptureTarget = {
+  setPointerCapture?: (pointerId: number) => void;
+  hasPointerCapture?: (pointerId: number) => boolean;
+  releasePointerCapture?: (pointerId: number) => void;
+};
+type PointerDragStart = { button: number; pointerId: number; clientX: number; clientY: number; currentTarget?: PointerCaptureTarget };
+let pointerSession: { payload: CollectionDragPayload; pointerId: number; startX: number; startY: number; dragging: boolean; source?: PointerCaptureTarget } | null = null;
 
 export function beginCollectionDrag(payload: CollectionDragPayload, transfer?: DataTransfer): void {
   activePayload = payload;
@@ -23,6 +29,7 @@ export function beginCollectionDrag(payload: CollectionDragPayload, transfer?: D
 }
 
 export function finishCollectionDrag(): void {
+  cleanupPointerSession();
   activePayload = null;
   activeTargetId = "";
   dispatchDragState();
@@ -48,10 +55,16 @@ export function subscribeCollectionDrag(listener: (payload: CollectionDragPayloa
   return () => window.removeEventListener(DRAG_EVENT, handle);
 }
 
-export function startPointerCollectionDrag(payload: CollectionDragPayload, event: { button: number; pointerId: number; clientX: number; clientY: number }): void {
+export function startPointerCollectionDrag(payload: CollectionDragPayload, event: PointerDragStart): void {
   if (event.button !== 0 || typeof window === "undefined") return;
   cleanupPointerSession();
-  pointerSession = { payload, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, dragging: false };
+  const source = event.currentTarget;
+  try {
+    source?.setPointerCapture?.(event.pointerId);
+  } catch {
+    // WebView2 may reject capture during a transient render; window listeners remain the fallback.
+  }
+  pointerSession = { payload, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, dragging: false, source };
   window.addEventListener("pointermove", handlePointerMove, true);
   window.addEventListener("pointerup", handlePointerUp, true);
   window.addEventListener("pointercancel", handlePointerCancel, true);
@@ -103,10 +116,16 @@ function handlePointerCancel(event: PointerEvent): void {
 }
 
 function cleanupPointerSession(): void {
+  const session = pointerSession;
   if (typeof window !== "undefined") {
     window.removeEventListener("pointermove", handlePointerMove, true);
     window.removeEventListener("pointerup", handlePointerUp, true);
     window.removeEventListener("pointercancel", handlePointerCancel, true);
+  }
+  try {
+    if (session?.source?.hasPointerCapture?.(session.pointerId)) session.source.releasePointerCapture?.(session.pointerId);
+  } catch {
+    // The source can disappear after a React render; capture is released automatically in that case.
   }
   pointerSession = null;
 }

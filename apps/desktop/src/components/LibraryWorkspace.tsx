@@ -72,7 +72,7 @@ export function LibraryWorkspace({ papers, allPapers, collections, selected, sca
           <div className="paper-table-head"><span>标题</span><span>状态</span><span>页数</span><span>更新时间</span><span /></div>
           <div className="figma-paper-table">
             {papers.map((paper) => (
-              <button key={paper.id} className={`figma-paper-row ${selectedPaperId === paper.id ? "selected" : ""} ${draggingPaperId === paper.id ? "dragging" : ""}`} onClick={() => selectPaper(paper.id)} onDoubleClick={() => openReader(paper.id)} onPointerDown={(event) => { selectPaper(paper.id); startPointerCollectionDrag({ kind: "paper", id: paper.id }, event); }} title="拖动到左侧分类完成归组">
+              <button key={paper.id} className={`figma-paper-row ${selectedPaperId === paper.id ? "selected" : ""} ${draggingPaperId === paper.id ? "dragging" : ""}`} onClick={() => selectPaper(paper.id)} onDoubleClick={() => openReader(paper.id)} onPointerDown={(event) => startPointerCollectionDrag({ kind: "paper", id: paper.id }, event)} title="拖动到左侧分类完成归组">
                 <span className="paper-title-cell"><span className="paper-doc-icon"><FileText size={15} /></span><span><strong>{paper.title}</strong><small>{paper.sourcePath}</small><em>{paper.collectionIds[0] ? collectionNames.get(paper.collectionIds[0]) ?? "已分类" : "未分类"}</em></span></span>
                 <span><Status status={paper.status} /></span>
                 <span className="mono-cell">{paper.pageCount || "—"}</span>
