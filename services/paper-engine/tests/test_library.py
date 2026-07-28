@@ -6,9 +6,12 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from PIL import Image
 from pypdf import PdfWriter
 
 from p2i_engine.library import Library
+from p2i_engine.database import Database
+from p2i_engine.models import PaperDocument, PaperFigure, PaperSection, ParserInfo
 
 
 @pytest.fixture(autouse=True)
@@ -36,7 +39,123 @@ def test_initializes_versioned_library_layout(tmp_path: Path) -> None:
 
     with sqlite3.connect(result["database"]) as connection:
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-        assert version == 12
+        assert version == 13
+
+
+def test_migration_0013_upgrades_existing_0012_context_without_data_loss(tmp_path: Path) -> None:
+    database_path = tmp_path / ".p2i" / "library.sqlite"
+    database_path.parent.mkdir(parents=True)
+    migration_dir = Path(__file__).resolve().parents[1] / "migrations"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+        for migration in sorted(migration_dir.glob("*.sql")):
+            version = int(migration.stem.split("_", 1)[0])
+            if version > 12:
+                continue
+            connection.executescript(migration.read_text(encoding="utf-8"))
+            connection.execute("INSERT INTO schema_migrations VALUES (?, 'test')", (version,))
+        connection.execute(
+            "INSERT INTO papers(id, canonical_sha256, title, status, created_at, updated_at) "
+            "VALUES ('paper-1', 'hash', 'Existing paper', 'READY', 'test', 'test')"
+        )
+        connection.execute(
+            "INSERT INTO context_items(id, paper_id, mode, source_hash, source_text, estimated_tokens, created_at, updated_at) "
+            "VALUES ('context-1', 'paper-1', 'full', 'hash', 'Existing context', 4, 'test', 'test')"
+        )
+    Database(database_path).migrate()
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 13
+        assert connection.execute(
+            "SELECT scope_id FROM context_scope_items WHERE context_item_id = 'context-1'"
+        ).fetchone()[0] == "research:default"
+
+
+def test_paper_and_research_contexts_are_isolated_and_custom_items_are_editable(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    make_pdf(library.papers_dir / "scoped-context.pdf")
+    library.scan()
+    paper = library.list_papers()[0]
+    paper_scope = f"paper:{paper['id']}"
+
+    research = library.add_selection_to_context({
+        "paperId": paper["id"], "sectionId": "research", "blockId": "research-note",
+        "sourceText": "Research-only evidence.",
+    })
+    paper_draft = library.add_paper_to_context(paper["id"], "full", paper_scope)
+    assert research["scope"]["id"] == "research:default"
+    assert paper_draft["scope"]["id"] == paper_scope
+    assert all(item["sectionId"] != "research" for item in paper_draft["items"])
+
+    created = library.upsert_scoped_context_item({
+        "scopeId": paper_scope, "paperId": paper["id"], "title": "阅读笔记",
+        "text": "First custom note.",
+    })
+    custom = next(item for item in created["items"] if item["itemType"] == "custom")
+    updated = library.upsert_scoped_context_item({
+        "scopeId": paper_scope, "itemId": custom["id"], "title": "修订笔记",
+        "text": "Revised custom note.",
+    })
+    assert next(item for item in updated["items"] if item["id"] == custom["id"])["sourcePreview"] == "Revised custom note."
+    library.delete_scoped_context_item(paper_scope, custom["id"])
+    assert all(item["id"] != custom["id"] for item in Library(tmp_path).get_context_draft(paper_scope)["items"])
+    assert Library(tmp_path).get_context_draft()["items"][0]["sectionId"] == "research"
+
+
+def test_structured_translation_and_reader_annotation_round_trip(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    make_pdf(library.papers_dir / "translation.pdf")
+    library.scan()
+    paper = library.list_papers()[0]
+    record = library.save_translation({
+        "paperId": paper["id"], "sectionId": "intro", "blockId": "intro:block-1",
+        "sourceText": "First result.", "translatedText": "第一个结果。", "targetLanguage": "zh-CN",
+        "modelId": "model", "promptVersion": "reader-translate-v3", "sourceStart": 0,
+        "sourceEnd": 13, "segments": [{"id": "sentence-1", "sourceStart": 0,
+        "sourceEnd": 13, "sourceText": "First result.", "translatedText": "第一个结果。"}],
+        "terms": [{"text": "result", "translation": "结果", "explanation": "实验结果", "kind": "term"}],
+    })
+    annotation = library.save_reader_annotation({
+        "paperId": paper["id"], "sectionId": "intro", "blockId": "intro:block-1",
+        "sourceStart": 0, "sourceEnd": 5, "annotationType": "chat", "relatedId": "turn-1",
+    })
+    assert record["segments"][0]["translatedText"] == "第一个结果。"
+    assert record["terms"][0]["kind"] == "term"
+    assert library.list_reader_annotations(paper["id"])[0]["id"] == annotation["id"]
+
+
+def test_figure_analysis_uses_content_model_prompt_cache(tmp_path: Path) -> None:
+    calls: list[dict] = []
+    library = Library(
+        tmp_path,
+        vision_config=lambda: {"modelId": "vision-model"},
+        vision_analyze=lambda params: calls.append(params) or {
+            "description": "## 图意概述\n\n缓存测试。", "modelId": "vision-model",
+            "usage": {"inputTokens": 10, "outputTokens": 8, "durationMs": 20},
+        },
+    )
+    library.initialize()
+    source = library.papers_dir / "vision.pdf"
+    make_pdf(source)
+    library.scan()
+    paper = library.list_papers()[0]
+    source_hash = library.read_document(paper["id"])["source_sha256"]
+    output = library.generated_dir / paper["id"]
+    (output / "figures").mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (32, 32), "white").save(output / "figures" / "figure-1.png")
+    document = PaperDocument(
+        paper_id=paper["id"], source_sha256=source_hash, title="Vision paper",
+        page_count=1, parser=ParserInfo(name="test", version="1"),
+        sections=[PaperSection(id="intro", title="Introduction", order=0, markdown="Plain text.")],
+        figures=[PaperFigure(id="figure-1", relative_path="figures/figure-1.png")],
+    )
+    library._preprocess_visual_artifacts(paper["id"], source_hash, document.title, source, output, document)
+    library._preprocess_visual_artifacts(paper["id"], source_hash, document.title, source, output, document)
+    assert len(calls) == 1
+    analysis = library.list_figure_analyses(paper["id"])[0]
+    assert analysis["status"] == "completed"
+    assert analysis["usage"]["outputTokens"] == 8
 
 
 def test_collection_tree_move_filter_and_delete_are_persistent(tmp_path: Path) -> None:

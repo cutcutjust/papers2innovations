@@ -6,6 +6,7 @@ import {
   Eye,
   EyeOff,
   FileText,
+  Image as ImageIcon,
   KeyRound,
   LoaderCircle,
   Pencil,
@@ -68,6 +69,7 @@ export function Settings() {
     markdownFormattingModelId,
     autoFormatMarkdown,
     fullPageOcrModelId,
+    visionAnalysisModelId,
     ocrConsent,
     setView,
     addCustomModel,
@@ -75,6 +77,7 @@ export function Settings() {
     setMarkdownFormattingModelId,
     setAutoFormatMarkdown,
     setFullPageOcrModelId,
+    setVisionAnalysisModelId,
     setOcrConsent,
   } = useWorkspace();
   const [status, setStatus] = useState<SettingsStatus | null>(null);
@@ -343,6 +346,7 @@ export function Settings() {
       <div className="settings-heading"><div><h2>文档处理</h2><p>为处理任务指定已配置的模型，无需重复保存密钥。</p></div><Bot size={18} /></div>
       <div className="workflow-row"><span className="workflow-icon markdown"><FileText size={17} /></span><span className="workflow-copy"><strong>Markdown 整理</strong><small>保留引用与公式，整理解析文本的结构和换行</small></span><select aria-label="Markdown 整理模型" value={markdownFormattingModelId} onChange={(event) => setMarkdownFormattingModelId(event.target.value)}>{customModels.map((model) => <option key={model.id} value={model.id}>{model.displayName}</option>)}</select><label className="compact-switch"><input type="checkbox" checked={autoFormatMarkdown} onChange={(event) => setAutoFormatMarkdown(event.target.checked)} /><span /></label></div>
       <div className="workflow-row"><span className="workflow-icon ocr"><ScanText size={17} /></span><span className="workflow-copy"><strong>全文 OCR</strong><small>使用 OpenAI 兼容的视觉模型识别渲染页面</small></span><select aria-label="全文 OCR 模型" value={fullPageOcrModelId} onChange={(event) => void assignOcrModel(event.target.value)} disabled={busyAction === "assign-ocr"}><option value="">关闭</option>{ocrModels.map((model) => <option key={model.id} value={model.id}>{model.displayName}</option>)}</select><button className="icon-button" onClick={() => void testOcr()} title="测试全文 OCR" disabled={!fullPageOcrModelId || !ocrConsent || Boolean(busyAction)}>{busyAction === "test-ocr" ? <LoaderCircle className="spin" size={15} /> : <Wifi size={15} />}</button></div>
+      <div className="workflow-row"><span className="workflow-icon vision"><ImageIcon size={17} /></span><span className="workflow-copy"><strong>图片解读</strong><small>导入后自动分析插图，并修复质量检查发现的可疑公式</small></span><select aria-label="图片解读模型" value={visionAnalysisModelId} onChange={(event) => setVisionAnalysisModelId(event.target.value)}><option value="">未配置</option>{customModels.map((model) => <option key={model.id} value={model.id}>{model.displayName}</option>)}</select><span className={`workflow-state ${visionAnalysisModelId ? "ready" : "off"}`}>{visionAnalysisModelId ? "自动" : "关闭"}</span></div>
       <div className="ocr-consent-row"><ShieldCheck size={16} /><span><strong>发送 PDF 页面</strong><small>渲染页会在本地缓存，只有启用后才会发送给所选模型。</small></span><label className="compact-switch"><input type="checkbox" checked={ocrConsent} onChange={(event) => void changeOcrConsent(event.target.checked)} disabled={Boolean(busyAction)} /><span /></label></div>
     </section>
 

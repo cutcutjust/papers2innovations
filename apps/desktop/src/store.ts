@@ -36,8 +36,14 @@ export interface WorkspaceState {
   markdownFormattingModelId: string;
   autoFormatMarkdown: boolean;
   fullPageOcrModelId: string;
+  visionAnalysisModelId: string;
   ocrConsent: boolean;
   fontSize: FontSize;
+  readerZoom: number;
+  readerTheme: "white" | "warm" | "green" | "dark" | "custom";
+  readerBackgroundColor: string;
+  readerTextColor: string;
+  readerTranslationView: "original" | "translated";
   setRoot: (root: string) => void;
   selectPaper: (paperId: string) => void;
   openReader: (paperId?: string) => void;
@@ -55,8 +61,13 @@ export interface WorkspaceState {
   setMarkdownFormattingModelId: (modelId: string) => void;
   setAutoFormatMarkdown: (enabled: boolean) => void;
   setFullPageOcrModelId: (modelId: string) => void;
+  setVisionAnalysisModelId: (modelId: string) => void;
   setOcrConsent: (enabled: boolean) => void;
   setFontSize: (size: FontSize) => void;
+  setReaderZoom: (zoom: number) => void;
+  setReaderTheme: (theme: WorkspaceState["readerTheme"]) => void;
+  setReaderColors: (background: string, text: string) => void;
+  setReaderTranslationView: (view: WorkspaceState["readerTranslationView"]) => void;
   restoreWorkspaceSettings: (snapshot: WorkspaceSettingsSnapshot) => void;
 }
 
@@ -128,8 +139,14 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   markdownFormattingModelId: localStorage.getItem("p2i.markdownFormattingModelId") ?? initialRegistry.models[0]?.id ?? "",
   autoFormatMarkdown: localStorage.getItem("p2i.autoFormatMarkdown") === "true",
   fullPageOcrModelId: localStorage.getItem("p2i.fullPageOcrModelId") ?? "",
+  visionAnalysisModelId: localStorage.getItem("p2i.visionAnalysisModelId") ?? "",
   ocrConsent: localStorage.getItem("p2i.ocrConsent") === "true",
   fontSize: normalizeFontSize(localStorage.getItem("p2i.fontSize")),
+  readerZoom: Math.min(180, Math.max(80, Number(localStorage.getItem("p2i.readerZoom")) || 100)),
+  readerTheme: (localStorage.getItem("p2i.readerTheme") as WorkspaceState["readerTheme"]) || "white",
+  readerBackgroundColor: localStorage.getItem("p2i.readerBackgroundColor") || "#ffffff",
+  readerTextColor: localStorage.getItem("p2i.readerTextColor") || "#20242c",
+  readerTranslationView: localStorage.getItem("p2i.readerTranslationView") === "translated" ? "translated" : "original",
   setRoot: (root) => {
     localStorage.setItem("p2i.libraryRoot", root);
     set({ root });
@@ -162,9 +179,11 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
     persistModelRegistry(providers, customModels);
     const markdownFormattingModelId = state.markdownFormattingModelId === modelId ? customModels[0]?.id ?? "" : state.markdownFormattingModelId;
     const fullPageOcrModelId = state.fullPageOcrModelId === modelId ? "" : state.fullPageOcrModelId;
+    const visionAnalysisModelId = state.visionAnalysisModelId === modelId ? "" : state.visionAnalysisModelId;
     localStorage.setItem("p2i.markdownFormattingModelId", markdownFormattingModelId);
     localStorage.setItem("p2i.fullPageOcrModelId", fullPageOcrModelId);
-    return { providers, customModels, markdownFormattingModelId, fullPageOcrModelId };
+    localStorage.setItem("p2i.visionAnalysisModelId", visionAnalysisModelId);
+    return { providers, customModels, markdownFormattingModelId, fullPageOcrModelId, visionAnalysisModelId };
   }),
   setContextCompressionModelId: (contextCompressionModelId) => {
     localStorage.setItem("p2i.contextCompressionModelId", contextCompressionModelId);
@@ -182,6 +201,10 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
     localStorage.setItem("p2i.fullPageOcrModelId", fullPageOcrModelId);
     set({ fullPageOcrModelId });
   },
+  setVisionAnalysisModelId: (visionAnalysisModelId) => {
+    localStorage.setItem("p2i.visionAnalysisModelId", visionAnalysisModelId);
+    set({ visionAnalysisModelId });
+  },
   setOcrConsent: (ocrConsent) => {
     localStorage.setItem("p2i.ocrConsent", String(ocrConsent));
     set({ ocrConsent });
@@ -189,6 +212,24 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   setFontSize: (fontSize) => {
     localStorage.setItem("p2i.fontSize", fontSize);
     set({ fontSize });
+  },
+  setReaderZoom: (readerZoom) => {
+    const normalized = Math.min(180, Math.max(80, Math.round(readerZoom / 5) * 5));
+    localStorage.setItem("p2i.readerZoom", String(normalized));
+    set({ readerZoom: normalized });
+  },
+  setReaderTheme: (readerTheme) => {
+    localStorage.setItem("p2i.readerTheme", readerTheme);
+    set({ readerTheme });
+  },
+  setReaderColors: (readerBackgroundColor, readerTextColor) => {
+    localStorage.setItem("p2i.readerBackgroundColor", readerBackgroundColor);
+    localStorage.setItem("p2i.readerTextColor", readerTextColor);
+    set({ readerBackgroundColor, readerTextColor, readerTheme: "custom" });
+  },
+  setReaderTranslationView: (readerTranslationView) => {
+    localStorage.setItem("p2i.readerTranslationView", readerTranslationView);
+    set({ readerTranslationView });
   },
   restoreWorkspaceSettings: (snapshot) => {
     const providers = snapshot.providers.map(sanitizeProviderConfig);
@@ -199,8 +240,14 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
     localStorage.setItem("p2i.markdownFormattingModelId", snapshot.markdownFormattingModelId);
     localStorage.setItem("p2i.autoFormatMarkdown", String(snapshot.autoFormatMarkdown));
     localStorage.setItem("p2i.fullPageOcrModelId", snapshot.fullPageOcrModelId);
+    localStorage.setItem("p2i.visionAnalysisModelId", snapshot.visionAnalysisModelId ?? "");
     localStorage.setItem("p2i.ocrConsent", String(snapshot.ocrConsent));
     localStorage.setItem("p2i.fontSize", snapshot.fontSize);
+    localStorage.setItem("p2i.readerZoom", String(snapshot.readerZoom ?? 100));
+    localStorage.setItem("p2i.readerTheme", snapshot.readerTheme ?? "white");
+    localStorage.setItem("p2i.readerBackgroundColor", snapshot.readerBackgroundColor ?? "#ffffff");
+    localStorage.setItem("p2i.readerTextColor", snapshot.readerTextColor ?? "#20242c");
+    localStorage.setItem("p2i.readerTranslationView", snapshot.readerTranslationView ?? "original");
     set({
       root: snapshot.root,
       providers,
@@ -209,8 +256,14 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
       markdownFormattingModelId: snapshot.markdownFormattingModelId,
       autoFormatMarkdown: snapshot.autoFormatMarkdown,
       fullPageOcrModelId: snapshot.fullPageOcrModelId,
+      visionAnalysisModelId: snapshot.visionAnalysisModelId ?? "",
       ocrConsent: snapshot.ocrConsent,
       fontSize: snapshot.fontSize,
+      readerZoom: snapshot.readerZoom ?? 100,
+      readerTheme: snapshot.readerTheme ?? "white",
+      readerBackgroundColor: snapshot.readerBackgroundColor ?? "#ffffff",
+      readerTextColor: snapshot.readerTextColor ?? "#20242c",
+      readerTranslationView: snapshot.readerTranslationView ?? "original",
     });
   },
 }));

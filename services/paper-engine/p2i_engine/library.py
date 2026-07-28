@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import sqlite3
 import time
 import uuid
 from collections.abc import Callable
@@ -14,7 +16,7 @@ import fitz
 from .database import Database
 from .citations import GRAPH_SCHEMA_VERSION, build_two_level_graph, extract_references
 from .ingestion import FileEventQueue
-from .models import CancelledError, JobStatus, ProgressEvent, utc_now
+from .models import CancelledError, JobStatus, PaperDocument, ProgressEvent, utc_now
 from .parsing import parse_pdf
 from .zotero import ZoteroImporter, ZoteroLockedError
 
@@ -133,7 +135,13 @@ INNOVATION_STAGES = ("compression", "evidence", "ideas", "novelty", "critique")
 
 
 class Library:
-    def __init__(self, root: str | Path, ocr_page: Callable[[dict], dict] | None = None):
+    def __init__(
+        self,
+        root: str | Path,
+        ocr_page: Callable[[dict], dict] | None = None,
+        vision_config: Callable[[], dict] | None = None,
+        vision_analyze: Callable[[dict], dict] | None = None,
+    ):
         self.root = Path(root).expanduser().resolve()
         self.papers_dir = self.root / "Papers"
         self.exports_dir = self.root / "Exports"
@@ -145,6 +153,8 @@ class Library:
         self._recovered_jobs: list[dict[str, str]] = []
         self._queue_lock = Lock()
         self.ocr_page = ocr_page
+        self.vision_config = vision_config
+        self.vision_analyze = vision_analyze
 
     def initialize(self, resume_recovered: bool = True) -> dict[str, str]:
         for directory in (
@@ -392,6 +402,190 @@ class Library:
             )
             return paper_id
 
+    @staticmethod
+    def _suspicious_formulas(document: Any) -> tuple[list[tuple[Any, str, int]], int]:
+        formulas: list[tuple[Any, str, int]] = []
+        structural_issues = 0
+        for section in document.sections:
+            text = section.markdown
+            page = section.page_start or (section.anchors[0].page if section.anchors else 1)
+            for match in re.finditer(r"\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]", text):
+                formula = match.group(0)
+                if "�" in formula or "□" in formula or chr(0) in formula:
+                    formulas.append((section, formula, max(1, int(page))))
+            if text.count("$$") % 2:
+                structural_issues += 1
+            if text.count("\\[") != text.count("\\]"):
+                structural_issues += 1
+            if text.count("\\begin{equation") != text.count("\\end{equation"):
+                structural_issues += 1
+        return formulas, structural_issues
+
+    def _preprocess_visual_artifacts(
+        self, paper_id: str, source_hash: str, title: str, source_pdf: Path,
+        output_dir: Path, document: Any
+    ) -> dict[str, Any]:
+        suspicious_formulas, structural_formula_issues = self._suspicious_formulas(document)
+        formula_issues = len(suspicious_formulas) + structural_formula_issues
+        repaired_formulas = 0
+        warnings: list[str] = []
+        analyzed = 0
+        failed = 0
+        model_config: dict[str, Any] | None = None
+        if document.figures or formula_issues:
+            if not self.vision_config or not self.vision_analyze:
+                warnings.append("图片解读模型不可用，插图已保留，可在模型设置完成后重试")
+                failed = len(document.figures)
+            else:
+                try:
+                    model_config = self.vision_config()
+                except Exception as error:  # noqa: BLE001 - host errors become partial artifacts
+                    warnings.append(str(error))
+                    failed = len(document.figures)
+        if model_config and self.vision_analyze and suspicious_formulas:
+            formula_dir = output_dir / "formula-pages"
+            formula_dir.mkdir(parents=True, exist_ok=True)
+            rendered_pages: dict[int, Path] = {}
+            with fitz.open(source_pdf) as pdf:
+                for section, original, page_number in suspicious_formulas:
+                    page_index = min(max(page_number - 1, 0), len(pdf) - 1)
+                    image_path = rendered_pages.get(page_number)
+                    if not image_path:
+                        image_path = formula_dir / f"page-{page_number}.png"
+                        pixmap = pdf[page_index].get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                        pixmap.save(image_path)
+                        rendered_pages[page_number] = image_path
+                    prompt_version = "formula-repair-v1"
+                    cache_key = hashlib.sha256(
+                        f"{source_hash}:{section.id}:{original}:{model_config['modelId']}:{prompt_version}".encode()
+                    ).hexdigest()
+                    with self.db.connect() as connection:
+                        cached = connection.execute(
+                            "SELECT * FROM formula_repairs WHERE cache_key = ?", (cache_key,)
+                        ).fetchone()
+                    repaired = None
+                    confidence = 0.0
+                    if cached:
+                        repaired = cached["repaired_latex"]
+                        confidence = float(cached["confidence"])
+                    else:
+                        try:
+                            response = self.vision_analyze({
+                                "imagePath": str(image_path.resolve()), "figureId": f"formula:{section.id}",
+                                "caption": original, "paperTitle": title, "promptVersion": prompt_version,
+                                "task": "formula", "sourceText": original,
+                            })
+                            raw = str(response.get("description", "")).strip().removeprefix("```json").removesuffix("```").strip()
+                            parsed = json.loads(raw)
+                            repaired = str(parsed.get("repairedLatex", "")).strip()
+                            confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0))))
+                            if repaired:
+                                now = utc_now()
+                                with self.db.connect() as connection:
+                                    connection.execute(
+                                        "INSERT INTO formula_repairs(id, paper_id, section_id, block_id, page, "
+                                        "source_hash, original_text, repaired_latex, confidence, model_id, prompt_version, "
+                                        "cache_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                        (str(uuid.uuid4()), paper_id, section.id, section.id, page_number, source_hash,
+                                         original, repaired, confidence, model_config["modelId"], prompt_version,
+                                         cache_key, now, now),
+                                    )
+                        except Exception as error:  # noqa: BLE001
+                            warnings.append(f"第 {page_number} 页公式修复失败：{error}")
+                    if repaired and confidence >= 0.8:
+                        section.markdown = section.markdown.replace(original, repaired, 1)
+                        repaired_formulas += 1
+        if model_config and self.vision_analyze:
+            for figure in document.figures:
+                image_path = (output_dir / figure.relative_path).resolve()
+                if not image_path.is_file():
+                    failed += 1
+                    continue
+                content_hash = hashlib.sha256(image_path.read_bytes()).hexdigest()
+                prompt_version = "figure-analysis-v1"
+                cache_key = hashlib.sha256(
+                    f"{content_hash}:{model_config['modelId']}:{prompt_version}".encode()
+                ).hexdigest()
+                with self.db.connect() as connection:
+                    cached = connection.execute(
+                        "SELECT status FROM figure_analyses WHERE cache_key = ?", (cache_key,)
+                    ).fetchone()
+                if cached and cached["status"] == "completed":
+                    analyzed += 1
+                    continue
+                started = time.perf_counter()
+                now = utc_now()
+                full_figure_id = f"{paper_id}:{figure.id}"
+                try:
+                    response = self.vision_analyze({
+                        "imagePath": str(image_path),
+                        "figureId": full_figure_id,
+                        "caption": figure.caption or "",
+                        "paperTitle": title,
+                        "promptVersion": prompt_version,
+                    })
+                    description = str(response.get("description", "")).strip()
+                    if not description:
+                        raise ValueError("图片解读模型返回了空内容")
+                    usage = response.get("usage") or {}
+                    record = {
+                        "id": str(uuid.uuid4()), "paper_id": paper_id,
+                        "figure_id": full_figure_id, "source_hash": source_hash,
+                        "content_hash": content_hash, "model_id": str(response.get("modelId") or model_config["modelId"]),
+                        "prompt_version": prompt_version, "status": "completed",
+                        "description": description,
+                        "input_tokens": max(0, int(usage.get("inputTokens", 0))),
+                        "output_tokens": max(0, int(usage.get("outputTokens", 0))),
+                        "duration_ms": max(0, int(usage.get("durationMs", (time.perf_counter() - started) * 1000))),
+                        "error": None, "cache_key": cache_key,
+                        "created_at": now, "updated_at": now,
+                    }
+                    analyzed += 1
+                except Exception as error:  # noqa: BLE001
+                    record = {
+                        "id": str(uuid.uuid4()), "paper_id": paper_id,
+                        "figure_id": full_figure_id, "source_hash": source_hash,
+                        "content_hash": content_hash, "model_id": str(model_config["modelId"]),
+                        "prompt_version": prompt_version, "status": "failed", "description": "",
+                        "input_tokens": 0, "output_tokens": 0,
+                        "duration_ms": int((time.perf_counter() - started) * 1000),
+                        "error": str(error)[:4000], "cache_key": cache_key,
+                        "created_at": now, "updated_at": now,
+                    }
+                    failed += 1
+                with self.db.connect() as connection:
+                    connection.execute(
+                        "INSERT INTO figure_analyses(id, paper_id, figure_id, source_hash, content_hash, "
+                        "model_id, prompt_version, status, description, input_tokens, output_tokens, "
+                        "duration_ms, error, cache_key, created_at, updated_at) VALUES (:id, :paper_id, "
+                        ":figure_id, :source_hash, :content_hash, :model_id, :prompt_version, :status, "
+                        ":description, :input_tokens, :output_tokens, :duration_ms, :error, :cache_key, "
+                        ":created_at, :updated_at) ON CONFLICT(cache_key) DO UPDATE SET status = excluded.status, "
+                        "description = excluded.description, input_tokens = excluded.input_tokens, "
+                        "output_tokens = excluded.output_tokens, duration_ms = excluded.duration_ms, "
+                        "error = excluded.error, updated_at = excluded.updated_at",
+                        record,
+                    )
+        now = utc_now()
+        with self.db.connect() as connection:
+            connection.execute(
+                "INSERT INTO preprocess_quality(paper_id, source_hash, formula_issue_count, "
+                "repaired_formula_count, figure_count, analyzed_figure_count, failed_figure_count, "
+                "warnings_json, updated_at) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(paper_id) DO UPDATE SET source_hash = excluded.source_hash, "
+                "formula_issue_count = excluded.formula_issue_count, figure_count = excluded.figure_count, "
+                "analyzed_figure_count = excluded.analyzed_figure_count, "
+                "failed_figure_count = excluded.failed_figure_count, warnings_json = excluded.warnings_json, "
+                "updated_at = excluded.updated_at",
+                (paper_id, source_hash, formula_issues, len(document.figures), analyzed, failed,
+                 json.dumps(warnings, ensure_ascii=False), now),
+            )
+            connection.execute(
+                "UPDATE preprocess_quality SET repaired_formula_count = ? WHERE paper_id = ?",
+                (repaired_formulas, paper_id),
+            )
+        return {"formulaIssues": formula_issues, "repairedFormulas": repaired_formulas, "analyzed": analyzed, "failed": failed, "warnings": warnings}
+
     def _parse(
         self,
         path: Path,
@@ -422,6 +616,12 @@ class Library:
                 cache_dir=self.internal_dir / "cache" / "ocr" / sha256,
                 ocr_page=self.ocr_page,
             )
+            quality = self._preprocess_visual_artifacts(
+                paper_id, sha256, result.document.title, path, output_dir, result.document
+            )
+            if quality["warnings"]:
+                result.document.warnings.extend(quality["warnings"])
+                result.document.partial = True
             self._progress(callback, job_id, paper_id, JobStatus.EXTRACTING_FIGURES, 0.68, "Extracting figures", request_id)
             markdown_path = output_dir / "paper.md"
             document_path = output_dir / "document.json"
@@ -1421,6 +1621,60 @@ class Library:
         temporary.replace(cache_path)
         return graph
 
+    def list_figure_analyses(self, paper_id: str) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM figure_analyses WHERE paper_id = ? ORDER BY figure_id, updated_at DESC",
+                (paper_id,),
+            ).fetchall()
+        latest: dict[str, Any] = {}
+        for row in rows:
+            latest.setdefault(row["figure_id"], row)
+        return [self._figure_analysis_contract(row) for row in latest.values()]
+
+    def preprocess_status(self, paper_id: str) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM preprocess_quality WHERE paper_id = ?", (paper_id,)
+            ).fetchone()
+        if not row:
+            return {
+                "paperId": paper_id, "sourceHash": "", "formulaIssueCount": 0,
+                "repairedFormulaCount": 0, "figureCount": 0, "analyzedFigureCount": 0,
+                "failedFigureCount": 0, "warnings": [], "updatedAt": None,
+            }
+        return {
+            "paperId": row["paper_id"], "sourceHash": row["source_hash"],
+            "formulaIssueCount": row["formula_issue_count"],
+            "repairedFormulaCount": row["repaired_formula_count"],
+            "figureCount": row["figure_count"], "analyzedFigureCount": row["analyzed_figure_count"],
+            "failedFigureCount": row["failed_figure_count"],
+            "warnings": json.loads(row["warnings_json"] or "[]"), "updatedAt": row["updated_at"],
+        }
+
+    def retry_figure_analysis(self, paper_id: str, figure_id: str) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.db.connect() as connection:
+            paper = connection.execute(
+                "SELECT p.title, p.canonical_sha256, p.document_path, pf.absolute_path AS source_path "
+                "FROM papers p JOIN paper_files pf ON pf.paper_id = p.id AND pf.is_missing = 0 "
+                "WHERE p.id = ? ORDER BY pf.updated_at DESC LIMIT 1", (paper_id,)
+            ).fetchone()
+        if not paper or not paper["document_path"]:
+            raise KeyError(f"Unknown parsed paper: {paper_id}")
+        document = PaperDocument.model_validate_json(
+            Path(paper["document_path"]).read_text(encoding="utf-8")
+        )
+        if not any(f"{paper_id}:{figure.id}" == figure_id for figure in document.figures):
+            raise KeyError(f"Unknown figure: {figure_id}")
+        self._preprocess_visual_artifacts(
+            paper_id, paper["canonical_sha256"], paper["title"], Path(paper["source_path"]),
+            Path(paper["document_path"]).parent, document,
+        )
+        return self.list_figure_analyses(paper_id)
+
     def list_translations(self, paper_id: str) -> list[dict[str, Any]]:
         self.initialize()
         with self.db.connect() as connection:
@@ -1464,6 +1718,10 @@ class Library:
                 "source_hash": paper["canonical_sha256"],
                 "source_text": str(payload["sourceText"]),
                 "translated_text": str(payload["translatedText"]),
+                "source_start": max(0, int(payload.get("sourceStart", 0))),
+                "source_end": int(payload.get("sourceEnd", -1)),
+                "segments_json": json.dumps(payload.get("segments", []), ensure_ascii=False),
+                "terms_json": json.dumps(payload.get("terms", []), ensure_ascii=False),
                 "target_language": str(payload["targetLanguage"]),
                 "model_id": str(payload["modelId"]),
                 "prompt_version": str(payload["promptVersion"]),
@@ -1473,11 +1731,81 @@ class Library:
             }
             connection.execute(
                 "INSERT INTO translations(id, paper_id, section_id, block_id, source_hash, "
-                "source_text, translated_text, target_language, model_id, prompt_version, "
-                "revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                tuple(record.values()),
+                "source_text, translated_text, source_start, source_end, segments_json, terms_json, "
+                "target_language, model_id, prompt_version, revision, created_at, updated_at) "
+                "VALUES (:id, :paper_id, :section_id, :block_id, :source_hash, :source_text, "
+                ":translated_text, :source_start, :source_end, :segments_json, :terms_json, "
+                ":target_language, :model_id, :prompt_version, :revision, :created_at, :updated_at)",
+                record,
             )
         return self._translation_contract(record)
+
+    def list_reader_annotations(self, paper_id: str) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM reader_annotations WHERE paper_id = ? ORDER BY created_at, id",
+                (paper_id,),
+            ).fetchall()
+        return [self._reader_annotation_contract(row) for row in rows]
+
+    def save_reader_annotation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        paper_id = str(payload.get("paperId", "")).strip()
+        section_id = str(payload.get("sectionId", "")).strip()
+        block_id = str(payload.get("blockId", "")).strip()
+        annotation_type = str(payload.get("annotationType", "")).strip()
+        source_start = max(0, int(payload.get("sourceStart", 0)))
+        source_end = int(payload.get("sourceEnd", -1))
+        if not paper_id or not section_id or not block_id or annotation_type not in {"translation", "chat"}:
+            raise ValueError("paperId, sectionId, blockId and a valid annotationType are required")
+        if source_end < source_start:
+            raise ValueError("Reader annotation range is invalid")
+        now = utc_now()
+        with self.db.connect() as connection:
+            paper = connection.execute(
+                "SELECT canonical_sha256 FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone()
+            if not paper:
+                raise KeyError(f"Unknown paper: {paper_id}")
+            record = {
+                "id": str(payload.get("id") or uuid.uuid4()),
+                "paper_id": paper_id,
+                "section_id": section_id,
+                "block_id": block_id,
+                "source_hash": paper["canonical_sha256"],
+                "source_start": source_start,
+                "source_end": source_end,
+                "annotation_type": annotation_type,
+                "related_id": str(payload.get("relatedId", "")).strip() or None,
+                "created_at": now,
+                "updated_at": now,
+            }
+            connection.execute(
+                "INSERT INTO reader_annotations(id, paper_id, section_id, block_id, source_hash, "
+                "source_start, source_end, annotation_type, related_id, created_at, updated_at) "
+                "VALUES (:id, :paper_id, :section_id, :block_id, :source_hash, :source_start, "
+                ":source_end, :annotation_type, :related_id, :created_at, :updated_at) "
+                "ON CONFLICT(paper_id, block_id, source_start, source_end, annotation_type, related_id) "
+                "DO UPDATE SET updated_at = excluded.updated_at",
+                record,
+            )
+            row = connection.execute(
+                "SELECT * FROM reader_annotations WHERE paper_id = ? AND block_id = ? "
+                "AND source_start = ? AND source_end = ? AND annotation_type = ? "
+                "AND related_id IS ?",
+                (paper_id, block_id, source_start, source_end, annotation_type, record["related_id"]),
+            ).fetchone()
+        return self._reader_annotation_contract(row)
+
+    def delete_reader_annotation(self, annotation_id: str, paper_id: str) -> bool:
+        self.initialize()
+        with self.db.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM reader_annotations WHERE id = ? AND paper_id = ?",
+                (annotation_id, paper_id),
+            )
+        return bool(cursor.rowcount)
 
     def list_reader_analyses(self, paper_id: str) -> list[dict[str, Any]]:
         self.initialize()
@@ -1706,16 +2034,67 @@ class Library:
     def _estimate_context_tokens(text: str) -> int:
         return max(1, (len(text.encode("utf-8")) + 3) // 4)
 
-    def get_context_draft(self) -> dict[str, Any]:
+    def _ensure_context_scope(
+        self, connection: sqlite3.Connection, scope_id: str, paper_id: str | None = None
+    ) -> Any:
+        scope = connection.execute(
+            "SELECT * FROM context_scopes WHERE id = ?", (scope_id,)
+        ).fetchone()
+        if scope:
+            return scope
+        now = utc_now()
+        if scope_id == "research:default":
+            connection.execute(
+                "INSERT INTO context_scopes(id, scope_type, paper_id, name, created_at, updated_at) "
+                "VALUES (?, 'research', NULL, ?, ?, ?)",
+                (scope_id, "多论文研究上下文", now, now),
+            )
+        elif scope_id.startswith("paper:"):
+            resolved_paper_id = paper_id or scope_id.removeprefix("paper:")
+            paper = connection.execute(
+                "SELECT title FROM papers WHERE id = ?", (resolved_paper_id,)
+            ).fetchone()
+            if not paper:
+                raise KeyError(f"Unknown paper: {resolved_paper_id}")
+            connection.execute(
+                "INSERT INTO context_scopes(id, scope_type, paper_id, name, created_at, updated_at) "
+                "VALUES (?, 'paper', ?, ?, ?, ?)",
+                (scope_id, resolved_paper_id, f"{paper['title']} · 阅读上下文", now, now),
+            )
+        else:
+            raise ValueError("Context scope must be research:default or paper:<paperId>")
+        return connection.execute(
+            "SELECT * FROM context_scopes WHERE id = ?", (scope_id,)
+        ).fetchone()
+
+    @staticmethod
+    def _context_scope_contract(scope: Any) -> dict[str, Any]:
+        return {
+            "id": scope["id"],
+            "scopeType": scope["scope_type"],
+            "paperId": scope["paper_id"] or None,
+            "name": scope["name"],
+        }
+
+    def get_context_draft(self, scope_id: str = "research:default") -> dict[str, Any]:
         self.initialize()
         with self.db.connect() as connection:
+            scope = self._ensure_context_scope(connection, scope_id)
             rows = connection.execute(
-                "SELECT ci.*, p.title FROM context_items ci "
-                "JOIN papers p ON p.id = ci.paper_id ORDER BY ci.created_at, ci.id"
+                "SELECT ci.*, p.title AS paper_title, csi.item_type, csi.title AS item_title, "
+                "csi.custom_text, csi.created_at AS scope_created_at, "
+                "csi.updated_at AS scope_updated_at FROM context_scope_items csi "
+                "JOIN context_items ci ON ci.id = csi.context_item_id "
+                "JOIN papers p ON p.id = ci.paper_id WHERE csi.scope_id = ? "
+                "ORDER BY csi.sort_order, csi.created_at, ci.id",
+                (scope_id,),
             ).fetchall()
             compression_rows = connection.execute(
                 "SELECT cc.* FROM context_compressions cc "
-                "JOIN context_items ci ON ci.active_compression_id = cc.id"
+                "JOIN context_items ci ON ci.active_compression_id = cc.id "
+                "JOIN context_scope_items csi ON csi.context_item_id = ci.id "
+                "WHERE csi.scope_id = ?",
+                (scope_id,),
             ).fetchall()
         compressions = {
             row["context_item_id"]: self._context_compression_summary(row)
@@ -1723,25 +2102,32 @@ class Library:
         }
         items = []
         for row in rows:
+            source_text = row["custom_text"] if row["item_type"] == "custom" else row["source_text"]
+            estimated_tokens = self._estimate_context_tokens(source_text or "")
             item = {
                 "id": row["id"],
+                "scopeId": scope_id,
+                "itemType": row["item_type"],
+                "title": row["item_title"] or ("论文 Markdown 原文" if not row["section_id"] else "自定义上下文"),
                 "paperId": row["paper_id"],
-                "paperTitle": row["title"],
+                "paperTitle": row["paper_title"],
                 "sectionId": row["section_id"] or None,
                 "blockId": row["block_id"] or None,
                 "mode": row["mode"],
                 "sourceHash": row["source_hash"],
-                "sourcePreview": row["source_text"][:240],
-                "estimatedTokens": row["estimated_tokens"],
-                "createdAt": row["created_at"],
-                "updatedAt": row["updated_at"],
+                "sourcePreview": (source_text or "")[:240],
+                "estimatedTokens": estimated_tokens,
+                "createdAt": row["scope_created_at"],
+                "updatedAt": row["scope_updated_at"],
             }
             compression = compressions.get(row["id"])
             if compression and row["mode"] == "compressed":
                 item["compression"] = compression
+                item["estimatedTokens"] = compression["estimatedTokens"]
             items.append(item)
         paper_tokens = sum(item["estimatedTokens"] for item in items)
         return {
+            "scope": self._context_scope_contract(scope),
             "items": items,
             "tokenBreakdown": {
                 "systemPrompt": 4200,
@@ -1755,25 +2141,37 @@ class Library:
             "updatedAt": max((item["updatedAt"] for item in items), default=None),
         }
 
-    def read_context_item(self, item_id: str) -> dict[str, Any]:
+    def read_context_item(
+        self, item_id: str, scope_id: str = "research:default"
+    ) -> dict[str, Any]:
         self.initialize()
         with self.db.connect() as connection:
             row = connection.execute(
-                "SELECT ci.*, p.title FROM context_items ci "
-                "JOIN papers p ON p.id = ci.paper_id WHERE ci.id = ?",
-                (item_id,),
+                "SELECT ci.*, p.title AS paper_title, csi.item_type, csi.title AS item_title, "
+                "csi.custom_text, csi.created_at AS scope_created_at, "
+                "csi.updated_at AS scope_updated_at FROM context_scope_items csi "
+                "JOIN context_items ci ON ci.id = csi.context_item_id "
+                "JOIN papers p ON p.id = ci.paper_id WHERE ci.id = ? AND csi.scope_id = ?",
+                (item_id, scope_id),
             ).fetchone()
         if not row:
             raise KeyError(f"Unknown context item: {item_id}")
+        source_text = row["custom_text"] if row["item_type"] == "custom" else row["source_text"]
         return {
             "id": row["id"],
+            "scopeId": scope_id,
+            "itemType": row["item_type"],
+            "title": row["item_title"],
             "paperId": row["paper_id"],
-            "paperTitle": row["title"],
+            "paperTitle": row["paper_title"],
             "sectionId": row["section_id"] or None,
             "blockId": row["block_id"] or None,
             "sourceHash": row["source_hash"],
-            "sourceText": row["source_text"],
-            "estimatedTokens": self._estimate_context_tokens(row["source_text"]),
+            "sourceText": source_text,
+            "customText": source_text if row["item_type"] == "custom" else None,
+            "estimatedTokens": self._estimate_context_tokens(source_text),
+            "createdAt": row["scope_created_at"],
+            "updatedAt": row["scope_updated_at"],
         }
 
     def get_context_compression(
@@ -1795,7 +2193,8 @@ class Library:
         return self._context_compression_contract(row) if row else None
 
     def activate_context_compression(
-        self, item_id: str, model_id: str, prompt_version: str
+        self, item_id: str, model_id: str, prompt_version: str,
+        scope_id: str = "research:default",
     ) -> dict[str, Any]:
         compression = self.get_context_compression(item_id, model_id, prompt_version)
         if not compression:
@@ -1806,7 +2205,12 @@ class Library:
                 "active_compression_id = ?, updated_at = ? WHERE id = ?",
                 (compression["estimatedTokens"], compression["id"], utc_now(), item_id),
             )
-        return self.get_context_draft()
+            connection.execute(
+                "UPDATE context_scope_items SET item_type = 'compressed_markdown', updated_at = ? "
+                "WHERE scope_id = ? AND context_item_id = ?",
+                (utc_now(), scope_id, item_id),
+            )
+        return self.get_context_draft(scope_id)
 
     def save_context_compression(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.initialize()
@@ -1894,7 +2298,9 @@ class Library:
             "compressedText": record["compressed_text"],
         }
 
-    def add_paper_to_context(self, paper_id: str, mode: str = "full") -> dict[str, Any]:
+    def add_paper_to_context(
+        self, paper_id: str, mode: str = "full", scope_id: str = "research:default"
+    ) -> dict[str, Any]:
         self.initialize()
         if mode not in {"full", "structured"}:
             raise ValueError("Context mode must be full or structured")
@@ -1920,6 +2326,9 @@ class Library:
             source_text=source_text,
             mode=mode,
             source_hash=paper["canonical_sha256"],
+            scope_id=scope_id,
+            item_type="markdown",
+            title="论文 Markdown 原文",
         )
 
     def add_selection_to_context(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1943,6 +2352,9 @@ class Library:
             source_text=source_text,
             mode="sections",
             source_hash=paper["canonical_sha256"],
+            scope_id=str(payload.get("scopeId") or "research:default"),
+            item_type="custom" if block_id.startswith(("ai-", "chat:", "selection:")) else "markdown",
+            title=str(payload.get("title") or "自定义上下文"),
         )
 
     def _upsert_context_item(
@@ -1954,6 +2366,9 @@ class Library:
         source_text: str,
         mode: str,
         source_hash: str,
+        scope_id: str = "research:default",
+        item_type: str = "markdown",
+        title: str = "",
     ) -> dict[str, Any]:
         if not source_text:
             raise ValueError("Context source text is empty")
@@ -1961,6 +2376,7 @@ class Library:
         item_id = str(uuid.uuid4())
         estimated_tokens = self._estimate_context_tokens(source_text)
         with self.db.connect() as connection:
+            self._ensure_context_scope(connection, scope_id, paper_id)
             existing = connection.execute(
                 "SELECT id, created_at FROM context_items "
                 "WHERE paper_id = ? AND section_id = ? AND block_id = ?",
@@ -1981,19 +2397,97 @@ class Library:
                 (item_id, paper_id, section_id, block_id, mode, source_hash, source_text,
                  estimated_tokens, created_at, now),
             )
-        return self.get_context_draft()
+            connection.execute(
+                "INSERT INTO context_scope_items(scope_id, context_item_id, item_type, title, "
+                "custom_text, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, "
+                "COALESCE((SELECT MAX(sort_order) + 1 FROM context_scope_items WHERE scope_id = ?), 0), ?, ?) "
+                "ON CONFLICT(scope_id, context_item_id) DO UPDATE SET item_type = excluded.item_type, "
+                "title = excluded.title, custom_text = excluded.custom_text, updated_at = excluded.updated_at",
+                (scope_id, item_id, item_type, title, source_text if item_type == "custom" else None,
+                 scope_id, created_at, now),
+            )
+        return self.get_context_draft(scope_id)
 
-    def remove_paper_from_context(self, paper_id: str) -> dict[str, Any]:
+    def upsert_scoped_context_item(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        scope_id = str(payload.get("scopeId") or "research:default")
+        item_id = str(payload.get("itemId", "")).strip()
+        title = str(payload.get("title", "")).strip() or "自定义上下文"
+        text = str(payload.get("text", "")).strip()
+        if item_id:
+            if not text:
+                raise ValueError("Custom context text is empty")
+            with self.db.connect() as connection:
+                row = connection.execute(
+                    "SELECT 1 FROM context_scope_items WHERE scope_id = ? AND context_item_id = ? "
+                    "AND item_type = 'custom'", (scope_id, item_id),
+                ).fetchone()
+                if not row:
+                    raise KeyError(f"Unknown editable context item: {item_id}")
+                connection.execute(
+                    "UPDATE context_scope_items SET title = ?, custom_text = ?, updated_at = ? "
+                    "WHERE scope_id = ? AND context_item_id = ?",
+                    (title, text, utc_now(), scope_id, item_id),
+                )
+            return self.get_context_draft(scope_id)
+        paper_id = str(payload.get("paperId", "")).strip()
+        if not paper_id or not text:
+            raise ValueError("paperId and text are required for custom context")
+        return self._upsert_context_item(
+            paper_id=paper_id,
+            section_id="custom",
+            block_id=f"custom:{uuid.uuid4()}",
+            source_text=text,
+            mode="sections",
+            source_hash=self._paper_source_hash(paper_id),
+            scope_id=scope_id,
+            item_type="custom",
+            title=title,
+        )
+
+    def _paper_source_hash(self, paper_id: str) -> str:
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT canonical_sha256 FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Unknown paper: {paper_id}")
+        return str(row["canonical_sha256"])
+
+    def delete_scoped_context_item(self, scope_id: str, item_id: str) -> dict[str, Any]:
         self.initialize()
         with self.db.connect() as connection:
-            connection.execute("DELETE FROM context_items WHERE paper_id = ?", (paper_id,))
-        return self.get_context_draft()
+            connection.execute(
+                "DELETE FROM context_scope_items WHERE scope_id = ? AND context_item_id = ?",
+                (scope_id, item_id),
+            )
+        return self.get_context_draft(scope_id)
 
-    def clear_context(self) -> dict[str, Any]:
+    def reset_context_scope(self, scope_id: str) -> dict[str, Any]:
         self.initialize()
         with self.db.connect() as connection:
-            connection.execute("DELETE FROM context_items")
-        return self.get_context_draft()
+            scope = self._ensure_context_scope(connection, scope_id)
+            connection.execute("DELETE FROM context_scope_items WHERE scope_id = ?", (scope_id,))
+        if scope["scope_type"] == "paper":
+            return self.add_paper_to_context(scope["paper_id"], "full", scope_id)
+        return self.get_context_draft(scope_id)
+
+    def remove_paper_from_context(
+        self, paper_id: str, scope_id: str = "research:default"
+    ) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            connection.execute(
+                "DELETE FROM context_scope_items WHERE scope_id = ? AND context_item_id IN "
+                "(SELECT id FROM context_items WHERE paper_id = ?)", (scope_id, paper_id),
+            )
+        return self.get_context_draft(scope_id)
+
+    def clear_context(self, scope_id: str = "research:default") -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            connection.execute("DELETE FROM context_scope_items WHERE scope_id = ?", (scope_id,))
+        return self.get_context_draft(scope_id)
 
     @staticmethod
     def _normalize_agent_profile(
@@ -3136,6 +3630,17 @@ class Library:
 
     @staticmethod
     def _translation_contract(record: dict[str, Any]) -> dict[str, Any]:
+        segments = json.loads(record.get("segments_json") or "[]")
+        terms = json.loads(record.get("terms_json") or "[]")
+        source_text = record["source_text"]
+        if not segments and source_text:
+            segments = [{
+                "id": "legacy",
+                "sourceStart": int(record.get("source_start", 0)),
+                "sourceEnd": int(record.get("source_end", -1)) if int(record.get("source_end", -1)) >= 0 else len(source_text),
+                "sourceText": source_text,
+                "translatedText": record["translated_text"],
+            }]
         return {
             "id": record["id"],
             "paperId": record["paper_id"],
@@ -3144,12 +3649,43 @@ class Library:
             "sourceHash": record["source_hash"],
             "sourceText": record["source_text"],
             "translatedText": record["translated_text"],
+            "sourceStart": int(record.get("source_start", 0)),
+            "sourceEnd": int(record.get("source_end", -1)) if int(record.get("source_end", -1)) >= 0 else len(source_text),
+            "segments": segments,
+            "terms": terms,
             "targetLanguage": record["target_language"],
             "modelId": record["model_id"],
             "promptVersion": record["prompt_version"],
             "revision": record["revision"],
             "createdAt": record["created_at"],
             "updatedAt": record["updated_at"],
+        }
+
+    @staticmethod
+    def _reader_annotation_contract(record: Any) -> dict[str, Any]:
+        return {
+            "id": record["id"],
+            "paperId": record["paper_id"],
+            "sectionId": record["section_id"],
+            "blockId": record["block_id"],
+            "sourceHash": record["source_hash"],
+            "sourceStart": record["source_start"],
+            "sourceEnd": record["source_end"],
+            "annotationType": record["annotation_type"],
+            "relatedId": record["related_id"],
+            "createdAt": record["created_at"],
+            "updatedAt": record["updated_at"],
+        }
+
+    @staticmethod
+    def _figure_analysis_contract(record: Any) -> dict[str, Any]:
+        return {
+            "id": record["id"], "paperId": record["paper_id"],
+            "figureId": record["figure_id"], "status": record["status"],
+            "description": record["description"], "modelId": record["model_id"],
+            "promptVersion": record["prompt_version"],
+            "usage": {"inputTokens": record["input_tokens"], "outputTokens": record["output_tokens"], "durationMs": record["duration_ms"]},
+            "error": record["error"], "updatedAt": record["updated_at"],
         }
 
 

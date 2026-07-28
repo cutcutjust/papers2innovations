@@ -250,10 +250,44 @@ export interface TranslationRecord {
   sourceHash: string;
   sourceText: string;
   translatedText: string;
+  sourceStart: number;
+  sourceEnd: number;
+  segments: TranslationSegment[];
+  terms: TranslationTerm[];
   targetLanguage: string;
   modelId: string;
   promptVersion: string;
   revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TranslationSegment {
+  id: string;
+  sourceStart: number;
+  sourceEnd: number;
+  sourceText: string;
+  translatedText: string;
+}
+
+export interface TranslationTerm {
+  text: string;
+  translation: string;
+  explanation: string;
+  kind: "phrase" | "term";
+  segmentId?: string;
+}
+
+export interface ReaderAnnotation {
+  id: string;
+  paperId: string;
+  sectionId: string;
+  blockId: string;
+  sourceHash: string;
+  sourceStart: number;
+  sourceEnd: number;
+  annotationType: "translation" | "chat";
+  relatedId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -446,6 +480,15 @@ export interface InnovationRun {
 }
 
 export type ContextLoadMode = "full" | "structured" | "compressed" | "retrieval" | "sections";
+export type ContextScopeType = "paper" | "research";
+export type ScopedContextItemType = "markdown" | "compressed_markdown" | "custom";
+
+export interface ContextScope {
+  id: string;
+  scopeType: ContextScopeType;
+  paperId?: string;
+  name: string;
+}
 
 export interface ContextCompressionSummary {
   id: string;
@@ -483,10 +526,22 @@ export interface ContextDraftItem {
   sectionId?: string;
   blockId?: string;
   mode: ContextLoadMode;
+  scopeId?: string;
+  itemType?: ScopedContextItemType;
+  title?: string;
   sourceHash: string;
   sourcePreview: string;
   estimatedTokens: number;
   compression?: ContextCompressionSummary;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScopedContextItem extends ContextSourceItem {
+  scopeId: string;
+  itemType: ScopedContextItemType;
+  title: string;
+  customText?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -502,9 +557,48 @@ export interface ContextTokenBreakdown {
 }
 
 export interface ContextDraft {
+  scope?: ContextScope;
   items: ContextDraftItem[];
   tokenBreakdown: ContextTokenBreakdown;
   updatedAt?: string;
+}
+
+export interface FormulaRepair {
+  id: string;
+  paperId: string;
+  sectionId: string;
+  blockId: string;
+  page?: number;
+  originalText: string;
+  repairedLatex: string;
+  confidence: number;
+  modelId: string;
+  promptVersion: string;
+}
+
+export interface FigureAnalysis {
+  id: string;
+  paperId: string;
+  figureId: string;
+  status: "pending" | "completed" | "failed";
+  description: string;
+  modelId: string;
+  promptVersion: string;
+  usage: { inputTokens: number; outputTokens: number; durationMs: number };
+  error?: string;
+  updatedAt: string;
+}
+
+export interface PreprocessQualityReport {
+  paperId: string;
+  sourceHash: string;
+  formulaIssueCount: number;
+  repairedFormulaCount: number;
+  figureCount: number;
+  analyzedFigureCount: number;
+  failedFigureCount: number;
+  warnings: string[];
+  updatedAt: string;
 }
 
 export interface ContextSnapshot {

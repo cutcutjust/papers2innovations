@@ -33,8 +33,10 @@ struct EngineInner {
     pending: Mutex<Pending>,
     next_id: AtomicU64,
     ocr: Mutex<OcrConfig>,
+    vision: Mutex<Option<VisionConfig>>,
     ocr_limiter: OcrLimiter,
     allowed_ocr_roots: Mutex<Vec<PathBuf>>,
+    allowed_vision_roots: Mutex<Vec<PathBuf>>,
     model_credentials: Mutex<HashMap<String, String>>,
     model_cancellations: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
@@ -47,6 +49,13 @@ struct OcrConfig {
     consent: bool,
     workspace_required: bool,
     model: Option<String>,
+}
+
+#[derive(Clone)]
+struct VisionConfig {
+    provider: ProviderConfigInput,
+    model: ModelConfigInput,
+    api_key: String,
 }
 
 #[derive(Default)]
@@ -94,6 +103,27 @@ struct OcrRequest {
     page: u32,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VisionRequest {
+    image_path: String,
+    figure_id: String,
+    #[serde(default)]
+    caption: String,
+    #[serde(default)]
+    paper_title: String,
+    #[serde(default)]
+    task: String,
+    #[serde(default)]
+    source_text: String,
+    #[serde(default = "default_vision_prompt_version")]
+    prompt_version: String,
+}
+
+fn default_vision_prompt_version() -> String {
+    "figure-analysis-v1".into()
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CredentialInput {
@@ -110,6 +140,13 @@ struct OcrProviderInput {
     provider: ProviderConfigInput,
     model: ModelConfigInput,
     consent: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VisionProviderInput {
+    provider: ProviderConfigInput,
+    model: ModelConfigInput,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -209,8 +246,10 @@ impl Engine {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             ocr: Mutex::new(OcrConfig::default()),
+            vision: Mutex::new(None),
             ocr_limiter: OcrLimiter::default(),
             allowed_ocr_roots: Mutex::new(Vec::new()),
+            allowed_vision_roots: Mutex::new(Vec::new()),
             model_credentials: Mutex::new(HashMap::new()),
             model_cancellations: Mutex::new(HashMap::new()),
         }))
@@ -229,6 +268,15 @@ impl Engine {
         if !allowed.contains(&cache_root) {
             allowed.push(cache_root);
         }
+        let generated_root = library_root.join(".p2i/generated");
+        let mut vision_allowed = self
+            .0
+            .allowed_vision_roots
+            .lock()
+            .map_err(|_| "Vision path lock poisoned")?;
+        if !vision_allowed.contains(&generated_root) {
+            vision_allowed.push(generated_root);
+        }
         Ok(())
     }
 
@@ -238,6 +286,15 @@ impl Engine {
             .allowed_ocr_roots
             .lock()
             .map_err(|_| "OCR path lock poisoned")?;
+        Ok(allowed.iter().any(|root| path.starts_with(root)))
+    }
+
+    fn is_allowed_vision_path(&self, path: &Path) -> Result<bool, String> {
+        let allowed = self
+            .0
+            .allowed_vision_roots
+            .lock()
+            .map_err(|_| "Vision path lock poisoned")?;
         Ok(allowed.iter().any(|root| path.starts_with(root)))
     }
 
@@ -421,10 +478,155 @@ impl Engine {
                     json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32602,"message":error.to_string()}})
                 }
             }
+        } else if method == "host.vision_config" {
+            match self.vision_config() {
+                Ok(result) => json!({"jsonrpc":"2.0", "id":id, "result":result}),
+                Err(error) => {
+                    json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32011,"message":error}})
+                }
+            }
+        } else if method == "host.vision_analyze" {
+            match serde_json::from_value::<VisionRequest>(
+                message.get("params").cloned().unwrap_or_default(),
+            ) {
+                Ok(request) => match self.vision_analyze(request) {
+                    Ok(result) => json!({"jsonrpc":"2.0", "id":id, "result":result}),
+                    Err(error) => {
+                        json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32012,"message":error}})
+                    }
+                },
+                Err(error) => {
+                    json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32602,"message":error.to_string()}})
+                }
+            }
         } else {
             json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32601,"message":"Unknown host method"}})
         };
         let _ = self.send_raw(&response);
+    }
+
+    fn vision_config(&self) -> Result<Value, String> {
+        let config = self
+            .0
+            .vision
+            .lock()
+            .map_err(|_| "Vision config lock poisoned")?
+            .clone()
+            .ok_or("图片解读模型尚未配置")?;
+        Ok(json!({
+            "modelId": config.model.id,
+            "model": config.model.model,
+            "providerId": config.provider.id,
+            "format": config.provider.format,
+        }))
+    }
+
+    fn vision_analyze(&self, request: VisionRequest) -> Result<Value, String> {
+        let config = self
+            .0
+            .vision
+            .lock()
+            .map_err(|_| "Vision config lock poisoned")?
+            .clone()
+            .ok_or("图片解读模型尚未配置")?;
+        let image_path = PathBuf::from(&request.image_path)
+            .canonicalize()
+            .map_err(|error| format!("图片文件不可用: {error}"))?;
+        if !self.is_allowed_vision_path(&image_path)? {
+            return Err("图片路径超出当前论文库解析目录".into());
+        }
+        let image = fs::read(&image_path).map_err(|error| format!("无法读取图片: {error}"))?;
+        if image.len() > 20 * 1024 * 1024 {
+            return Err("图片超过 20 MB 安全限制".into());
+        }
+        let mime = match image_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "jpg" | "jpeg" => "image/jpeg",
+            "webp" => "image/webp",
+            _ => "image/png",
+        };
+        let prompt = if request.task == "formula" {
+            format!(
+                "请检查页面图片中与以下损坏文本对应的数学公式，并恢复为正确 LaTeX：{}。只返回 JSON：{{\"repairedLatex\":\"...\",\"confidence\":0.0}}。repairedLatex 必须包含原公式的行内或块级定界符；看不清时 confidence 低于 0.8，不得猜测。",
+                request.source_text
+            )
+        } else {
+            format!(
+                "你是科研论文图片解读助手。请用中文详细解释图片 {}。论文标题：{}。原始 caption：{}。依次说明：图意概述、组成元素、坐标轴或图例、主要发现、与 caption 和论文论点的关系。不得虚构看不清的信息。只返回 Markdown。",
+                request.figure_id, request.paper_title, request.caption
+            )
+        };
+        let encoded = BASE64.encode(image);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(config.provider.timeout_seconds.max(30)))
+            .build()
+            .map_err(|error| error.to_string())?;
+        let started = std::time::Instant::now();
+        let (response, description_pointer) = if config.provider.format == "anthropic" {
+            let body = json!({
+                "model": config.model.model,
+                "max_tokens": config.model.max_output_tokens.min(4096),
+                "messages": [{"role":"user","content":[
+                    {"type":"image","source":{"type":"base64","media_type":mime,"data":encoded}},
+                    {"type":"text","text":prompt}
+                ]}]
+            });
+            let response = client
+                .post(format!(
+                    "{}/messages",
+                    config.provider.base_url.trim_end_matches('/')
+                ))
+                .header("x-api-key", &config.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+                .send()
+                .map_err(|error| error.to_string())?;
+            (response, "/content/0/text")
+        } else {
+            let body = json!({
+                "model": config.model.model,
+                "messages": [{"role":"user","content":[
+                    {"type":"text","text":prompt},
+                    {"type":"image_url","image_url":{"url":format!("data:{mime};base64,{encoded}")}}
+                ]}],
+                "temperature": 0,
+                "stream": false
+            });
+            let response = client
+                .post(format!(
+                    "{}/chat/completions",
+                    config.provider.base_url.trim_end_matches('/')
+                ))
+                .bearer_auth(&config.api_key)
+                .json(&body)
+                .send()
+                .map_err(|error| error.to_string())?;
+            (response, "/choices/0/message/content")
+        };
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("图片解读接口返回 HTTP {status}"));
+        }
+        let payload: Value = response.json().map_err(|error| error.to_string())?;
+        let description = payload
+            .pointer(description_pointer)
+            .and_then(Value::as_str)
+            .ok_or("图片解读响应缺少文本内容")?;
+        Ok(json!({
+            "description": description,
+            "modelId": config.model.id,
+            "promptVersion": request.prompt_version,
+            "usage": {
+                "inputTokens": payload.pointer("/usage/prompt_tokens").or_else(|| payload.pointer("/usage/input_tokens")).and_then(Value::as_u64).unwrap_or(0),
+                "outputTokens": payload.pointer("/usage/completion_tokens").or_else(|| payload.pointer("/usage/output_tokens")).and_then(Value::as_u64).unwrap_or(0),
+                "durationMs": started.elapsed().as_millis() as u64
+            }
+        }))
     }
 
     fn ocr_page(&self, request: OcrRequest) -> Result<Value, String> {
@@ -707,6 +909,45 @@ fn ocr_provider_configure(
         workspace_required: false,
         model: Some(input.model.model),
     };
+    Ok(())
+}
+
+#[tauri::command]
+fn vision_provider_configure(
+    engine: State<'_, Engine>,
+    input: VisionProviderInput,
+) -> Result<(), String> {
+    validate_credential_id(&input.provider.credential_id)?;
+    if input.provider.format != "openai" && input.provider.format != "anthropic" {
+        return Err("图片解读仅支持 OpenAI 或 Anthropic 兼容格式".into());
+    }
+    let api_key = engine
+        .0
+        .model_credentials
+        .lock()
+        .map_err(|_| "Provider credential lock poisoned")?
+        .get(&input.provider.credential_id)
+        .cloned()
+        .ok_or("Provider credential is not configured")?;
+    *engine
+        .0
+        .vision
+        .lock()
+        .map_err(|_| "Vision config lock poisoned")? = Some(VisionConfig {
+        provider: input.provider,
+        model: input.model,
+        api_key,
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn vision_provider_clear(engine: State<'_, Engine>) -> Result<(), String> {
+    *engine
+        .0
+        .vision
+        .lock()
+        .map_err(|_| "Vision config lock poisoned")? = None;
     Ok(())
 }
 
@@ -1557,6 +1798,8 @@ pub fn run() {
             provider_credential_set,
             provider_credential_delete,
             ocr_provider_configure,
+            vision_provider_configure,
+            vision_provider_clear,
             provider_test_connection,
             model_stream_start,
             model_stream_cancel,

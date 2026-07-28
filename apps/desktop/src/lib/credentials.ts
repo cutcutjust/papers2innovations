@@ -132,6 +132,18 @@ export async function configureOcrProvider(provider: ProviderConfig, model: Mode
   });
 }
 
+export async function configureVisionProvider(provider: ProviderConfig, model: ModelConfig): Promise<void> {
+  if (!nativeRuntime) return;
+  await invoke("vision_provider_configure", {
+    input: { provider: sanitizeProviderConfig(provider), model },
+  });
+}
+
+export async function clearVisionProvider(): Promise<void> {
+  if (!nativeRuntime) return;
+  await invoke("vision_provider_clear");
+}
+
 export async function clearOcrProvider(): Promise<void> {
   if (!nativeRuntime) return;
   await invoke("credential_delete");

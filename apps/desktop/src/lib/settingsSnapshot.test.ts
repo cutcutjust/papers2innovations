@@ -20,6 +20,20 @@ describe("workspace settings snapshot", () => {
     expect(JSON.stringify(valid)).not.toContain("apiKey");
   });
 
+  it("accepts v2 reader and vision preferences while retaining v1 compatibility", () => {
+    expect(isWorkspaceSettingsSnapshot({
+      ...valid,
+      version: 2,
+      visionAnalysisModelId: "model",
+      readerZoom: 125,
+      readerTheme: "green",
+      readerBackgroundColor: "#edf5ee",
+      readerTextColor: "#203027",
+      readerTranslationView: "translated",
+    })).toBe(true);
+    expect(isWorkspaceSettingsSnapshot(valid)).toBe(true);
+  });
+
   it("rejects incomplete or unsupported snapshots", () => {
     expect(isWorkspaceSettingsSnapshot({ ...valid, providers: [] })).toBe(false);
     expect(isWorkspaceSettingsSnapshot({ ...valid, fontSize: "huge" })).toBe(false);

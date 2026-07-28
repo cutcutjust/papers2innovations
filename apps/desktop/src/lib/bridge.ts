@@ -1,4 +1,4 @@
-import type { AgentProfile, AgentPromptTemplate, AgentRun, AgentToolCallRecord, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryCollection, LibraryPaper, ModelStreamEvent, ModelStreamRequest, ModelToolDefinition, PaperDocument, ProgressNotification, PromptTemplate, PromptTemplateCategory, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, ReaderConversation, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
+import type { AgentProfile, AgentPromptTemplate, AgentRun, AgentToolCallRecord, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, FigureAnalysis, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryCollection, LibraryPaper, ModelStreamEvent, ModelStreamRequest, ModelToolDefinition, PaperDocument, PreprocessQualityReport, ProgressNotification, PromptTemplate, PromptTemplateCategory, ReaderAnalysisRecord, ReaderAnalysisType, ReaderAnnotation, ReaderChatTurn, ReaderConversation, ScopedContextItem, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { demoMarkdown, demoPapers } from "../demo";
@@ -132,6 +132,21 @@ export async function readDocument(root: string, paperId: string): Promise<Paper
   return rpc<PaperDocument>("paper.read_document", { root, paperId });
 }
 
+export async function listFigureAnalyses(root: string, paperId: string): Promise<FigureAnalysis[]> {
+  if (!nativeRuntime) return [];
+  return rpc<FigureAnalysis[]>("figure.analysis_list", { root, paperId });
+}
+
+export async function retryFigureAnalysis(root: string, paperId: string, figureId: string): Promise<FigureAnalysis[]> {
+  if (!nativeRuntime) return [];
+  return rpc<FigureAnalysis[]>("figure.analysis_retry", { root, paperId, figureId });
+}
+
+export async function getPreprocessStatus(root: string, paperId: string): Promise<PreprocessQualityReport> {
+  if (!nativeRuntime) return { paperId, sourceHash: "", formulaIssueCount: 0, repairedFormulaCount: 0, figureCount: 0, analyzedFigureCount: 0, failedFigureCount: 0, warnings: [], updatedAt: new Date().toISOString() };
+  return rpc<PreprocessQualityReport>("paper.preprocess_status", { root, paperId });
+}
+
 export async function saveFormattedDocument(root: string, input: {
   paperId: string;
   sections: Array<{ id: string; markdown: string }>;
@@ -191,12 +206,27 @@ export async function listTranslations(root: string, paperId: string): Promise<T
   return rpc<TranslationRecord[]>("translation.list", { root, paperId });
 }
 
-export async function saveTranslation(root: string, input: Omit<TranslationRecord, "id" | "sourceHash" | "revision" | "createdAt" | "updatedAt">): Promise<TranslationRecord> {
+export async function saveTranslation(root: string, input: Omit<TranslationRecord, "id" | "sourceHash" | "revision" | "createdAt" | "updatedAt" | "sourceStart" | "sourceEnd" | "segments" | "terms"> & Partial<Pick<TranslationRecord, "sourceStart" | "sourceEnd" | "segments" | "terms">>): Promise<TranslationRecord> {
   if (!nativeRuntime) {
     const now = new Date().toISOString();
-    return { ...input, id: crypto.randomUUID(), sourceHash: "demo-source-hash", revision: 1, createdAt: now, updatedAt: now };
+    return { ...input, sourceStart: input.sourceStart ?? 0, sourceEnd: input.sourceEnd ?? input.sourceText.length, segments: input.segments ?? [], terms: input.terms ?? [], id: crypto.randomUUID(), sourceHash: "demo-source-hash", revision: 1, createdAt: now, updatedAt: now };
   }
   return rpc<TranslationRecord>("translation.save", { root, ...input });
+}
+
+export async function listReaderAnnotations(root: string, paperId: string): Promise<ReaderAnnotation[]> {
+  if (!nativeRuntime) return [];
+  return rpc<ReaderAnnotation[]>("reader.annotation_list", { root, paperId });
+}
+
+export async function saveReaderAnnotation(root: string, input: Omit<ReaderAnnotation, "id" | "sourceHash" | "createdAt" | "updatedAt">): Promise<ReaderAnnotation> {
+  if (!nativeRuntime) return { ...input, id: crypto.randomUUID(), sourceHash: "demo-source-hash", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  return rpc<ReaderAnnotation>("reader.annotation_save", { root, ...input });
+}
+
+export async function deleteReaderAnnotation(root: string, paperId: string, annotationId: string): Promise<void> {
+  if (!nativeRuntime) return;
+  await rpc("reader.annotation_delete", { root, paperId, annotationId });
 }
 
 let demoReaderAnalyses: ReaderAnalysisRecord[] = [];
@@ -316,12 +346,12 @@ function demoContextDraft(): ContextDraft {
   };
 }
 
-export async function getContextDraft(root: string): Promise<ContextDraft> {
+export async function getContextDraft(root: string, scopeId = "research:default"): Promise<ContextDraft> {
   if (!nativeRuntime) return demoContextDraft();
-  return rpc<ContextDraft>("context.get", { root });
+  return rpc<ContextDraft>("context.get", { root, scopeId });
 }
 
-export async function addPaperToContext(root: string, paperId: string, mode: Extract<ContextLoadMode, "full" | "structured"> = "full"): Promise<ContextDraft> {
+export async function addPaperToContext(root: string, paperId: string, mode: Extract<ContextLoadMode, "full" | "structured"> = "full", scopeId = "research:default"): Promise<ContextDraft> {
   if (!nativeRuntime) {
     const paper = demoPapers.find((item) => item.id === paperId);
     if (!paper) throw new Error("Unknown paper.");
@@ -342,10 +372,10 @@ export async function addPaperToContext(root: string, paperId: string, mode: Ext
     ];
     return demoContextDraft();
   }
-  return rpc<ContextDraft>("context.add_paper", { root, paperId, mode });
+  return rpc<ContextDraft>("context.add_paper", { root, paperId, mode, scopeId });
 }
 
-export async function addSelectionToContext(root: string, input: { paperId: string; sectionId: string; blockId?: string; sourceText: string }): Promise<ContextDraft> {
+export async function addSelectionToContext(root: string, input: { paperId: string; sectionId: string; blockId?: string; sourceText: string; scopeId?: string; title?: string }): Promise<ContextDraft> {
   if (!nativeRuntime) {
     const paper = demoPapers.find((item) => item.id === input.paperId);
     if (!paper) throw new Error("Unknown paper.");
@@ -372,7 +402,7 @@ export async function addSelectionToContext(root: string, input: { paperId: stri
   return rpc<ContextDraft>("context.add_selection", { root, ...input });
 }
 
-export async function readContextItem(root: string, itemId: string): Promise<ContextSourceItem> {
+export async function readContextItem(root: string, itemId: string, scopeId = "research:default"): Promise<ContextSourceItem> {
   if (!nativeRuntime) {
     const item = demoContextItems.find((candidate) => candidate.id === itemId);
     if (!item) throw new Error("Unknown context item.");
@@ -387,7 +417,7 @@ export async function readContextItem(root: string, itemId: string): Promise<Con
       estimatedTokens: item.estimatedTokens,
     };
   }
-  return rpc<ContextSourceItem>("context.read_item", { root, itemId });
+  return rpc<ContextSourceItem>("context.read_item", { root, itemId, scopeId });
 }
 
 export async function getContextCompression(root: string, itemId: string, modelId: string, promptVersion: string): Promise<ContextCompressionRecord | null> {
@@ -395,7 +425,7 @@ export async function getContextCompression(root: string, itemId: string, modelI
   return rpc<ContextCompressionRecord | null>("context.get_compression", { root, itemId, modelId, promptVersion });
 }
 
-export async function activateContextCompression(root: string, itemId: string, modelId: string, promptVersion: string): Promise<ContextDraft> {
+export async function activateContextCompression(root: string, itemId: string, modelId: string, promptVersion: string, scopeId = "research:default"): Promise<ContextDraft> {
   if (!nativeRuntime) {
     const record = demoContextCompressions.get(demoCompressionKey(itemId, modelId, promptVersion));
     if (!record) throw new Error("No cached compression matches the current source and model.");
@@ -407,7 +437,7 @@ export async function activateContextCompression(root: string, itemId: string, m
     } : item);
     return demoContextDraft();
   }
-  return rpc<ContextDraft>("context.activate_compression", { root, itemId, modelId, promptVersion });
+  return rpc<ContextDraft>("context.activate_compression", { root, itemId, modelId, promptVersion, scopeId });
 }
 
 export async function saveContextCompression(root: string, input: { itemId: string; sourceHash: string; compressedText: string; modelId: string; promptVersion: string; inputTokens?: number; outputTokens?: number; durationMs?: number }): Promise<ContextCompressionRecord> {
@@ -440,20 +470,39 @@ export async function saveContextCompression(root: string, input: { itemId: stri
   return rpc<ContextCompressionRecord>("context.save_compression", { root, ...input });
 }
 
-export async function removePaperFromContext(root: string, paperId: string): Promise<ContextDraft> {
+export async function removePaperFromContext(root: string, paperId: string, scopeId = "research:default"): Promise<ContextDraft> {
   if (!nativeRuntime) {
     demoContextItems = demoContextItems.filter((item) => item.paperId !== paperId);
     return demoContextDraft();
   }
-  return rpc<ContextDraft>("context.remove_paper", { root, paperId });
+  return rpc<ContextDraft>("context.remove_paper", { root, paperId, scopeId });
 }
 
-export async function clearContext(root: string): Promise<ContextDraft> {
+export async function clearContext(root: string, scopeId = "research:default"): Promise<ContextDraft> {
   if (!nativeRuntime) {
     demoContextItems = [];
     return demoContextDraft();
   }
-  return rpc<ContextDraft>("context.clear", { root });
+  return rpc<ContextDraft>("context.clear", { root, scopeId });
+}
+
+export async function upsertScopedContextItem(root: string, input: { scopeId: string; paperId?: string; itemId?: string; title: string; text: string }): Promise<ContextDraft> {
+  if (!nativeRuntime) return demoContextDraft();
+  return rpc<ContextDraft>("context.item_upsert", { root, ...input });
+}
+
+export async function deleteScopedContextItem(root: string, scopeId: string, itemId: string): Promise<ContextDraft> {
+  if (!nativeRuntime) return demoContextDraft();
+  return rpc<ContextDraft>("context.item_delete", { root, scopeId, itemId });
+}
+
+export async function resetContextScope(root: string, scopeId: string): Promise<ContextDraft> {
+  if (!nativeRuntime) return demoContextDraft();
+  return rpc<ContextDraft>("context.scope_reset", { root, scopeId });
+}
+
+export async function readScopedContextItem(root: string, scopeId: string, itemId: string): Promise<ScopedContextItem> {
+  return readContextItem(root, itemId, scopeId) as Promise<ScopedContextItem>;
 }
 
 const demoAgentNow = new Date(0).toISOString();

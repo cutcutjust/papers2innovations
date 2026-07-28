@@ -17,7 +17,7 @@ import { PromptLibrary } from "./components/PromptLibrary";
 import { ContextWorkspace } from "./components/ContextWorkspace";
 import { CitationGraph } from "./components/CitationGraph";
 import { chooseLibrary, initializeLibrary, listCollections, listJobs, listPapers, nativeRuntime, onEngineProgress, scanLibrary, startLibraryWatcher } from "./lib/bridge";
-import { hydrateOcrCredential, hydrateProviderCredentials, loadWorkspaceSettingsSnapshot, saveWorkspaceSettingsSnapshot } from "./lib/credentials";
+import { clearVisionProvider, configureVisionProvider, hydrateOcrCredential, hydrateProviderCredentials, loadWorkspaceSettingsSnapshot, saveWorkspaceSettingsSnapshot } from "./lib/credentials";
 import { filterPapersByCollection } from "./lib/collectionTree";
 import { hasPersistedWorkspaceSettings, useWorkspace } from "./store";
 
@@ -83,7 +83,7 @@ export function App() {
   useEffect(() => {
     if (!nativeRuntime || !settingsRecovered) return;
     void saveWorkspaceSettingsSnapshot({
-      version: 1,
+      version: 2,
       root: workspace.root,
       providers: workspace.providers,
       customModels: workspace.customModels,
@@ -91,10 +91,29 @@ export function App() {
       markdownFormattingModelId: workspace.markdownFormattingModelId,
       autoFormatMarkdown: workspace.autoFormatMarkdown,
       fullPageOcrModelId: workspace.fullPageOcrModelId,
+      visionAnalysisModelId: workspace.visionAnalysisModelId,
       ocrConsent: workspace.ocrConsent,
       fontSize: workspace.fontSize,
+      readerZoom: workspace.readerZoom,
+      readerTheme: workspace.readerTheme,
+      readerBackgroundColor: workspace.readerBackgroundColor,
+      readerTextColor: workspace.readerTextColor,
+      readerTranslationView: workspace.readerTranslationView,
     }).catch(() => undefined);
-  }, [settingsRecovered, workspace.root, workspace.providers, workspace.customModels, workspace.contextCompressionModelId, workspace.markdownFormattingModelId, workspace.autoFormatMarkdown, workspace.fullPageOcrModelId, workspace.ocrConsent, workspace.fontSize]);
+  }, [settingsRecovered, workspace.root, workspace.providers, workspace.customModels, workspace.contextCompressionModelId, workspace.markdownFormattingModelId, workspace.autoFormatMarkdown, workspace.fullPageOcrModelId, workspace.visionAnalysisModelId, workspace.ocrConsent, workspace.fontSize, workspace.readerZoom, workspace.readerTheme, workspace.readerBackgroundColor, workspace.readerTextColor, workspace.readerTranslationView]);
+
+  useEffect(() => {
+    if (!nativeRuntime || !settingsRecovered) return;
+    const model = workspace.customModels.find((item) => item.id === workspace.visionAnalysisModelId);
+    const provider = workspace.providers.find((item) => item.id === model?.providerId);
+    if (!model || !provider) {
+      void clearVisionProvider().catch(() => undefined);
+      return;
+    }
+    void hydrateProviderCredentials([provider])
+      .then(() => configureVisionProvider(provider, model))
+      .catch(() => undefined);
+  }, [settingsRecovered, workspace.visionAnalysisModelId, workspace.customModels, workspace.providers]);
 
   useEffect(() => {
     let cleanup: () => void = () => {};

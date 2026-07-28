@@ -50,7 +50,12 @@ class RpcServer:
 
     def library(self, root: str) -> Library:
         if root not in self.libraries:
-            self.libraries[root] = Library(root, ocr_page=self.ocr_page)
+            self.libraries[root] = Library(
+                root,
+                ocr_page=self.ocr_page,
+                vision_config=self.vision_config,
+                vision_analyze=self.vision_analyze,
+            )
         return self.libraries[root]
 
     def host_call(self, method: str, params: dict[str, Any], timeout: float = 100) -> Any:
@@ -70,6 +75,12 @@ class RpcServer:
 
     def ocr_page(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.host_call("host.ocr_page", params, timeout=100)
+
+    def vision_config(self) -> dict[str, Any]:
+        return self.host_call("host.vision_config", {}, timeout=10)
+
+    def vision_analyze(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.host_call("host.vision_analyze", params, timeout=180)
 
     def dispatch(self, request: dict[str, Any]) -> Any:
         method = request.get("method")
@@ -151,6 +162,14 @@ class RpcServer:
             )
         if method == "paper.read_references":
             return self.library(params["root"]).read_references(params["paperId"])
+        if method == "paper.preprocess_status":
+            return self.library(params["root"]).preprocess_status(params["paperId"])
+        if method == "figure.analysis_list":
+            return self.library(params["root"]).list_figure_analyses(params["paperId"])
+        if method == "figure.analysis_retry":
+            return self.library(params["root"]).retry_figure_analysis(
+                params["paperId"], params["figureId"]
+            )
         if method == "graph.build":
             return self.library(params["root"]).build_citation_graph(
                 params["paperId"], int(params.get("maxDepth", 2)), bool(params.get("force", False))
@@ -159,6 +178,14 @@ class RpcServer:
             return self.library(params["root"]).list_translations(params["paperId"])
         if method == "translation.save":
             return self.library(params["root"]).save_translation(params)
+        if method == "reader.annotation_list":
+            return self.library(params["root"]).list_reader_annotations(params["paperId"])
+        if method == "reader.annotation_save":
+            return self.library(params["root"]).save_reader_annotation(params)
+        if method == "reader.annotation_delete":
+            return {"deleted": self.library(params["root"]).delete_reader_annotation(
+                params["annotationId"], params["paperId"]
+            )}
         if method == "reader.analysis_list":
             return self.library(params["root"]).list_reader_analyses(params["paperId"])
         if method == "reader.analysis_save":
@@ -174,29 +201,47 @@ class RpcServer:
                 )
             }
         if method == "context.get":
-            return self.library(params["root"]).get_context_draft()
+            return self.library(params["root"]).get_context_draft(
+                params.get("scopeId", "research:default")
+            )
         if method == "context.add_paper":
             return self.library(params["root"]).add_paper_to_context(
-                params["paperId"], params.get("mode", "full")
+                params["paperId"], params.get("mode", "full"),
+                params.get("scopeId", "research:default")
             )
         if method == "context.add_selection":
             return self.library(params["root"]).add_selection_to_context(params)
         if method == "context.read_item":
-            return self.library(params["root"]).read_context_item(params["itemId"])
+            return self.library(params["root"]).read_context_item(
+                params["itemId"], params.get("scopeId", "research:default")
+            )
         if method == "context.get_compression":
             return self.library(params["root"]).get_context_compression(
                 params["itemId"], params["modelId"], params["promptVersion"]
             )
         if method == "context.activate_compression":
             return self.library(params["root"]).activate_context_compression(
-                params["itemId"], params["modelId"], params["promptVersion"]
+                params["itemId"], params["modelId"], params["promptVersion"],
+                params.get("scopeId", "research:default")
             )
         if method == "context.save_compression":
             return self.library(params["root"]).save_context_compression(params)
         if method == "context.remove_paper":
-            return self.library(params["root"]).remove_paper_from_context(params["paperId"])
+            return self.library(params["root"]).remove_paper_from_context(
+                params["paperId"], params.get("scopeId", "research:default")
+            )
         if method == "context.clear":
-            return self.library(params["root"]).clear_context()
+            return self.library(params["root"]).clear_context(
+                params.get("scopeId", "research:default")
+            )
+        if method == "context.item_upsert":
+            return self.library(params["root"]).upsert_scoped_context_item(params)
+        if method == "context.item_delete":
+            return self.library(params["root"]).delete_scoped_context_item(
+                params["scopeId"], params["itemId"]
+            )
+        if method == "context.scope_reset":
+            return self.library(params["root"]).reset_context_scope(params["scopeId"])
         if method == "agent.list":
             return self.library(params["root"]).list_agent_profiles()
         if method == "agent.upsert":
