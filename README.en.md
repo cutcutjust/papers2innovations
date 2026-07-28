@@ -16,7 +16,7 @@
 
 Papers2Innovations addresses two practical barriers: English terminology, equations, and long-form structure interrupt reading for Chinese speakers; newcomers may finish a paper yet still struggle to compare methods, locate gaps, and formulate a research question. It reconstructs PDFs as section-based Markdown linked to source pages, then keeps translation, explanation, evidence context, and innovation analysis in one recoverable local workspace.
 
-> Current release: `v0.1.17` for Windows x64. The project remains in active `0.1.x` development; keep backups of irreplaceable source PDFs.
+> Current release: `v0.1.18` for Windows x64. The project remains in active `0.1.x` development; keep backups of irreplaceable source PDFs.
 
 ## Why Papers2Innovations exists
 

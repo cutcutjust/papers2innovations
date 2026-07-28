@@ -1,8 +1,10 @@
 import type { LibraryCollection, LibraryPaper } from "@p2i/contracts";
-import { BookOpen, CheckCircle2, ChevronRight, FileText, Filter, FolderOpen, Grid2X2, GripVertical, Layers3, List, RefreshCw, Search, SortAsc, Upload } from "lucide-react";
+import { BookOpen, CheckCircle2, ChevronRight, FileCheck2, FileText, Filter, FolderOpen, Grid2X2, GripVertical, Layers3, List, LoaderCircle, RefreshCw, Search, ShieldCheck, SortAsc, Upload, X } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Status } from "./Status";
 import { useWorkspace } from "../store";
+import { importPdfs, type PdfImportResult } from "../lib/bridge";
 
 interface Props {
   papers: LibraryPaper[];
@@ -15,16 +17,46 @@ interface Props {
 }
 
 export function LibraryWorkspace({ papers, allPapers, collections, selected, scanning, onScan, onChooseLibrary }: Props) {
-  const { selectedPaperId, selectPaper, openReader, query, setQuery } = useWorkspace();
+  const { root, selectedPaperId, selectPaper, openReader, query, setQuery, setView } = useWorkspace();
+  const queryClient = useQueryClient();
   const [draggingPaperId, setDraggingPaperId] = useState("");
+  const [importOpen, setImportOpen] = useState(false);
+  const [importStatus, setImportStatus] = useState<"idle" | "importing" | "done" | "error">("idle");
+  const [importResult, setImportResult] = useState<PdfImportResult | null>(null);
+  const [importError, setImportError] = useState("");
   const collectionNames = useMemo(() => new Map(collections.map((item) => [item.id, item.name])), [collections]);
+  const addPdfs = async () => {
+    setImportStatus("importing");
+    setImportError("");
+    try {
+      const result = await importPdfs(root);
+      if (result.selected === 0) {
+        setImportStatus("idle");
+        return;
+      }
+      setImportResult(result);
+      setImportStatus("done");
+      onScan();
+      window.setTimeout(() => void queryClient.invalidateQueries({ queryKey: ["papers", root] }), 1_000);
+    } catch (error) {
+      setImportStatus("error");
+      setImportError(error instanceof Error ? error.message : String(error));
+    }
+  };
   return (
     <div className="library-workspace">
+      {importOpen && <div className="pdf-import-backdrop" role="presentation"><section className="pdf-import-dialog" role="dialog" aria-modal="true" aria-labelledby="pdf-import-title">
+        <header><span><Upload size={20} /></span><div><h2 id="pdf-import-title">添加本地 PDF</h2><p>论文会复制到独立资料库，原文件不会被移动或修改。</p></div><button title="关闭" onClick={() => setImportOpen(false)}><X size={16} /></button></header>
+        <button className={`pdf-import-dropzone ${importStatus}`} onClick={() => void addPdfs()} disabled={importStatus === "importing"}>{importStatus === "importing" ? <LoaderCircle className="spin" size={28} /> : importStatus === "done" ? <FileCheck2 size={28} /> : <Upload size={28} />}<strong>{importStatus === "importing" ? "正在复制并校验 PDF…" : importStatus === "done" ? "论文已加入解析队列" : "选择一篇或多篇 PDF"}</strong><span>{importStatus === "done" && importResult ? `复制 ${importResult.copied} 篇，跳过重复 ${importResult.deduplicated} 篇` : "支持批量选择；重复论文会按内容自动识别"}</span></button>
+        <div className="pdf-import-assurance"><span><ShieldCheck size={15} /><b>原子复制</b><small>复制完成并校验后才进入论文库</small></span><span><Layers3 size={15} /><b>自动解析</b><small>生成 MD、章节、插图和表格</small></span><span><FileText size={15} /><b>可随时归类</b><small>导入后拖到左侧文件树即可</small></span></div>
+        {importStatus === "error" && <p className="pdf-import-error">{importError}</p>}
+        <footer><small>保存位置：{importResult?.destination ?? `${root}/Papers/Manual`}</small><div><button className="secondary-button" onClick={() => setImportOpen(false)}>{importStatus === "done" ? "完成" : "取消"}</button>{importStatus === "done" && <button className="primary-button compact" onClick={() => { setImportOpen(false); setView("jobs"); }}>查看解析进度</button>}</div></footer>
+      </section></div>}
       <header className="page-header figma-page-header">
         <div><h1>论文库</h1><p>{allPapers.length} 篇论文 · 本地研究资料库</p></div>
         <div className="page-actions">
-          <button className="secondary-button"><Upload size={14} /> 添加 PDF</button>
-          <button className="primary-button compact" onClick={onChooseLibrary}><FolderOpen size={14} /> 打开论文文件夹</button>
+          <button className="primary-button compact" onClick={() => { setImportOpen(true); setImportStatus("idle"); setImportResult(null); }}><Upload size={14} /> 添加 PDF</button>
+          <button className="secondary-button" onClick={onChooseLibrary}><FolderOpen size={14} /> 更换资料库</button>
         </div>
       </header>
       <div className="library-toolbar">

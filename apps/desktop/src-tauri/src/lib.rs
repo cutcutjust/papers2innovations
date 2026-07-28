@@ -4,9 +4,11 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader, Write},
+    fs,
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
@@ -1395,6 +1397,102 @@ fn choose_library() -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PdfImportResult {
+    selected: usize,
+    copied: usize,
+    deduplicated: usize,
+    destination: String,
+}
+
+fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
+    let mut file =
+        fs::File::open(path).map_err(|error| format!("Cannot open {}: {error}", path.display()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest.finalize().to_vec())
+}
+
+#[tauri::command]
+fn import_pdfs(engine: State<'_, Engine>, root: String) -> Result<PdfImportResult, String> {
+    engine.allow_library_root(&root)?;
+    let selected = rfd::FileDialog::new()
+        .set_title("添加 PDF 到 Papers2Innovations")
+        .add_filter("PDF 论文", &["pdf"])
+        .pick_files()
+        .unwrap_or_default();
+    let destination = PathBuf::from(&root).join("Papers").join("Manual");
+    fs::create_dir_all(&destination)
+        .map_err(|error| format!("Cannot create {}: {error}", destination.display()))?;
+    let mut copied = 0;
+    let mut deduplicated = 0;
+    for (index, source) in selected.iter().enumerate() {
+        if !source
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("pdf"))
+        {
+            continue;
+        }
+        let file_name = source.file_name().ok_or("Selected PDF has no file name")?;
+        let mut target = destination.join(file_name);
+        let source_hash = sha256_file(source)?;
+        if target.is_file() && sha256_file(&target)? == source_hash {
+            deduplicated += 1;
+            continue;
+        }
+        if target.exists() {
+            let stem = source
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("paper");
+            let mut suffix = 2;
+            loop {
+                let candidate = destination.join(format!("{stem} ({suffix}).pdf"));
+                if !candidate.exists() {
+                    target = candidate;
+                    break;
+                }
+                if candidate.is_file() && sha256_file(&candidate)? == source_hash {
+                    deduplicated += 1;
+                    target = candidate;
+                    break;
+                }
+                suffix += 1;
+            }
+            if target.is_file() && sha256_file(&target)? == source_hash {
+                continue;
+            }
+        }
+        let temporary = destination.join(format!(".p2i-import-{}-{index}.tmp", std::process::id()));
+        fs::copy(source, &temporary)
+            .map_err(|error| format!("Cannot copy {}: {error}", source.display()))?;
+        if sha256_file(&temporary)? != source_hash {
+            let _ = fs::remove_file(&temporary);
+            return Err(format!("PDF verification failed: {}", source.display()));
+        }
+        fs::rename(&temporary, &target)
+            .map_err(|error| format!("Cannot finish importing {}: {error}", source.display()))?;
+        copied += 1;
+    }
+    Ok(PdfImportResult {
+        selected: selected.len(),
+        copied,
+        deduplicated,
+        destination: destination.to_string_lossy().into_owned(),
+    })
+}
+
 #[tauri::command]
 fn uninstall_app(app: AppHandle) -> Result<(), String> {
     #[cfg(target_os = "windows")]
@@ -1453,6 +1551,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             rpc_call,
             choose_library,
+            import_pdfs,
             credential_set,
             credential_delete,
             provider_credential_set,

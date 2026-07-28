@@ -3,6 +3,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bot,
   CheckCircle2,
+  Database,
+  History,
   KeyRound,
   LoaderCircle,
   Pencil,
@@ -10,11 +12,13 @@ import {
   Plus,
   RotateCcw,
   Save,
+  Search,
   Settings2,
   Sparkles,
   Square,
   Trash2,
   TriangleAlert,
+  Wrench,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -117,6 +121,8 @@ export function Agents() {
   const [liveOutput, setLiveOutput] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
+  const [profileSearch, setProfileSearch] = useState("");
+  const [activeTab, setActiveTab] = useState<"run" | "config" | "history">("run");
   const streamHandle = useRef<ModelStreamHandle | null>(null);
   const checkpointTimer = useRef<number | null>(null);
   const activeRunIdRef = useRef("");
@@ -132,6 +138,12 @@ export function Agents() {
     queryFn: () => hydrateProviderCredentials(providers),
     retry: false,
   });
+  const contextQuery = useQuery({
+    queryKey: ["context-draft", root],
+    queryFn: () => getContextDraft(root),
+    enabled: Boolean(root),
+    retry: false,
+  });
   const profiles = profilesQuery.data ?? [];
   const selected = profiles.find((profile) => profile.id === selectedId) ?? profiles[0];
   const runsQuery = useQuery({
@@ -142,6 +154,10 @@ export function Agents() {
     refetchInterval: activeRunId ? 2000 : false,
   });
   const runs = runsQuery.data ?? [];
+  const visibleProfiles = useMemo(() => {
+    const needle = profileSearch.trim().toLowerCase();
+    return needle ? profiles.filter((profile) => `${profile.name} ${profile.description}`.toLowerCase().includes(needle)) : profiles;
+  }, [profileSearch, profiles]);
   const configuredCredentials = useMemo(
     () => new Set((credentialsQuery.data ?? []).filter((item) => item.configured).map((item) => item.credentialId)),
     [credentialsQuery.data],
@@ -183,6 +199,7 @@ export function Agents() {
       setDraft(blankProfile(model?.id ?? "", provider?.id ?? "", provider?.credentialId ?? ""));
     }
     setEditing(true);
+    setActiveTab("config");
     setNotice("");
   };
 
@@ -191,7 +208,7 @@ export function Agents() {
     const model = customModels.find((item) => item.id === draft.modelId);
     const provider = providers.find((item) => item.id === model?.providerId);
     if (!model || !provider) {
-      setNotice("Choose a configured custom model before saving this profile.");
+      setNotice("请先选择一个已配置的自定义模型，再保存智能体。");
       return;
     }
     setBusy(true);
@@ -206,7 +223,8 @@ export function Agents() {
       await invalidate();
       setSelectedId(saved.id);
       setEditing(false);
-      setNotice("Agent profile saved to the local library.");
+      setActiveTab("run");
+      setNotice("智能体配置已保存到当前论文库。");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -215,12 +233,12 @@ export function Agents() {
   };
 
   const removeProfile = async () => {
-    if (!selected || !window.confirm(`Delete ${selected.name}? Profiles with run history must be disabled instead.`)) return;
+    if (!selected || !window.confirm(`删除智能体“${selected.name}”？如果已有运行历史，建议改为停用。`)) return;
     setBusy(true);
     try {
       await deleteAgentProfile(root, selected.id);
       setSelectedId("");
-      setNotice("Agent profile deleted.");
+      setNotice("智能体配置已删除。");
       await invalidate();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
@@ -468,46 +486,40 @@ export function Agents() {
   if (profilesQuery.isLoading) return <div className="agents-page agent-loading"><LoaderCircle className="spin" size={20} /> 正在加载本地智能体运行时...</div>;
   if (profilesQuery.isError) return <div className="agents-page agent-loading"><TriangleAlert size={20} /> {profilesQuery.error instanceof Error ? profilesQuery.error.message : "智能体运行时加载失败。"}</div>;
 
-  return <div className="agents-page">
-    <header className="figma-page-header">
-      <div><h1>智能体中心</h1><p>持久化研究智能体 / 安全模型网关 / 共享上下文</p></div>
+  const contextItems = contextQuery.data?.items.length ?? 0;
+  const contextTokens = contextQuery.data ? Object.values(contextQuery.data.tokenBreakdown).reduce((sum, value) => sum + value, 0) : 0;
+  return <div className="agents-page agent-center-refined">
+    <header className="agent-center-hero">
+      <div><span className="agent-hero-mark"><Sparkles size={20} /></span><span><h1>智能体中心</h1><p>把论文上下文交给可配置、可追溯的研究智能体</p></span></div>
       <div className="page-actions"><button className="secondary-button" onClick={() => setView("settings")}><Settings2 size={13} /> 模型设置</button><button className="primary-button compact" onClick={() => beginEdit()}><Plus size={13} /> 新建智能体</button></div>
     </header>
-    <div className="agent-layout">
-      <section className="agent-grid">{profiles.map((profile) => {
-        const model = customModels.find((item) => item.id === profile.modelId);
-        const provider = providers.find((item) => item.id === model?.providerId);
-        const configured = !nativeRuntime || Boolean(provider && configuredCredentials.has(provider.credentialId));
-        const status = statusLabel(profile, configured);
-        return <button key={profile.id} className={`agent-card ${selected?.id === profile.id ? "selected" : ""}`} onClick={() => { setSelectedId(profile.id); setEditing(false); setNotice(""); }}>
-          <div className="agent-card-top"><span className="agent-icon" style={{ color: profile.color, background: `${profile.color}14`, borderColor: `${profile.color}55` }}><Bot size={18} /></span><span className={`tag ${statusClass(status)}`}>{status}</span></div>
-          <h2>{profile.name}</h2><p>{profile.description}</p><div className="agent-card-meta"><span>{model?.displayName ?? profile.modelId}</span><span>{Math.round(profile.maxContextTokens / 1000)}K 上下文</span></div>
-          <footer><span><CheckCircle2 size={12} /> {profile.allowedTools.length} 项权限</span><span>{runStatusCopy(profile.latestRun)}</span></footer>
-        </button>;
-      })}</section>
-
-      <aside className="agent-detail">{editing && draft ? <>
-        <div className="agent-detail-title"><span className="agent-icon" style={{ color: draft.color, background: `${draft.color}14`, borderColor: `${draft.color}55` }}><Pencil size={18} /></span><div><h2>智能体配置</h2><p>保存在当前论文库中</p></div></div>
-        <div className="agent-detail-section agent-profile-form">
-          <label><span>名称</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
-          <label><span>说明</span><input value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label>
-          <label><span>运行模型</span><select value={draft.modelId} onChange={(event) => setDraft({ ...draft, modelId: event.target.value })}>{customModels.map((model) => <option value={model.id} key={model.id}>{model.displayName} / {model.model}</option>)}</select></label>
-          <div className="agent-profile-policies"><label><span>Network</span><select value={draft.networkPolicy} onChange={(event) => setDraft({ ...draft, networkPolicy: event.target.value as AgentProfile["networkPolicy"] })}><option value="none">None</option><option value="academic">Academic only</option><option value="full">Full</option></select></label><label><span>Write policy</span><select value={draft.writePolicy} onChange={(event) => setDraft({ ...draft, writePolicy: event.target.value as AgentProfile["writePolicy"] })}><option value="read-only">Read only</option><option value="confirm-write">Confirm writes</option><option value="trusted-write">Trusted writes</option></select></label></div>
-          <label><span>系统提示词</span><textarea value={draft.systemPrompt} onChange={(event) => setDraft({ ...draft, systemPrompt: event.target.value })} /></label>
-          <label className="agent-enabled"><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} /><span>启用此智能体</span></label>
-        </div>
-        <div className="agent-detail-section"><h3>允许使用的工具</h3><div className="agent-tool-grid">{AVAILABLE_TOOLS.map(([id, label]) => <label key={id}><input type="checkbox" checked={draft.allowedTools.includes(id)} onChange={(event) => setDraft({ ...draft, allowedTools: event.target.checked ? [...draft.allowedTools, id] : draft.allowedTools.filter((tool) => tool !== id) })} /><span>{label}</span></label>)}</div></div>
-        <div className="agent-detail-actions"><button className="primary-button compact" onClick={() => void saveProfile()} disabled={busy}><Save size={13} /> 保存配置</button><button className="secondary-button" onClick={() => setEditing(false)}>取消</button></div>
-      </> : selected ? <>
-        <div className="agent-detail-title"><span className="agent-icon" style={{ color: selected.color, background: `${selected.color}14`, borderColor: `${selected.color}55` }}><Sparkles size={18} /></span><div><h2>{selected.name}</h2><p>{selected.description}</p></div></div>
-        <div className="agent-detail-section"><h3>运行参数</h3><dl><div><dt>模型</dt><dd>{selectedModel?.displayName ?? selected.modelId}</dd></div><div><dt>上下文上限</dt><dd>{Math.round(selected.maxContextTokens / 1000)}K</dd></div><div><dt>网络权限</dt><dd>{selected.networkPolicy}</dd></div><div><dt>写入策略</dt><dd>{selected.writePolicy}</dd></div></dl></div>
-        <div className="agent-detail-section"><h3>已启用工具</h3>{selected.allowedTools.map((tool) => <p className="tool-permission" key={tool}><CheckCircle2 size={13} /> {AVAILABLE_TOOLS.find(([id]) => id === tool)?.[1] ?? tool}</p>)}</div>
-        <div className="agent-detail-section agent-run-compose"><h3>运行智能体</h3><textarea value={task} onChange={(event) => setTask(event.target.value)} aria-label="智能体任务" disabled={running} /><small>使用当前共享上下文草稿，并持久化带修订记录的运行结果。</small>{liveOutput && <pre>{liveOutput}</pre>}</div>
-        <div className="agent-detail-actions">{!selectedConfigured ? <button className="primary-button compact" onClick={() => setView("settings")}><KeyRound size={13} /> 配置 API</button> : running ? <button className="danger-button" onClick={() => void cancel()}><Square size={13} /> 停止运行</button> : <button className="primary-button compact" onClick={() => void start()} disabled={busy || !selected.enabled}>{busy ? <LoaderCircle className="spin" size={13} /> : <Play size={13} />} 运行智能体</button>}<button className="secondary-button" onClick={() => beginEdit(selected)} disabled={running}><Pencil size={13} /> 编辑配置</button><button className="secondary-button" onClick={() => void removeProfile()} disabled={running || busy}><Trash2 size={13} /> 删除配置</button></div>
-        <div className="agent-detail-section agent-run-history"><h3>最近运行</h3>{runs.length === 0 ? <p className="agent-empty-run">尚无持久化运行记录。</p> : runs.slice(0, 6).map((run) => <article key={run.id} className={`agent-run-row ${run.status}`}><div><strong>{runStatusCopy(run)}</strong><small>{new Date(run.createdAt).toLocaleString("zh-CN")}</small></div><p>{run.outputText || run.error || run.userPrompt}</p>{run.toolCalls.length > 0 && <div className="agent-run-tools">{run.toolCalls.map((call) => <span className={call.status} key={call.id}><Sparkles size={9} /> {call.toolName}<b>{call.status}</b></span>)}</div>}<footer><span>{run.usage.inputTokens + run.usage.outputTokens} tokens / {(run.usage.durationMs / 1000).toFixed(1)}s · {run.toolCalls.length} 个工具</span>{["failed", "cancelled", "interrupted"].includes(run.status) && <button title="重试运行" onClick={() => void retry(run)} disabled={running || busy}><RotateCcw size={12} /></button>}</footer></article>)}</div>
-      </> : <div className="agent-loading">暂无智能体配置。</div>}
-      {notice && <div className="agent-runtime-notice">{notice}</div>}
+    <section className="agent-health-strip"><div><Bot size={16} /><span><small>智能体</small><strong>{profiles.length}</strong></span></div><div><Database size={16} /><span><small>共享上下文</small><strong>{contextItems} 项 · {(contextTokens / 1000).toFixed(1)}K</strong></span></div><div><Wrench size={16} /><span><small>可用模型</small><strong>{customModels.length}</strong></span></div><div><History size={16} /><span><small>当前状态</small><strong>{running ? "正在运行" : "本地就绪"}</strong></span></div></section>
+    <div className="agent-center-body">
+      <aside className="agent-catalog">
+        <header><div><strong>研究智能体</strong><small>选择一个智能体开始任务</small></div><button title="新建智能体" onClick={() => beginEdit()}><Plus size={14} /></button></header>
+        <label className="agent-search"><Search size={13} /><input value={profileSearch} onChange={(event) => setProfileSearch(event.target.value)} placeholder="搜索智能体" /></label>
+        <div className="agent-catalog-list">{visibleProfiles.map((profile) => {
+          const model = customModels.find((item) => item.id === profile.modelId);
+          const provider = providers.find((item) => item.id === model?.providerId);
+          const configured = !nativeRuntime || Boolean(provider && configuredCredentials.has(provider.credentialId));
+          const status = statusLabel(profile, configured);
+          return <button key={profile.id} className={`agent-catalog-item ${selected?.id === profile.id && !editing ? "selected" : ""}`} onClick={() => { setSelectedId(profile.id); setEditing(false); setActiveTab("run"); setNotice(""); }}><span className="agent-icon" style={{ color: profile.color, background: `${profile.color}14`, borderColor: `${profile.color}55` }}><Bot size={17} /></span><span><strong>{profile.name}</strong><small>{model?.displayName ?? profile.modelId}</small></span><em className={statusClass(status)}>{status}</em></button>;
+        })}{visibleProfiles.length === 0 && <div className="agent-catalog-empty"><Bot size={22} /><span>没有匹配的智能体</span></div>}</div>
       </aside>
+
+      <main className="agent-workbench">{editing && draft ? <>
+        <header className="agent-workbench-header"><span className="agent-icon" style={{ color: draft.color, background: `${draft.color}14`, borderColor: `${draft.color}55` }}><Pencil size={18} /></span><div><h2>{profiles.some((profile) => profile.id === draft.id) ? "编辑智能体" : "创建研究智能体"}</h2><p>配置模型、权限与回答边界，保存后即可运行</p></div></header>
+        <div className="agent-config-layout"><section className="agent-config-main"><div className="agent-profile-form refined"><label><span>名称</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：方法复现助手" /></label><label><span>说明</span><input value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder="一句话说明它擅长什么" /></label><label><span>运行模型</span><select value={draft.modelId} onChange={(event) => setDraft({ ...draft, modelId: event.target.value })}>{customModels.map((model) => <option value={model.id} key={model.id}>{model.displayName} · {model.model}</option>)}</select></label><div className="agent-profile-policies"><label><span>联网范围</span><select value={draft.networkPolicy} onChange={(event) => setDraft({ ...draft, networkPolicy: event.target.value as AgentProfile["networkPolicy"] })}><option value="none">仅本地</option><option value="academic">仅学术来源</option><option value="full">允许公开网络</option></select></label><label><span>写入策略</span><select value={draft.writePolicy} onChange={(event) => setDraft({ ...draft, writePolicy: event.target.value as AgentProfile["writePolicy"] })}><option value="read-only">只读</option><option value="confirm-write">写入前确认</option><option value="trusted-write">允许可信写入</option></select></label></div><label><span>系统提示词</span><textarea value={draft.systemPrompt} onChange={(event) => setDraft({ ...draft, systemPrompt: event.target.value })} /></label><label className="agent-enabled"><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} /><span>保存后立即启用</span></label></div></section><aside className="agent-tool-picker"><header><Wrench size={15} /><span><strong>工具权限</strong><small>仅开启任务确实需要的能力</small></span></header>{AVAILABLE_TOOLS.map(([id, label]) => <label key={id}><input type="checkbox" checked={draft.allowedTools.includes(id)} onChange={(event) => setDraft({ ...draft, allowedTools: event.target.checked ? [...draft.allowedTools, id] : draft.allowedTools.filter((tool) => tool !== id) })} /><span>{label}</span></label>)}</aside></div>
+        <footer className="agent-config-actions"><button className="secondary-button" onClick={() => { setEditing(false); setActiveTab("run"); }}>取消</button><button className="primary-button compact" onClick={() => void saveProfile()} disabled={busy || !draft.name.trim()}>{busy ? <LoaderCircle className="spin" size={13} /> : <Save size={13} />} 保存智能体</button></footer>
+      </> : selected ? <>
+        <header className="agent-workbench-header"><span className="agent-icon large" style={{ color: selected.color, background: `${selected.color}14`, borderColor: `${selected.color}55` }}><Sparkles size={20} /></span><div><h2>{selected.name}</h2><p>{selected.description}</p></div><span className={`tag ${statusClass(statusLabel(selected, selectedConfigured))}`}>{statusLabel(selected, selectedConfigured)}</span></header>
+        <nav className="agent-workbench-tabs"><button className={activeTab === "run" ? "active" : ""} onClick={() => setActiveTab("run")}><Play size={12} /> 运行</button><button className={activeTab === "config" ? "active" : ""} onClick={() => setActiveTab("config")}><Settings2 size={12} /> 配置概览</button><button className={activeTab === "history" ? "active" : ""} onClick={() => setActiveTab("history")}><History size={12} /> 历史 {runs.length > 0 && <b>{runs.length}</b>}</button></nav>
+        {activeTab === "run" && <div className="agent-run-workspace"><section className="agent-readiness"><div className={contextItems ? "ready" : "warning"}><Database size={16} /><span><strong>{contextItems ? "上下文已准备" : "尚未加入论文上下文"}</strong><small>{contextItems ? `${contextItems} 项来源，约 ${(contextTokens / 1000).toFixed(1)}K tokens` : "先从阅读器或上下文工作区加入 MD 原文、AI 压缩原文或自定义文字"}</small></span><button onClick={() => setView("context")}>管理上下文</button></div><div><Wrench size={16} /><span><strong>{selected.allowedTools.length} 个工具可用</strong><small>{selectedModel?.displayName ?? selected.modelId} · {Math.round(selected.maxContextTokens / 1000)}K 上下文</small></span></div></section><section className="agent-task-composer"><header><span><strong>交给智能体一个明确任务</strong><small>结果、调用记录和 token 用量会保存到当前论文库</small></span></header><textarea value={task} onChange={(event) => setTask(event.target.value)} aria-label="智能体任务" disabled={running} placeholder="例如：比较上下文中三篇论文的方法差异，并提出两个可验证的研究空白。" />{liveOutput && <div className="agent-live-output"><span><LoaderCircle className="spin" size={12} /> 实时输出</span><pre>{liveOutput}</pre></div>}<footer>{!selectedConfigured ? <button className="primary-button compact" onClick={() => setView("settings")}><KeyRound size={13} /> 配置模型密钥</button> : running ? <button className="danger-button" onClick={() => void cancel()}><Square size={13} /> 停止运行</button> : <button className="primary-button compact" onClick={() => void start()} disabled={busy || !selected.enabled || !task.trim()}>{busy ? <LoaderCircle className="spin" size={13} /> : <Play size={13} />} 开始运行</button>}</footer></section></div>}
+        {activeTab === "config" && <div className="agent-overview-grid"><section><h3>运行参数</h3><dl><div><dt>模型</dt><dd>{selectedModel?.displayName ?? selected.modelId}</dd></div><div><dt>上下文上限</dt><dd>{Math.round(selected.maxContextTokens / 1000)}K</dd></div><div><dt>联网范围</dt><dd>{selected.networkPolicy === "none" ? "仅本地" : selected.networkPolicy === "academic" ? "学术来源" : "公开网络"}</dd></div><div><dt>写入策略</dt><dd>{selected.writePolicy === "read-only" ? "只读" : selected.writePolicy === "confirm-write" ? "写入前确认" : "可信写入"}</dd></div></dl></section><section><h3>已启用工具</h3><div className="agent-tool-summary">{selected.allowedTools.map((tool) => <span key={tool}><CheckCircle2 size={12} /> {AVAILABLE_TOOLS.find(([id]) => id === tool)?.[1] ?? tool}</span>)}</div></section><footer><button className="secondary-button" onClick={() => beginEdit(selected)} disabled={running}><Pencil size={13} /> 编辑配置</button><button className="danger-link" onClick={() => void removeProfile()} disabled={running || busy}><Trash2 size={13} /> 删除智能体</button></footer></div>}
+        {activeTab === "history" && <div className="agent-history-panel">{runs.length === 0 ? <div className="agent-history-empty"><History size={25} /><strong>还没有运行记录</strong><span>完成一次任务后，这里会保留结果、工具调用和 token 用量。</span><button className="secondary-button" onClick={() => setActiveTab("run")}>创建第一次运行</button></div> : runs.map((run) => <article key={run.id} className={`agent-run-row ${run.status}`}><header><span><strong>{runStatusCopy(run)}</strong><small>{new Date(run.createdAt).toLocaleString("zh-CN")}</small></span><code>{run.usage.inputTokens + run.usage.outputTokens} tokens · {(run.usage.durationMs / 1000).toFixed(1)} 秒</code></header><h4>{run.userPrompt}</h4><p>{run.outputText || run.error || "尚无输出"}</p>{run.toolCalls.length > 0 && <div className="agent-run-tools">{run.toolCalls.map((call) => <span className={call.status} key={call.id}><Sparkles size={9} /> {call.toolName}<b>{call.status}</b></span>)}</div>}<footer><span>{run.toolCalls.length} 次工具调用</span>{["failed", "cancelled", "interrupted"].includes(run.status) && <button title="重试运行" onClick={() => void retry(run)} disabled={running || busy}><RotateCcw size={12} /> 重试</button>}</footer></article>)}</div>}
+      </> : <div className="agent-welcome-empty"><Bot size={32} /><h2>创建第一个研究智能体</h2><p>选择模型、设定工具权限，然后让它基于你的论文上下文执行可追溯任务。</p><button className="primary-button compact" onClick={() => beginEdit()}><Plus size={13} /> 新建智能体</button></div>}
+      {notice && <div className="agent-runtime-notice">{notice}</div>}
+      </main>
     </div>
   </div>;
 }

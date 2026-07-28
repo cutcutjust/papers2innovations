@@ -1,7 +1,7 @@
 import type { ContextSnapshot, LibraryPaper, ModelStreamEvent, ReaderAnalysisRecord, ReaderAnalysisType, ReaderChatTurn, TranslationRecord } from "@p2i/contracts";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpen, Bot, Check, ChevronLeft, FileImage, FileText, Languages, Layers3, LoaderCircle, Maximize2, MessageSquareText, Minimize2, RefreshCw, Search, Send, Sparkles, Square, Trash2, TriangleAlert, WandSparkles, X } from "lucide-react";
+import { BookOpen, Bot, Check, ChevronLeft, FileImage, FileText, Languages, Layers3, LoaderCircle, Maximize2, MessageSquareText, Minimize2, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, RefreshCw, Search, Send, Sparkles, Square, Trash2, TriangleAlert, Volume2, WandSparkles, X } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
@@ -12,15 +12,17 @@ import { hydrateProviderCredentials } from "../lib/credentials";
 import { buildReaderSections, compactReaderBlocks, resolveMarkdownAssetPath, type ReaderDisplaySection, type ReaderDocumentBlock } from "../lib/documentBlocks";
 import { MARKDOWN_FORMAT_PROMPT_VERSION, prepareMarkdownForFormatting, restoreFormattedMarkdown, splitMarkdownForFormatting } from "../lib/markdownFormatting";
 import { normalizeMarkdownMath } from "../lib/markdownMath";
+import { buildWordLookupMessages, isSingleEnglishWord } from "../lib/wordLookup";
 import { useWorkspace } from "../store";
 
 type ReaderMode = "integrated" | "pdf" | "figures";
 type ReaderBlock = ReaderDocumentBlock;
 type ReaderSection = ReaderDisplaySection;
-type SelectionSource = ReaderBlock & { start: number; end: number; left: number; top: number; placement: "above" | "below" };
+type SelectionSource = ReaderBlock & { start: number; end: number; left: number; top: number; placement: "above" | "below"; kind: "word" | "passage" };
 type TranslationState = {
   status: "streaming" | "unsaved" | "saved" | "cancelled" | "error";
   text: string;
+  kind?: "word" | "passage";
   error?: string;
   record?: TranslationRecord;
 };
@@ -33,16 +35,26 @@ type AnalysisState = {
   record?: ReaderAnalysisRecord;
 };
 
-const TRANSLATION_PROMPT_VERSION = "reader-translate-v1";
+const TRANSLATION_PROMPT_VERSION = "reader-translate-v2";
+const WORD_LOOKUP_PROMPT_VERSION = "reader-word-v1";
 const ANALYSIS_PROMPT_VERSION = "reader-analysis-v1";
 const CHAT_PROMPT_VERSION = "reader-chat-v1";
 const READER_OUTLINE_WIDTH_KEY = "p2i.reader-outline-width";
 const DEFAULT_OUTLINE_WIDTH = 224;
 const MIN_OUTLINE_WIDTH = 176;
 const MAX_OUTLINE_WIDTH = 360;
+const COLLAPSED_OUTLINE_WIDTH = 44;
+const READER_OUTLINE_COLLAPSED_KEY = "p2i.reader-outline-collapsed";
+const READER_AGENT_WIDTH_KEY = "p2i.reader-agent-width";
+const READER_AGENT_COLLAPSED_KEY = "p2i.reader-agent-collapsed";
+const DEFAULT_AGENT_WIDTH = 340;
+const MIN_AGENT_WIDTH = 280;
+const MAX_AGENT_WIDTH = 520;
+const COLLAPSED_AGENT_WIDTH = 44;
 const analysisKey = (blockId: string, type: ReaderAnalysisType) => `${blockId}:${type}`;
 
 const clampOutlineWidth = (width: number) => Math.min(MAX_OUTLINE_WIDTH, Math.max(MIN_OUTLINE_WIDTH, Math.round(width)));
+const clampAgentWidth = (width: number) => Math.min(MAX_AGENT_WIDTH, Math.max(MIN_AGENT_WIDTH, Math.round(width)));
 
 function MarkdownBlock({ value, markdownPath }: { value: string; markdownPath?: string }) {
   return <ReactMarkdown
@@ -84,6 +96,13 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     const persisted = Number(window.localStorage.getItem(READER_OUTLINE_WIDTH_KEY));
     return Number.isFinite(persisted) && persisted > 0 ? clampOutlineWidth(persisted) : DEFAULT_OUTLINE_WIDTH;
   });
+  const [outlineCollapsed, setOutlineCollapsed] = useState(() => window.localStorage.getItem(READER_OUTLINE_COLLAPSED_KEY) === "true");
+  const [agentWidth, setAgentWidth] = useState(() => {
+    const persisted = Number(window.localStorage.getItem(READER_AGENT_WIDTH_KEY));
+    return Number.isFinite(persisted) && persisted > 0 ? clampAgentWidth(persisted) : DEFAULT_AGENT_WIDTH;
+  });
+  const [agentCollapsed, setAgentCollapsed] = useState(() => window.localStorage.getItem(READER_AGENT_COLLAPSED_KEY) === "true");
+  const [contextNotice, setContextNotice] = useState("");
   const [pdfPage, setPdfPage] = useState(1);
   const [pdfNavigationKey, setPdfNavigationKey] = useState(0);
   const streamHandles = useRef(new Map<string, ModelStreamHandle>());
@@ -93,6 +112,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const selectionToolbar = useRef<HTMLDivElement | null>(null);
   const readerCanvas = useRef<HTMLElement | null>(null);
   const outlineDrag = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+  const agentDrag = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
   const readable = Boolean(paper?.id && paper && ["READY", "PARTIAL"].includes(paper.status));
   const markdownQuery = useQuery({
     queryKey: ["paper-markdown", root, paper?.id],
@@ -138,7 +158,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     [documentQuery.data, markdownQuery.data],
   );
   const persistedTranslations = useMemo(
-    () => Object.fromEntries((translationQuery.data ?? []).map((record) => [record.blockId, { status: "saved", text: record.translatedText, record } satisfies TranslationState])),
+    () => Object.fromEntries((translationQuery.data ?? []).map((record) => [record.blockId, { status: "saved", text: record.translatedText, kind: record.promptVersion === WORD_LOOKUP_PROMPT_VERSION ? "word" : "passage", record } satisfies TranslationState])),
     [translationQuery.data],
   );
   const persistedAnalyses = useMemo(
@@ -203,6 +223,10 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     window.localStorage.setItem(READER_OUTLINE_WIDTH_KEY, String(outlineWidth));
   }, [outlineWidth]);
 
+  useEffect(() => window.localStorage.setItem(READER_OUTLINE_COLLAPSED_KEY, String(outlineCollapsed)), [outlineCollapsed]);
+  useEffect(() => window.localStorage.setItem(READER_AGENT_WIDTH_KEY, String(agentWidth)), [agentWidth]);
+  useEffect(() => window.localStorage.setItem(READER_AGENT_COLLAPSED_KEY, String(agentCollapsed)), [agentCollapsed]);
+
   useEffect(() => {
     if (mode !== "integrated" || !sections.length) return;
     setActiveSection((current) => current || sections[0].id);
@@ -263,6 +287,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     if (enabled) {
       setMode("integrated");
       setAgentOpen(true);
+      setAgentCollapsed(false);
     }
     if (nativeRuntime) {
       try {
@@ -294,9 +319,27 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     }));
   };
 
+  const paperWordContextFor = (block: ReaderBlock) => {
+    const section = sections.find((candidate) => candidate.id === block.sectionId);
+    const allBlocks = sections.flatMap((candidate) => candidate.blocks);
+    const index = allBlocks.findIndex((candidate) => candidate.id === block.id || candidate.text.includes(block.text));
+    const adjacentText = index >= 0
+      ? allBlocks.slice(Math.max(0, index - 2), index + 3).map((candidate) => candidate.text).join("\n\n")
+      : block.text;
+    return {
+      paperTitle: paper.title,
+      sectionTitle: section?.title ?? block.sectionId,
+      outline: sections.map((candidate) => candidate.title),
+      selectedParagraph: allBlocks.find((candidate) => candidate.id === block.id)?.text ?? adjacentText,
+      adjacentText: adjacentText.slice(0, 8_000),
+      paperExcerpt: (markdownQuery.data ?? sections.flatMap((candidate) => candidate.blocks.map((item) => item.text)).join("\n\n")).slice(0, 20_000),
+    };
+  };
+
   const translate = async (block: ReaderBlock) => {
+    const kind = "kind" in block && block.kind === "word" ? "word" : "passage";
     if (!selectedModel || !selectedProvider || !credentialReady) {
-      setTranslations((current) => ({ ...current, [block.id]: { status: "error", text: "", error: "Configure this model's API key in Settings before starting translation." } }));
+      setTranslations((current) => ({ ...current, [block.id]: { status: "error", text: "", kind, error: "请先在设置中配置所选模型的 API Key。" } }));
       return;
     }
     const existing = streamHandles.current.get(block.id);
@@ -307,7 +350,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     }
     setActiveBlock(block.id);
     setActiveAnalysis(null);
-    setTranslations((current) => ({ ...current, [block.id]: { status: "streaming", text: "" } }));
+    setTranslations((current) => ({ ...current, [block.id]: { status: "streaming", text: "", kind } }));
     const requestId = crypto.randomUUID();
     const onEvent = (event: ModelStreamEvent) => {
       if (event.kind === "delta" && event.text) {
@@ -330,7 +373,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         provider: selectedProvider,
         model: selectedModel,
         temperature: 0.1,
-        messages: [
+        messages: kind === "word" ? buildWordLookupMessages(block.text, paperWordContextFor(block)) : [
           { role: "system", content: "请将科研文本忠实翻译为简体中文。保留 Markdown、LaTeX、专业术语、引用、数字和不确定性，只返回译文，不要添加解释。行内公式使用 $...$，块级公式使用 $$...$$，不要使用 \\(...\\) 或 \\[...\\]。" },
           { role: "user", content: block.text },
         ],
@@ -356,7 +399,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         translatedText: state.text,
         targetLanguage: "zh-CN",
         modelId: selectedModel.id,
-        promptVersion: TRANSLATION_PROMPT_VERSION,
+        promptVersion: state.kind === "word" ? WORD_LOOKUP_PROMPT_VERSION : TRANSLATION_PROMPT_VERSION,
       });
       setTranslations((current) => ({ ...current, [block.id]: { status: "saved", text: record.translatedText, record } }));
       await translationQuery.refetch();
@@ -511,7 +554,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       snapshotItems.unshift({
         paperId: paper.id,
         sourceHash: documentQuery.data?.source_sha256,
-        mode: "structured",
+        mode: "full",
         sectionIds: [],
         figureIds: [],
         estimatedTokens: Math.ceil(new TextEncoder().encode(sourceText).length / 4),
@@ -645,6 +688,10 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     try {
       const draft = await addSelectionToContext(root, { paperId: paper.id, sectionId, blockId, sourceText });
       queryClient.setQueryData(["context-draft", root], draft);
+      setContextNotice("已加入右侧上下文");
+      window.setTimeout(() => setContextNotice(""), 2_400);
+    } catch (error) {
+      setContextNotice(error instanceof Error ? error.message : String(error));
     } finally {
       setContextBusy("");
     }
@@ -760,12 +807,14 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     const placeAbove = (rect?.top ?? event.clientY) > 64;
     setSelection({
       ...block,
+      id: `${block.id}:selection:${start}:${end}`,
       text: text.slice(0, 2000),
       start,
       end,
       left: Math.max(120, Math.min(window.innerWidth - 120, center)),
       top: placeAbove ? (rect?.top ?? event.clientY) - 8 : (rect?.bottom ?? event.clientY) + 8,
       placement: placeAbove ? "above" : "below",
+      kind: isSingleEnglishWord(text) ? "word" : "passage",
     });
   };
 
@@ -813,27 +862,65 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     setOutlineWidth((current) => clampOutlineWidth(current + (event.key === "ArrowRight" ? 16 : -16)));
   };
 
+  const resizeAgent = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = agentDrag.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    setAgentWidth(clampAgentWidth(drag.startWidth + drag.startX - event.clientX));
+  };
+
+  const finishAgentResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (agentDrag.current?.pointerId !== event.pointerId) return;
+    agentDrag.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+
+  const resizeAgentWithKeyboard = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    setAgentWidth((current) => clampAgentWidth(current + (event.key === "ArrowLeft" ? 16 : -16)));
+  };
+
+  const speakWord = (word: string) => {
+    if (!("speechSynthesis" in window)) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(word);
+    utterance.lang = "en-US";
+    utterance.rate = 0.82;
+    window.speechSynthesis.speak(utterance);
+  };
+
   const sourcePdfUrl = assetUrl(paper.sourcePath);
   const pagedPdfUrl = sourcePdfUrl ? `${sourcePdfUrl}#page=${pdfPage}&view=FitH` : "";
+  const renderedOutlineWidth = outlineCollapsed ? COLLAPSED_OUTLINE_WIDTH : outlineWidth;
+  const renderedAgentWidth = agentCollapsed ? COLLAPSED_AGENT_WIDTH : agentWidth;
+  const selectionTranslation = selection ? translations[selection.id] ?? persistedTranslations[selection.id] : undefined;
+  const readerPanelStyle = {
+    "--reader-outline-width": `${outlineWidth}px`,
+    "--reader-agent-width": `${agentWidth}px`,
+  } as CSSProperties;
 
-  return <div className={`reader-workspace ${readerFocusMode ? "focus-mode" : ""}`}>
+  return <div className={`reader-workspace ${readerFocusMode ? "focus-mode" : ""}`} style={readerPanelStyle}>
     {readerFocusMode && <button className="reader-focus-exit" onClick={() => void toggleFocusMode(false)} title="退出纯享模式（Esc）"><Minimize2 size={14} /> 退出纯享</button>}
-    {selection && <div ref={selectionToolbar} className={`selection-popover ${selection.placement}`} style={{ left: selection.left, top: selection.top }} role="toolbar" aria-label="Selected text actions"><button title="Translate selected text" onClick={() => void translate(selection)}><Languages size={14} /> Translate</button><button title="Explain selected text" onClick={() => void explain("theorem", selection)}><Sparkles size={14} /> Explain</button><button className="icon-button" title="Close" onClick={() => setSelection(null)}><X size={14} /></button></div>}
+    {selection && <div ref={selectionToolbar} className={`selection-popover ${selection.placement} ${selectionTranslation ? "with-result" : ""}`} style={{ left: selection.left, top: selection.top }} role="dialog" aria-label={selection.kind === "word" ? "论文语境查词" : "选中文本操作"}>
+      <div className="selection-popover-actions"><button title={selection.kind === "word" ? "结合全文语境查词" : "翻译选中文本"} onClick={() => void translate(selection)}><Languages size={14} /> {selection.kind === "word" ? "查词" : "翻译"}</button><button title="解释选中文本" onClick={() => void explain("theorem", selection)}><Sparkles size={14} /> 解释</button>{selection.kind === "word" && <button title="朗读单词" onClick={() => speakWord(selection.text)}><Volume2 size={14} /> 读音</button>}<button className="icon-button" title="关闭" onClick={() => setSelection(null)}><X size={14} /></button></div>
+      {selectionTranslation && <TranslationPanel block={selection} state={selectionTranslation} compact onSave={() => void persistTranslation(selection, selectionTranslation)} onRetry={() => void translate(selection)} onCancel={() => void cancelTranslation(selection.id)} onSpeak={selection.kind === "word" ? () => speakWord(selection.text) : undefined} onAddContext={() => void addContext(selection.sectionId, `ai-translation:${selection.id}`, `原文：\n${selection.text}\n\nAI ${selection.kind === "word" ? "论文语境词义" : "翻译"}：\n${selectionTranslation.text}`)} inContext={Boolean(contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.blockId === `ai-translation:${selection.id}`))} />}
+    </div>}
+    {contextNotice && <div className="reader-context-notice"><Check size={13} /> {contextNotice}</div>}
     <div className="reader-toolbar">
       <button onClick={() => setView("library")}><ChevronLeft size={13} /> 论文库</button>
       <strong title={paper.title}>{paper.title}</strong>
       <div className="reader-mode-switch"><button className={mode === "integrated" ? "active" : ""} onClick={() => changeMode("integrated")}>整合阅读</button><button className={mode === "pdf" ? "active" : ""} onClick={() => changeMode("pdf")}>仅 PDF</button><button className={mode === "figures" ? "active" : ""} onClick={() => changeMode("figures")}>插图</button></div>
       <button className="reader-focus-button" onClick={() => void toggleFocusMode(true)} title="只保留目录、Markdown 正文和论文阅读助手"><Maximize2 size={13} /> 纯享阅读</button>
-      <button><Search size={13} /> 查找</button><button className={formattingStatus === "saved" ? "active" : ""} disabled={formattingStatus === "formatting"} title={formattingError || `使用 ${formattingModel?.displayName ?? "所选模型"} 整理 Markdown`} onClick={() => void formatDocument()}>{formattingStatus === "formatting" ? <LoaderCircle className="spin" size={13} /> : <WandSparkles size={13} />} {formattingStatus === "formatting" ? `${formattingProgress}%` : "整理"}</button><button className={fullText ? "active" : ""} disabled={contextBusy === "paper"} onClick={() => void togglePaperContext()}><Layers3 size={13} /> {fullText ? `论文上下文 · ${contextPercent}%` : "加载全文"}</button><button className="reader-agent-toggle" onClick={() => setAgentOpen(true)}><Bot size={13} /> 询问 AI</button>
+      <button><Search size={13} /> 查找</button><button className={formattingStatus === "saved" ? "active" : ""} disabled={formattingStatus === "formatting"} title={formattingError || `使用 ${formattingModel?.displayName ?? "所选模型"} 整理 Markdown`} onClick={() => void formatDocument()}>{formattingStatus === "formatting" ? <LoaderCircle className="spin" size={13} /> : <WandSparkles size={13} />} {formattingStatus === "formatting" ? `${formattingProgress}%` : "整理"}</button><button className={fullText ? "active" : ""} disabled={contextBusy === "paper"} onClick={() => void togglePaperContext()}><Layers3 size={13} /> {fullText ? `MD 上下文 · ${contextPercent}%` : "加入 MD 原文"}</button><button className="reader-agent-toggle" onClick={() => { setAgentOpen(true); setAgentCollapsed(false); }}><Bot size={13} /> 询问 AI</button>
     </div>
     <div className="reader-main">
-      <aside className="reader-outline" style={{ width: outlineWidth, flexBasis: outlineWidth }}>
-        <div className="reader-outline-scroll"><span className="reader-outline-title">{mode === "pdf" ? `PDF 目录 · 第 ${pdfPage} 页` : "章节目录"}</span>{sections.map((section, index) => <button key={section.id} className={activeSection === section.id ? "active" : ""} style={{ paddingLeft: `${10 + Math.max(0, section.level - 1) * 12}px` }} onClick={() => navigateToSection(section)}><b>{String(index + 1).padStart(2, "0")}</b><span>{section.title}</span><small>{section.pageStart ? section.pageStart === section.pageEnd ? `第 ${section.pageStart} 页` : `第 ${section.pageStart}-${section.pageEnd} 页` : `${section.blocks.length}`}</small></button>)}</div>
-        <div className="reader-outline-resizer" role="separator" aria-label="调整目录宽度" aria-orientation="vertical" aria-valuemin={MIN_OUTLINE_WIDTH} aria-valuemax={MAX_OUTLINE_WIDTH} aria-valuenow={outlineWidth} tabIndex={0} title="拖动调整目录宽度" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.focus(); outlineDrag.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: outlineWidth }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={resizeOutline} onPointerUp={finishOutlineResize} onPointerCancel={finishOutlineResize} onKeyDown={resizeOutlineWithKeyboard} />
+      <aside className={`reader-outline ${outlineCollapsed ? "collapsed" : ""}`} style={{ width: renderedOutlineWidth, flexBasis: renderedOutlineWidth }}>
+        {outlineCollapsed ? <button className="reader-panel-expand" title="展开章节目录" onClick={() => setOutlineCollapsed(false)}><PanelLeftOpen size={16} /><span>目录</span></button> : <div className="reader-outline-scroll"><div className="reader-outline-heading"><span className="reader-outline-title">{mode === "pdf" ? `PDF 目录 · 第 ${pdfPage} 页` : "章节目录"}</span><button title="收起章节目录" onClick={() => setOutlineCollapsed(true)}><PanelLeftClose size={14} /></button></div>{sections.map((section, index) => <button key={section.id} className={activeSection === section.id ? "active" : ""} style={{ paddingLeft: `${10 + Math.max(0, section.level - 1) * 12}px` }} onClick={() => navigateToSection(section)}><b>{String(index + 1).padStart(2, "0")}</b><span>{section.title}</span><small>{section.pageStart ? section.pageStart === section.pageEnd ? `第 ${section.pageStart} 页` : `第 ${section.pageStart}-${section.pageEnd} 页` : `${section.blocks.length}`}</small></button>)}</div>}
+        {!outlineCollapsed && <div className="reader-outline-resizer" role="separator" aria-label="调整目录宽度" aria-orientation="vertical" aria-valuemin={MIN_OUTLINE_WIDTH} aria-valuemax={MAX_OUTLINE_WIDTH} aria-valuenow={outlineWidth} tabIndex={0} title="拖动调整目录宽度" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.focus(); outlineDrag.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: outlineWidth }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={resizeOutline} onPointerUp={finishOutlineResize} onPointerCancel={finishOutlineResize} onKeyDown={resizeOutlineWithKeyboard} />}
       </aside>
       <main className="reader-canvas" ref={readerCanvas}>
         {mode === "integrated" && <article className="integrated-paper">
-          <header className="paper-reading-header"><span className="tag tag-primary">结构化文档</span><h1>{paper.title}</h1><p>本地文档 · {paper.pageCount || "—"} 页 · 更新于 {new Date(paper.updatedAt).toLocaleDateString("zh-CN")}</p></header>
+          <header className="paper-reading-header"><span className="tag tag-primary">MD 章节阅读</span><h1>{paper.title}</h1><p>本地文档 · {paper.pageCount || "—"} 页 · 更新于 {new Date(paper.updatedAt).toLocaleDateString("zh-CN")}</p></header>
           {formattingStatus === "error" && <div className="formatting-notice error"><TriangleAlert size={13} /> {formattingError}</div>}
           {markdownQuery.isLoading || documentQuery.isLoading ? <div className="document-loading">Loading structured document…</div> : sections.map((section, sectionIndex) => {
             const displayBlocks = compactReaderBlocks(section.blocks);
@@ -847,8 +934,8 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
               return <div className={`paragraph-card ${block.compacted ? "compacted" : ""} ${activeBlock === block.id ? "active" : ""}`} key={block.id} onClick={(event) => { if (!(event.target as HTMLElement).closest("button, a")) setActiveBlock((current) => current === block.id ? "" : block.id); }} onMouseUp={(event) => captureSelection(block, event)}>
                 <div className="paragraph-main"><div className="paragraph-markdown"><MarkdownBlock value={block.text} markdownPath={paper.markdownPath} /></div></div>
                 <div className="paragraph-actions"><button title="Translate paragraph" aria-label="Translate paragraph" onClick={() => void translate(block)}><Languages size={14} /></button><button title={hasFormula ? "Explain formula" : "Explain paragraph"} aria-label={hasFormula ? "Explain formula" : "Explain paragraph"} onClick={() => void explain(hasFormula ? "formula" : "theorem", block)}><Sparkles size={14} /></button><button className={contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.blockId === block.id) ? "active" : ""} title="Add paragraph to context" aria-label="Add paragraph to context" disabled={contextBusy === block.id} onClick={() => void addContext(block.sectionId, block.id, block.text)}><Layers3 size={14} /></button></div>
-                {state && <TranslationPanel block={block} state={state} onSave={() => void persistTranslation(block, state)} onRetry={() => void translate(block)} onCancel={() => void cancelTranslation(block.id)} />}
-                {explanation && <AnalysisCard block={block} type={explanationType} state={explanation} onSave={() => void persistAnalysis(block, explanationType, explanation)} onRetry={() => void explain(explanationType, block)} onCancel={() => void streamHandles.current.get(`analysis:${analysisKey(block.id, explanationType)}`)?.cancel()} onFollowUp={() => { setChatInput(`Follow up on the ${explanationType} explanation for ${block.sectionId}/${block.id}: `); setAgentOpen(true); }} />}
+                {state && <TranslationPanel block={block} state={state} onSave={() => void persistTranslation(block, state)} onRetry={() => void translate(block)} onCancel={() => void cancelTranslation(block.id)} onAddContext={() => void addContext(block.sectionId, `ai-translation:${block.id}`, `原文：\n${block.text}\n\nAI 翻译：\n${state.text}`)} inContext={Boolean(contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.blockId === `ai-translation:${block.id}`))} />}
+                {explanation && <AnalysisCard block={block} type={explanationType} state={explanation} onSave={() => void persistAnalysis(block, explanationType, explanation)} onRetry={() => void explain(explanationType, block)} onCancel={() => void streamHandles.current.get(`analysis:${analysisKey(block.id, explanationType)}`)?.cancel()} onFollowUp={() => { setChatInput(`继续追问 ${block.sectionId}/${block.id} 的${explanationType === "formula" ? "公式" : "论述"}解释：`); setAgentOpen(true); setAgentCollapsed(false); }} onAddContext={() => void addContext(block.sectionId, `ai-analysis:${explanationType}:${block.id}`, `用户分析对象：\n${block.text}\n\nAI ${explanationType === "formula" ? "公式解释" : "论述解释"}：\n${explanation.text}`)} inContext={Boolean(contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.blockId === `ai-analysis:${explanationType}:${block.id}`))} />}
               </div>;
             })}</div>
           </section>;})}
@@ -856,50 +943,53 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         {mode === "pdf" && <div className="integrated-pdf">{pagedPdfUrl ? <iframe key={`${pdfPage}:${pdfNavigationKey}`} title={`Source PDF · page ${pdfPage}`} src={pagedPdfUrl} /> : <div className="pdf-placeholder"><FileText size={38} /><h2>无法预览 PDF</h2><p>源 PDF 路径当前不可用。</p></div>}</div>}
         {mode === "figures" && <div className="reader-figures">{paper.figures.length ? paper.figures.map((figure) => <figure key={figure.id}>{assetUrl(`${paper.markdownPath?.replace(/[\\/][^\\/]+$/, "")}/${figure.relativePath}`) ? <img src={assetUrl(`${paper.markdownPath?.replace(/[\\/][^\\/]+$/, "")}/${figure.relativePath}`)} alt={figure.caption ?? "提取的插图"} /> : <div><FileImage size={32} /></div>}<figcaption>{figure.caption ?? "提取的插图"}</figcaption></figure>) : <div className="pdf-placeholder"><FileImage size={36} /><h2>暂无提取的插图</h2><p>解析器完成图像提取后，插图会显示在这里。</p></div>}</div>}
       </main>
-      <aside className={`reader-agent-panel ${agentOpen ? "open" : ""}`}>
-        <header><Bot size={15} /><strong>论文分析助手</strong><span className={`tag ${credentialReady ? "tag-success" : "tag-warning"}`}>{credentialReady ? "接口就绪" : selectedProvider ? "缺少密钥" : "缺少模型"}</span><button className="reader-agent-close" title="关闭助手" onClick={() => setAgentOpen(false)}><ChevronLeft size={13} /></button></header>
-        <div className="agent-panel-scroll">
+      <aside className={`reader-agent-panel ${agentOpen ? "open" : ""} ${agentCollapsed ? "collapsed" : ""}`} style={{ width: renderedAgentWidth, flexBasis: renderedAgentWidth }}>
+        {!agentCollapsed && <div className="reader-agent-resizer" role="separator" aria-label="调整论文助手宽度" aria-orientation="vertical" aria-valuemin={MIN_AGENT_WIDTH} aria-valuemax={MAX_AGENT_WIDTH} aria-valuenow={agentWidth} tabIndex={0} title="拖动调整论文助手宽度" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.focus(); agentDrag.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: agentWidth }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={resizeAgent} onPointerUp={finishAgentResize} onPointerCancel={finishAgentResize} onKeyDown={resizeAgentWithKeyboard} />}
+        <header><Bot size={15} /><strong>论文分析助手</strong><span className={`tag ${credentialReady ? "tag-success" : "tag-warning"}`}>{credentialReady ? "接口就绪" : selectedProvider ? "缺少密钥" : "缺少模型"}</span><button className="reader-agent-collapse" title={agentCollapsed ? "展开论文助手" : "收起论文助手"} onClick={() => setAgentCollapsed((value) => !value)}>{agentCollapsed ? <PanelRightOpen size={14} /> : <PanelRightClose size={14} />}</button><button className="reader-agent-close" title="关闭助手" onClick={() => setAgentOpen(false)}><ChevronLeft size={13} /></button></header>
+        {!agentCollapsed && <div className="agent-panel-scroll">
           <div className="agent-chat-summary"><div><strong>对话上下文</strong><b>{contextPercent}%</b></div><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><span>{(contextUsed / 1000).toFixed(1)}K / {(maxContextTokens / 1000).toFixed(0)}K · {contextDraftQuery.data?.items.length ?? 0} 项</span><button title="打开上下文工作区" onClick={() => setView("context")}><Layers3 size={11} /></button>{Boolean(chatQuery.data?.turns.length) && <button title="清空对话" onClick={() => void clearChat()}><Trash2 size={11} /></button>}</div>
           <label className="agent-model-field"><span>论文分析模型</span><select value={agentModel} onChange={(event) => setAgentModel(event.target.value)}>{customModels.map((model) => <option key={model.id} value={model.id}>{model.displayName} · {providers.find((provider) => provider.id === model.providerId)?.format ?? "不可用"}</option>)}</select></label>
           <div className="agent-chat-thread">
             {!chatQuery.data?.turns.length && chatStatus !== "streaming" && <div className="agent-chat-empty"><MessageSquareText size={18} /><strong>询问这篇论文</strong><span>回答基于持久化研究上下文，并保留修订历史。</span></div>}
             {(chatQuery.data?.turns ?? []).map((turn) => <div className="agent-chat-turn" key={turn.id}>
               <div className="chat-message user"><span>You</span><p>{turn.userMessage}</p></div>
-              <div className={`chat-message assistant ${turn.response?.status ?? "pending"}`}><span>Paper Analyst{turn.response ? ` · Revision ${turn.response.revision}` : ""}</span>{turn.response?.assistantText ? <div className="chat-markdown"><MarkdownBlock value={turn.response.assistantText} /></div> : <p>{turn.response?.error ?? "No response was produced."}</p>}<footer><small>{turn.response?.status ?? "pending"}{turn.response?.usage ? ` · ${turn.response.usage.outputTokens} tokens · ${(turn.response.usage.durationMs / 1000).toFixed(1)}s` : ""}</small>{turn.response && turn.response.status !== "completed" && <button onClick={() => void sendChat(turn)}><RefreshCw size={10} /> Retry</button>}</footer></div>
+              <div className={`chat-message assistant ${turn.response?.status ?? "pending"}`}><span>论文分析助手{turn.response ? ` · 修订 ${turn.response.revision}` : ""}</span>{turn.response?.assistantText ? <div className="chat-markdown"><MarkdownBlock value={turn.response.assistantText} /></div> : <p>{turn.response?.error ?? "没有生成回答。"}</p>}<footer><small>{turn.response?.status ?? "等待中"}{turn.response?.usage ? ` · ${turn.response.usage.outputTokens} tokens · ${(turn.response.usage.durationMs / 1000).toFixed(1)}s` : ""}</small><div>{turn.response?.assistantText && <button className={contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.blockId === `chat:${turn.id}`) ? "active" : ""} onClick={() => void addContext("reader-chat", `chat:${turn.id}`, `用户问题：\n${turn.userMessage}\n\nAI 回答：\n${turn.response!.assistantText}`)}><Layers3 size={10} /> {contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.blockId === `chat:${turn.id}`) ? "已加入" : "加入上下文"}</button>}{turn.response && turn.response.status !== "completed" && <button onClick={() => void sendChat(turn)}><RefreshCw size={10} /> 重试</button>}</div></footer></div>
             </div>)}
             {chatStatus === "streaming" && <div className="agent-chat-turn live"><div className="chat-message user"><span>You</span><p>{chatPendingQuestion}</p></div><div className="chat-message assistant streaming"><span><LoaderCircle className="spin" size={11} /> Paper Analyst</span>{chatLive ? <div className="chat-markdown"><MarkdownBlock value={chatLive} /></div> : <p>Waiting for the first model token…</p>}<footer><button onClick={() => void cancelChat()}><Square size={9} /> Cancel</button></footer></div></div>}
             {chatError && <p className="agent-chat-error"><TriangleAlert size={12} /> {chatError}</p>}
           </div>
-        </div>
-        <form className="agent-chat-input" onSubmit={(event) => { event.preventDefault(); void sendChat(); }}><MessageSquareText size={13} /><input aria-label="询问这篇论文" value={chatInput} onChange={(event) => setChatInput(event.target.value)} disabled={chatStatus === "streaming"} placeholder="输入关于这篇论文的问题…" /><button title="发送" type="submit" disabled={!chatInput.trim() || chatStatus === "streaming"}><Send size={13} /></button></form>
+        </div>}
+        {!agentCollapsed && <form className="agent-chat-input" onSubmit={(event) => { event.preventDefault(); void sendChat(); }}><MessageSquareText size={13} /><input aria-label="询问这篇论文" value={chatInput} onChange={(event) => setChatInput(event.target.value)} disabled={chatStatus === "streaming"} placeholder="输入关于这篇论文的问题…" /><button title="发送" type="submit" disabled={!chatInput.trim() || chatStatus === "streaming"}><Send size={13} /></button></form>}
       </aside>
     </div>
     <footer className="reader-context-bar"><Layers3 size={14} /><strong>对话上下文</strong><span className="tag tag-primary">{contextDraftQuery.data?.items.length ?? 0} 个持久化条目</span><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><code>{(contextUsed / 1000).toFixed(1)}K / {(maxContextTokens / 1000).toFixed(0)}K · {contextPercent}%</code><span>由阅读器、上下文、智能体和创新工作台共享。</span><button onClick={() => setView("context")}>打开上下文</button></footer>
   </div>;
 }
 
-function TranslationPanel({ block, state, onSave, onRetry, onCancel }: { block: ReaderBlock; state: TranslationState; onSave: () => void; onRetry: () => void; onCancel: () => void }) {
-  return <div className={`translation-result ${state.status}`} data-block-id={block.id}>
-    <div><span className="tag tag-ai">Chinese Translation{state.record ? ` · Revision ${state.record.revision}` : ""}</span>{state.status === "saved" && <span className="tag tag-success"><Check size={10} /> Saved</span>}</div>
-    {state.status === "streaming" && !state.text && <p><LoaderCircle className="spin" size={13} /> Waiting for the first model token…</p>}
+function TranslationPanel({ block, state, compact = false, onSave, onRetry, onCancel, onSpeak, onAddContext, inContext }: { block: ReaderBlock; state: TranslationState; compact?: boolean; onSave: () => void; onRetry: () => void; onCancel: () => void; onSpeak?: () => void; onAddContext: () => void; inContext: boolean }) {
+  const word = state.kind === "word";
+  return <div className={`translation-result ${word ? "word-lookup" : ""} ${compact ? "compact" : ""} ${state.status}`} data-block-id={block.id}>
+    <div><span className="tag tag-ai">{word ? `论文语境词典 · ${block.text}` : "中文翻译"}{state.record ? ` · 修订 ${state.record.revision}` : ""}</span>{state.status === "saved" && <span className="tag tag-success"><Check size={10} /> 已保存</span>}</div>
+    {state.status === "streaming" && !state.text && <p><LoaderCircle className="spin" size={13} /> 正在结合论文全文分析…</p>}
     {state.text && <div className="translation-markdown"><MarkdownBlock value={state.text} /></div>}
     {state.error && <p className="translation-error"><TriangleAlert size={13} /> {state.error}</p>}
     <footer>
-      {state.status === "streaming" ? <button onClick={onCancel}><Square size={10} /> Cancel</button> : <button onClick={onRetry}><RefreshCw size={11} /> {state.status === "error" ? "Retry" : "Retranslate"}</button>}
-      {state.status === "unsaved" && <button onClick={onSave}>Save Translation</button>}
-      {state.status === "saved" && <button className="active" disabled>Persisted</button>}
+      {state.status === "streaming" ? <button onClick={onCancel}><Square size={10} /> 停止</button> : <button onClick={onRetry}><RefreshCw size={11} /> {state.status === "error" ? "重试" : word ? "重新查词" : "重新翻译"}</button>}
+      {onSpeak && <button onClick={onSpeak}><Volume2 size={11} /> 朗读</button>}
+      {state.status === "unsaved" && <button onClick={onSave}>保存结果</button>}
+      {state.text && state.status !== "streaming" && <button className={inContext ? "active" : ""} onClick={onAddContext}><Layers3 size={11} /> {inContext ? "已加入上下文" : "加入上下文"}</button>}
     </footer>
   </div>;
 }
 
-function AnalysisCard({ block, type, state, onSave, onRetry, onCancel, onFollowUp }: { block: ReaderBlock; type: ReaderAnalysisType; state: AnalysisState; onSave: () => void; onRetry: () => void; onCancel: () => void; onFollowUp: () => void }) {
-  const title = type === "formula" ? "Formula Explanation" : "Theorem Explanation";
+function AnalysisCard({ block, type, state, onSave, onRetry, onCancel, onFollowUp, onAddContext, inContext }: { block: ReaderBlock; type: ReaderAnalysisType; state: AnalysisState; onSave: () => void; onRetry: () => void; onCancel: () => void; onFollowUp: () => void; onAddContext: () => void; inContext: boolean }) {
+  const title = type === "formula" ? "公式解释" : "论述解释";
   return <div className={`reader-analysis ${type} ${state.status}`} data-block-id={block.id}>
-    <div className="reader-analysis-head"><span className="tag tag-ai">AI {title}{state.record ? ` · Revision ${state.record.revision}` : ""}</span>{state.status === "saved" && <span className="tag tag-success"><Check size={10} /> Saved</span>}</div>
-    {state.status === "streaming" && !state.text && <p className="analysis-wait"><LoaderCircle className="spin" size={13} /> Waiting for the first model token…</p>}
+    <div className="reader-analysis-head"><span className="tag tag-ai">AI {title}{state.record ? ` · 修订 ${state.record.revision}` : ""}</span>{state.status === "saved" && <span className="tag tag-success"><Check size={10} /> 已保存</span>}</div>
+    {state.status === "streaming" && !state.text && <p className="analysis-wait"><LoaderCircle className="spin" size={13} /> 正在分析论文证据…</p>}
     {state.text && <div className="analysis-markdown"><MarkdownBlock value={state.text} /></div>}
     {state.error && <p className="translation-error"><TriangleAlert size={13} /> {state.error}</p>}
-    <div className="analysis-provenance"><code>{block.sectionId}/{block.id}{block.page ? ` · page ${block.page}` : ""}</code><span>{state.usage.outputTokens} output tokens · {(state.usage.durationMs / 1000).toFixed(1)}s</span></div>
-    <footer>{state.status === "streaming" ? <button onClick={onCancel}><Square size={10} /> Cancel</button> : <button onClick={onRetry}><RefreshCw size={11} /> {state.status === "error" ? "Retry" : "Regenerate"}</button>}{state.status === "unsaved" && <button onClick={onSave}>Save Explanation</button>}{state.status === "saved" && <button className="active" disabled>Persisted</button>}<button onClick={onFollowUp}><MessageSquareText size={11} /> Ask Follow-up</button></footer>
+    <div className="analysis-provenance"><code>{block.sectionId}/{block.id}{block.page ? ` · 第 ${block.page} 页` : ""}</code><span>{state.usage.outputTokens} 输出 tokens · {(state.usage.durationMs / 1000).toFixed(1)} 秒</span></div>
+    <footer>{state.status === "streaming" ? <button onClick={onCancel}><Square size={10} /> 停止</button> : <button onClick={onRetry}><RefreshCw size={11} /> {state.status === "error" ? "重试" : "重新生成"}</button>}{state.status === "unsaved" && <button onClick={onSave}>保存解释</button>}<button onClick={onFollowUp}><MessageSquareText size={11} /> 继续追问</button>{state.text && state.status !== "streaming" && <button className={inContext ? "active" : ""} onClick={onAddContext}><Layers3 size={11} /> {inContext ? "已加入上下文" : "加入上下文"}</button>}</footer>
   </div>;
 }

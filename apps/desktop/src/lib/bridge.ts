@@ -21,6 +21,21 @@ export async function chooseLibrary(): Promise<string | null> {
   return invoke<string | null>("choose_library");
 }
 
+export interface PdfImportResult {
+  selected: number;
+  copied: number;
+  deduplicated: number;
+  destination: string;
+}
+
+export async function importPdfs(root: string): Promise<PdfImportResult> {
+  if (!nativeRuntime) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    return { selected: 2, copied: 2, deduplicated: 0, destination: `${root}/Papers/Manual` };
+  }
+  return invoke<PdfImportResult>("import_pdfs", { root });
+}
+
 export async function initializeLibrary(root: string): Promise<void> {
   if (!nativeRuntime) return;
   await rpc("library.initialize", { root });
@@ -54,11 +69,11 @@ export async function createCollection(root: string, input: { name: string; pare
   return rpc<LibraryCollection>("collection.create", { root, ...input });
 }
 
-export async function updateCollection(root: string, collectionId: string, patch: { name?: string; parentId?: string; color?: string; sortOrder?: number }): Promise<LibraryCollection> {
+export async function updateCollection(root: string, collectionId: string, patch: { name?: string; parentId?: string | null; color?: string; sortOrder?: number }): Promise<LibraryCollection> {
   if (!nativeRuntime) {
     const current = demoCollections.find((item) => item.id === collectionId);
     if (!current) throw new Error("分类不存在");
-    const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };
+    const updated: LibraryCollection = { ...current, ...patch, parentId: patch.parentId === null ? undefined : patch.parentId ?? current.parentId, updatedAt: new Date().toISOString() };
     demoCollections = demoCollections.map((item) => item.id === collectionId ? updated : item);
     return updated;
   }

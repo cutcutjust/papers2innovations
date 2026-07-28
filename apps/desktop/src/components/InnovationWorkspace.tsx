@@ -323,7 +323,7 @@ export function InnovationWorkspace({ papers }: { papers: LibraryPaper[] }) {
             const items = contextItemsByPaper.get(paper.id) ?? [];
             const included = items.length > 0;
             const compressed = items.some((item) => item.mode === "compressed");
-            return <section className={`context-paper ${included ? "" : "excluded"}`} key={paper.id}><div className="context-paper-title"><input type="checkbox" checked={included} disabled={busyPaper === paper.id || running} onChange={(event) => void includePaper(paper, event.target.checked)} aria-label={`选择 ${paper.title}`} /><span><strong>{paper.title}</strong><small>{paper.pageCount || "--"} 页 / {included ? `${items.length} 个来源` : "未选择"}</small></span>{compressed && <b>AI</b>}</div>{included ? <div className="context-mode-note"><FileText size={12} /> {compressed ? "已启用压缩上下文" : "原始结构化文本"}</div> : <div className="context-excluded">本次运行不包含</div>}</section>;
+            return <section className={`context-paper ${included ? "" : "excluded"}`} key={paper.id}><div className="context-paper-title"><input type="checkbox" checked={included} disabled={busyPaper === paper.id || running} onChange={(event) => void includePaper(paper, event.target.checked)} aria-label={`选择 ${paper.title}`} /><span><strong>{paper.title}</strong><small>{paper.pageCount || "--"} 页 / {included ? `${items.length} 个来源` : "未选择"}</small></span>{compressed && <b>AI</b>}</div>{included ? <div className="context-mode-note"><FileText size={12} /> {compressed ? "AI 压缩后的原文" : "MD 原文或自定义文字"}</div> : <div className="context-excluded">本次运行不包含</div>}</section>;
           })}
           {papers.length === 0 && <div className="context-empty"><FileText size={24} /><span>暂无已解析论文。</span></div>}
         </div>

@@ -273,10 +273,10 @@ export function ContextWorkspace({ papers, root }: { papers: LibraryPaper[]; roo
     await streamHandles.current.get(itemId)?.cancel();
   };
 
-  const switchPaperMode = async (paper: LibraryPaper, mode: "full" | "structured") => {
+  const switchPaperMode = async (paper: LibraryPaper) => {
     const item = (itemsByPaper.get(paper.id) ?? []).find((candidate) => !candidate.sectionId && !candidate.blockId);
     if (item) await streamHandles.current.get(item.id)?.cancel();
-    await update(paper.id, () => addPaperToContext(root, paper.id, mode));
+    await update(paper.id, () => addPaperToContext(root, paper.id, "full"));
     if (item) {
       setCompressionStates((current) => {
         const next = { ...current };
@@ -317,12 +317,12 @@ export function ContextWorkspace({ papers, root }: { papers: LibraryPaper[]; roo
     </div>
     <div className="context-layout">
       <section className="context-paper-panel">
-        <header><div><h2>论文来源</h2><p>保留原文、结构化内容或带来源记录的 AI 压缩结果</p></div><label><Search size={12} /><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="筛选来源" /></label></header>
+        <header><div><h2>上下文来源</h2><p>只包含 MD 原文、AI 压缩后的原文，以及你主动加入的文字</p></div><label><Search size={12} /><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="筛选来源" /></label></header>
         <div className="context-paper-rows">{visiblePapers.map((paper) => {
           const items = itemsByPaper.get(paper.id) ?? [];
           const enabled = items.length > 0;
           const paperItem = items.find((item) => !item.sectionId && !item.blockId);
-          const mode = paperItem?.mode ?? (enabled ? "sections" : "full");
+          const mode = paperItem?.mode === "structured" ? "full" : paperItem?.mode ?? (enabled ? "sections" : "full");
           const paperTokens = items.reduce((total, item) => total + item.estimatedTokens, 0);
           const busy = busyPaper === paper.id;
           const state = paperItem ? compressionStates[paperItem.id] : undefined;
@@ -333,10 +333,9 @@ export function ContextWorkspace({ papers, root }: { papers: LibraryPaper[]; roo
               <h3>{paper.title}</h3>
               <p>{paper.pageCount || "—"} 页 · {paper.status} · {items.length} 个上下文条目</p>
               <div className="context-mode-switch">
-                <button className={mode === "full" ? "active" : ""} disabled={busy} onClick={() => void switchPaperMode(paper, "full")}>原始全文</button>
-                <button className={mode === "structured" ? "active" : ""} disabled={busy} onClick={() => void switchPaperMode(paper, "structured")}>结构化文档</button>
-                <button className={mode === "compressed" ? "active ai" : ""} disabled={busy && state?.status !== "streaming"} onClick={() => void compressPaper(paper, paperItem)}><Sparkles size={11} /> AI 压缩</button>
-                {mode === "sections" && <span className="tag tag-ai">阅读器选段</span>}
+                <button className={mode === "full" ? "active" : ""} disabled={busy} onClick={() => void switchPaperMode(paper)}>MD 原文</button>
+                <button className={mode === "compressed" ? "active ai" : ""} disabled={busy && state?.status !== "streaming"} onClick={() => void compressPaper(paper, paperItem)}><Sparkles size={11} /> AI 压缩后的原文</button>
+                {mode === "sections" && <span className="tag tag-ai">自定义加入的文字</span>}
               </div>
               {state && <div className={`context-compression-status ${state.status}`}>
                 {state.status === "loading" && <><LoaderCircle className="spin" size={12} /> Checking the revisioned cache…</>}
@@ -412,5 +411,5 @@ function ContextSourceDisclosure({ item, root }: { item: ContextDraftItem; root:
     enabled: open,
     retry: false,
   });
-  return <details className="context-source-detail" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}><summary><span><strong>{item.paperTitle}</strong><small>{item.sectionId ? `章节 ${item.sectionId}` : item.mode === "compressed" ? "AI 压缩" : "论文全文"}</small></span><code>{item.estimatedTokens.toLocaleString()} tokens</code></summary>{sourceQuery.isLoading ? <p><LoaderCircle className="spin" size={13} /> 正在读取完整文本…</p> : sourceQuery.isError ? <p className="detail-error"><TriangleAlert size={13} /> {sourceQuery.error instanceof Error ? sourceQuery.error.message : "无法读取该来源"}</p> : <pre>{sourceQuery.data?.sourceText ?? item.sourcePreview}</pre>}</details>;
+  return <details className="context-source-detail" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}><summary><span><strong>{item.paperTitle}</strong><small>{item.sectionId ? "自定义加入的文字" : item.mode === "compressed" ? "AI 压缩后的原文" : "MD 原文"}</small></span><code>{item.estimatedTokens.toLocaleString()} tokens</code></summary>{sourceQuery.isLoading ? <p><LoaderCircle className="spin" size={13} /> 正在读取完整文本…</p> : sourceQuery.isError ? <p className="detail-error"><TriangleAlert size={13} /> {sourceQuery.error instanceof Error ? sourceQuery.error.message : "无法读取该来源"}</p> : <pre>{sourceQuery.data?.sourceText ?? item.sourcePreview}</pre>}</details>;
 }
