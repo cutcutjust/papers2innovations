@@ -5,14 +5,17 @@ import { AppUpdater } from "./components/AppUpdater";
 import { Activity } from "./components/Activity";
 import { Settings } from "./components/Settings";
 import { ZoteroImport } from "./components/ZoteroImport";
-import { Inspector } from "./components/Inspector";
-import { PaperList } from "./components/PaperList";
+import { InnovationWorkspace } from "./components/InnovationWorkspace";
 import { Reader } from "./components/Reader";
 import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
 import { LibraryStartup } from "./components/LibraryStartup";
+import { LibraryWorkspace } from "./components/LibraryWorkspace";
+import { Agents } from "./components/Agents";
+import { ContextWorkspace } from "./components/ContextWorkspace";
+import { CitationGraph } from "./components/CitationGraph";
 import { chooseLibrary, initializeLibrary, listJobs, listPapers, nativeRuntime, onEngineProgress, scanLibrary, startLibraryWatcher } from "./lib/bridge";
-import { hydrateOcrCredential } from "./lib/credentials";
+import { hydrateOcrCredential, hydrateProviderCredentials } from "./lib/credentials";
 import { useWorkspace } from "./store";
 
 export function App() {
@@ -48,8 +51,11 @@ export function App() {
   }, [root, workspace]);
 
   useEffect(() => {
-    if (nativeRuntime) void hydrateOcrCredential().catch(() => undefined);
-  }, []);
+    if (nativeRuntime) {
+      void hydrateOcrCredential().catch(() => undefined);
+      void hydrateProviderCredentials(workspace.providers).catch(() => undefined);
+    }
+  }, [workspace.providers]);
 
   useEffect(() => {
     let cleanup: () => void = () => {};
@@ -99,16 +105,26 @@ export function App() {
     });
   }, [papersQuery.data, workspace.query, workspace.statusFilter]);
 
-  useEffect(() => {
-    if (papers[0] && !papers.some((paper) => paper.id === workspace.selectedPaperId)) {
-      workspace.selectPaper(papers[0].id);
-    }
-  }, [papers, workspace]);
+  const allPapers = papersQuery.data ?? [];
 
-  const selected = papers.find((paper) => paper.id === workspace.selectedPaperId);
+  useEffect(() => {
+    if (allPapers[0] && !allPapers.some((paper) => paper.id === workspace.selectedPaperId)) {
+      workspace.selectPaper(allPapers[0].id);
+    }
+  }, [allPapers, workspace]);
+
+  const selected = allPapers.find((paper) => paper.id === workspace.selectedPaperId);
 
   const workspaceContent = workspace.view === "settings" ? (
     <Settings />
+  ) : workspace.view === "innovate" ? (
+    <InnovationWorkspace papers={allPapers} />
+  ) : workspace.view === "agents" ? (
+    <Agents />
+  ) : workspace.view === "context" ? (
+    <ContextWorkspace papers={allPapers} root={root} />
+  ) : workspace.view === "graph" ? (
+    <CitationGraph papers={allPapers} rootPaper={selected} root={root} />
   ) : workspace.view === "import" ? (
     <ZoteroImport root={root} />
   ) : workspace.view === "jobs" ? (
@@ -120,16 +136,14 @@ export function App() {
       error={jobsQuery.error instanceof Error ? jobsQuery.error : null}
       onRetry={() => void jobsQuery.refetch()}
     />
+  ) : workspace.view === "reader" ? (
+    <Reader paper={selected} root={root} />
   ) : papersQuery.isLoading ? (
     <LibraryStartup onRetry={() => void papersQuery.refetch()} />
   ) : papersQuery.isError ? (
     <LibraryStartup error={new Error(papersQuery.error instanceof Error ? papersQuery.error.message : String(papersQuery.error ?? "Unable to open the local index"))} onRetry={() => void papersQuery.refetch()} />
   ) : (
-    <div className="content-grid">
-      <PaperList papers={papers} />
-      <Reader paper={selected} root={root} />
-      <Inspector paper={selected} />
-    </div>
+    <LibraryWorkspace papers={papers} allPapers={allPapers} selected={selected} scanning={scanMutation.isPending} onScan={() => scanMutation.mutate()} onChooseLibrary={choose} />
   );
 
   if (!root) {
@@ -145,10 +159,12 @@ export function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar />
-      <div className="workspace-shell">
-        <Topbar scanning={scanMutation.isPending} onScan={() => scanMutation.mutate()} onChooseLibrary={choose} />
-        {workspaceContent}
+      <Topbar />
+      <div className="app-main">
+        <Sidebar paperCount={allPapers.length} />
+        <div className="workspace-shell">
+          {workspaceContent}
+        </div>
       </div>
       <AppUpdater />
     </div>

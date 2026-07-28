@@ -1,13 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { Stronghold, type Client } from "@tauri-apps/plugin-stronghold";
+import type { CredentialSummary, ModelConfig, ProviderConfig } from "@p2i/contracts";
 import { nativeRuntime } from "./bridge";
+import { sanitizeProviderConfig } from "./providerConfig";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const clientName = "p2i-settings";
 let cachedSummary: OcrCredentialSummary | undefined;
 let hydrationPromise: Promise<OcrCredentialSummary> | undefined;
+const providerSummaryCache = new Map<string, CredentialSummary>();
 
 async function openStore() {
   const vaultPath = await join(await appDataDir(), "p2i-vault.hold");
@@ -118,4 +121,61 @@ export async function testQwenConnection(): Promise<{
 }> {
   if (!nativeRuntime) return { ok: true, status: 200, requiresWorkspace: false };
   return invoke("qwen_test_connection");
+}
+
+const providerStoreKey = (credentialId: string) => `model-provider:${credentialId}`;
+
+export async function saveProviderCredential(provider: ProviderConfig, apiKey: string): Promise<CredentialSummary> {
+  if (!apiKey.trim()) throw new Error("API key is required.");
+  const result = { credentialId: provider.credentialId, configured: true };
+  if (!nativeRuntime) {
+    providerSummaryCache.set(provider.credentialId, result);
+    return result;
+  }
+  const { stronghold, store } = await openStore();
+  await store.insert(providerStoreKey(provider.credentialId), Array.from(encoder.encode(apiKey)));
+  await stronghold.save();
+  await invoke("provider_credential_set", { credentialId: provider.credentialId, apiKey });
+  await stronghold.unload();
+  providerSummaryCache.set(provider.credentialId, result);
+  return result;
+}
+
+export async function hydrateProviderCredentials(providers: ProviderConfig[]): Promise<CredentialSummary[]> {
+  if (!nativeRuntime) {
+    return providers.map((provider) => providerSummaryCache.get(provider.credentialId) ?? { credentialId: provider.credentialId, configured: false });
+  }
+  if (providers.length === 0) return [];
+  const { stronghold, store } = await openStore();
+  const summaries: CredentialSummary[] = [];
+  for (const provider of providers) {
+    const bytes = await store.get(providerStoreKey(provider.credentialId));
+    const configured = Boolean(bytes);
+    if (bytes) {
+      await invoke("provider_credential_set", {
+        credentialId: provider.credentialId,
+        apiKey: decoder.decode(bytes),
+      });
+    }
+    const item = { credentialId: provider.credentialId, configured };
+    providerSummaryCache.set(provider.credentialId, item);
+    summaries.push(item);
+  }
+  await stronghold.unload();
+  return summaries;
+}
+
+export async function deleteProviderCredential(credentialId: string): Promise<void> {
+  providerSummaryCache.delete(credentialId);
+  if (!nativeRuntime) return;
+  const { stronghold, store } = await openStore();
+  await store.remove(providerStoreKey(credentialId));
+  await stronghold.save();
+  await stronghold.unload();
+  await invoke("provider_credential_delete", { credentialId });
+}
+
+export async function testProviderConnection(provider: ProviderConfig, model: ModelConfig): Promise<{ ok: boolean; status: number }> {
+  if (!nativeRuntime) return { ok: true, status: 200 };
+  return invoke("provider_test_connection", { input: { provider: sanitizeProviderConfig(provider), model } });
 }

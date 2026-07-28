@@ -16,7 +16,7 @@ def test_rpc_ping_returns_versioned_pong() -> None:
     response = json.loads(output.getvalue())
     assert response["id"] == 7
     assert response["result"]["pong"] is True
-    assert response["result"]["version"] == "0.1.4"
+    assert response["result"]["version"] == "0.1.9"
 
 
 def test_rpc_accepts_windows_utf8_bom() -> None:
@@ -51,6 +51,17 @@ def test_rpc_reports_parse_errors() -> None:
     assert response["id"] == 8
     assert response["error"]["code"] == -32603
     assert "Unknown method" in response["error"]["message"]
+
+
+def test_rpc_output_escapes_non_ascii_for_windows_pipe_compatibility() -> None:
+    output = io.StringIO()
+    server = RpcServer(io.StringIO(), output)
+
+    server.send({"collection": "多模态会议语音识别"})
+
+    encoded = output.getvalue()
+    assert encoded.isascii()
+    assert json.loads(encoded)["collection"] == "多模态会议语音识别"
 
 
 def test_progress_notification_uses_shared_contract_fields() -> None:

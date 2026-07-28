@@ -1,5 +1,7 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use futures_util::StreamExt;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -8,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Condvar, Mutex,
     },
     time::Duration,
@@ -24,11 +26,15 @@ const KEYRING_USER: &str = "stronghold-vault-v1";
 struct EngineInner {
     child: Mutex<Option<Child>>,
     writer: Mutex<Option<ChildStdin>>,
+    startup: Mutex<()>,
+    generation: AtomicU64,
     pending: Mutex<Pending>,
     next_id: AtomicU64,
     ocr: Mutex<OcrConfig>,
     ocr_limiter: OcrLimiter,
     allowed_ocr_roots: Mutex<Vec<PathBuf>>,
+    model_credentials: Mutex<HashMap<String, String>>,
+    model_cancellations: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 #[derive(Clone, Default)]
@@ -95,6 +101,90 @@ struct CredentialInput {
     consent: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderConfigInput {
+    id: String,
+    name: String,
+    format: String,
+    base_url: String,
+    credential_id: String,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+    timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelConfigInput {
+    id: String,
+    provider_id: String,
+    model: String,
+    display_name: String,
+    max_context_tokens: u64,
+    max_output_tokens: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelMessageInput {
+    role: String,
+    content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<ModelToolCallInput>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct ModelToolCallInput {
+    id: String,
+    name: String,
+    arguments: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelToolDefinitionInput {
+    name: String,
+    description: String,
+    input_schema: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelStreamInput {
+    request_id: String,
+    provider: ProviderConfigInput,
+    model: ModelConfigInput,
+    messages: Vec<ModelMessageInput>,
+    #[serde(default)]
+    tools: Vec<ModelToolDefinitionInput>,
+    #[serde(default)]
+    temperature: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProviderTestInput {
+    provider: ProviderConfigInput,
+    model: ModelConfigInput,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelStreamEvent {
+    request_id: String,
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<ModelToolCallInput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<Value>,
+}
+
 #[derive(Clone)]
 struct Engine(Arc<EngineInner>);
 
@@ -103,11 +193,15 @@ impl Engine {
         Self(Arc::new(EngineInner {
             child: Mutex::new(None),
             writer: Mutex::new(None),
+            startup: Mutex::new(()),
+            generation: AtomicU64::new(0),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             ocr: Mutex::new(OcrConfig::default()),
             ocr_limiter: OcrLimiter::default(),
             allowed_ocr_roots: Mutex::new(Vec::new()),
+            model_credentials: Mutex::new(HashMap::new()),
+            model_cancellations: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -144,7 +238,7 @@ impl Engine {
             command.arg("rpc");
             command.env("PYTHONIOENCODING", "utf-8");
             command.env("PYTHONUTF8", "1");
-            return (command, service_dir);
+            return (command, std::env::temp_dir());
         }
         let executable_name = if cfg!(windows) {
             "p2i-paper-engine.exe"
@@ -161,7 +255,7 @@ impl Engine {
                     command.arg("rpc");
                     command.env("PYTHONIOENCODING", "utf-8");
                     command.env("PYTHONUTF8", "1");
-                    return (command, service_dir);
+                    return (command, std::env::temp_dir());
                 }
             }
         }
@@ -183,6 +277,11 @@ impl Engine {
     }
 
     fn ensure_started(&self, app: AppHandle) -> Result<(), String> {
+        let _startup = self
+            .0
+            .startup
+            .lock()
+            .map_err(|_| "engine startup lock poisoned")?;
         if self
             .0
             .writer
@@ -193,6 +292,8 @@ impl Engine {
             return Ok(());
         }
         let (mut command, working_dir) = Self::engine_command();
+        std::fs::create_dir_all(&working_dir)
+            .map_err(|error| format!("failed to prepare paper engine work directory: {error}"))?;
         let mut child = command
             .current_dir(working_dir)
             .stdin(Stdio::piped())
@@ -210,6 +311,7 @@ impl Engine {
             .stderr
             .take()
             .ok_or("paper engine stderr unavailable")?;
+        let generation = self.0.generation.fetch_add(1, Ordering::Relaxed) + 1;
         *self.0.writer.lock().map_err(|_| "engine lock poisoned")? = Some(stdin);
         *self.0.child.lock().map_err(|_| "engine lock poisoned")? = Some(child);
 
@@ -242,6 +344,9 @@ impl Engine {
                         let _ = sender.send(message);
                     }
                 }
+            }
+            if reader_engine.0.generation.load(Ordering::Relaxed) != generation {
+                return;
             }
             if let Ok(mut writer) = reader_engine.0.writer.lock() {
                 *writer = None;
@@ -515,6 +620,137 @@ fn credential_delete(engine: State<'_, Engine>) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_credential_id(credential_id: &str) -> Result<(), String> {
+    if credential_id.is_empty()
+        || credential_id.len() > 128
+        || !credential_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_:".contains(character))
+    {
+        return Err("Invalid provider credential ID".into());
+    }
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn provider_credential_set(
+    engine: State<'_, Engine>,
+    credential_id: String,
+    api_key: String,
+) -> Result<(), String> {
+    validate_credential_id(&credential_id)?;
+    if api_key.trim().is_empty() {
+        return Err("Provider API key is empty".into());
+    }
+    engine
+        .0
+        .model_credentials
+        .lock()
+        .map_err(|_| "Provider credential lock poisoned")?
+        .insert(credential_id, api_key);
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn provider_credential_delete(
+    engine: State<'_, Engine>,
+    credential_id: String,
+) -> Result<(), String> {
+    validate_credential_id(&credential_id)?;
+    engine
+        .0
+        .model_credentials
+        .lock()
+        .map_err(|_| "Provider credential lock poisoned")?
+        .remove(&credential_id);
+    Ok(())
+}
+
+#[tauri::command]
+async fn provider_test_connection(
+    engine: State<'_, Engine>,
+    input: ProviderTestInput,
+) -> Result<Value, String> {
+    let api_key = engine
+        .0
+        .model_credentials
+        .lock()
+        .map_err(|_| "Provider credential lock poisoned")?
+        .get(&input.provider.credential_id)
+        .cloned()
+        .ok_or("Provider credential is not configured")?;
+    let request = ModelStreamInput {
+        request_id: "connection-test".into(),
+        provider: input.provider,
+        model: input.model,
+        messages: vec![ModelMessageInput {
+            role: "user".into(),
+            content: "Reply with OK.".into(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }],
+        tools: Vec::new(),
+        temperature: Some(0.0),
+    };
+    let response = send_model_request(&request, &api_key, false, 1).await?;
+    Ok(json!({"ok": true, "status": response.status().as_u16()}))
+}
+
+#[tauri::command]
+fn model_stream_start(
+    app: AppHandle,
+    engine: State<'_, Engine>,
+    input: ModelStreamInput,
+) -> Result<(), String> {
+    if input.request_id.trim().is_empty() || input.messages.is_empty() {
+        return Err("Model stream request ID and messages are required".into());
+    }
+    validate_credential_id(&input.provider.credential_id)?;
+    let api_key = engine
+        .0
+        .model_credentials
+        .lock()
+        .map_err(|_| "Provider credential lock poisoned")?
+        .get(&input.provider.credential_id)
+        .cloned()
+        .ok_or("Provider credential is not configured")?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    {
+        let mut requests = engine
+            .0
+            .model_cancellations
+            .lock()
+            .map_err(|_| "Model cancellation lock poisoned")?;
+        if requests.contains_key(&input.request_id) {
+            return Err("A model request with this ID is already running".into());
+        }
+        requests.insert(input.request_id.clone(), cancelled.clone());
+    }
+    let stream_engine = engine.inner().clone();
+    tauri::async_runtime::spawn(run_model_stream(
+        app,
+        stream_engine,
+        input,
+        api_key,
+        cancelled,
+    ));
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn model_stream_cancel(engine: State<'_, Engine>, request_id: String) -> Result<(), String> {
+    if let Some(cancelled) = engine
+        .0
+        .model_cancellations
+        .lock()
+        .map_err(|_| "Model cancellation lock poisoned")?
+        .get(&request_id)
+    {
+        cancelled.store(true, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn ocr_consent_set(engine: State<'_, Engine>, consent: bool) -> Result<(), String> {
     engine
@@ -598,6 +834,431 @@ fn ocr_base_url(config: &OcrConfig) -> String {
         return format!("https://{workspace}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1");
     }
     PUBLIC_DASHSCOPE_BASE_URL.to_owned()
+}
+
+fn model_endpoint(provider: &ProviderConfigInput) -> Result<String, String> {
+    let base = provider.base_url.trim().trim_end_matches('/');
+    if !(base.starts_with("https://")
+        || base.starts_with("http://127.0.0.1:")
+        || base.starts_with("http://localhost:"))
+    {
+        return Err(
+            "Provider Base URL must use HTTPS (localhost HTTP is allowed for testing)".into(),
+        );
+    }
+    match provider.format.as_str() {
+        "openai" => Ok(format!("{base}/chat/completions")),
+        "anthropic" => Ok(format!("{base}/messages")),
+        _ => Err("Provider format must be openai or anthropic".into()),
+    }
+}
+
+fn model_headers(provider: &ProviderConfigInput, api_key: &str) -> Result<HeaderMap, String> {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if provider.format == "openai" {
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {api_key}"))
+                .map_err(|_| "Provider API key contains invalid header characters")?,
+        );
+    } else {
+        headers.insert(
+            HeaderName::from_static("x-api-key"),
+            HeaderValue::from_str(api_key)
+                .map_err(|_| "Provider API key contains invalid header characters")?,
+        );
+        headers.insert(
+            HeaderName::from_static("anthropic-version"),
+            HeaderValue::from_static("2023-06-01"),
+        );
+    }
+    for (name, value) in &provider.headers {
+        let normalized = name.trim().to_ascii_lowercase();
+        if matches!(
+            normalized.as_str(),
+            "authorization"
+                | "proxy-authorization"
+                | "x-api-key"
+                | "api-key"
+                | "x-goog-api-key"
+                | "cookie"
+                | "set-cookie"
+        ) || normalized.ends_with("-api-key")
+        {
+            return Err(format!(
+                "Sensitive provider header {name} must be stored as a Stronghold credential"
+            ));
+        }
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| format!("Invalid provider header name: {name}"))?;
+        let value =
+            HeaderValue::from_str(value).map_err(|_| "Invalid provider header value".to_owned())?;
+        headers.insert(name, value);
+    }
+    Ok(headers)
+}
+
+fn model_request_body(input: &ModelStreamInput, stream: bool, max_tokens: u64) -> Value {
+    if input.provider.format == "anthropic" {
+        let system = input
+            .messages
+            .iter()
+            .filter(|message| message.role == "system")
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut messages: Vec<Value> = Vec::new();
+        for message in input
+            .messages
+            .iter()
+            .filter(|message| message.role != "system")
+        {
+            if message.role == "tool" {
+                let block = json!({"type":"tool_result", "tool_use_id":message.tool_call_id, "content":message.content});
+                let append_to_user = messages
+                    .last()
+                    .and_then(|value| value.get("role"))
+                    .and_then(Value::as_str)
+                    == Some("user")
+                    && messages
+                        .last()
+                        .and_then(|value| value.get("content"))
+                        .is_some_and(Value::is_array);
+                if append_to_user {
+                    if let Some(content) = messages
+                        .last_mut()
+                        .and_then(|value| value.get_mut("content"))
+                        .and_then(Value::as_array_mut)
+                    {
+                        content.push(block);
+                    }
+                } else {
+                    messages.push(json!({"role":"user", "content":[block]}));
+                }
+            } else if message.role == "assistant" && !message.tool_calls.is_empty() {
+                let mut content = Vec::new();
+                if !message.content.is_empty() {
+                    content.push(json!({"type":"text", "text":message.content}));
+                }
+                content.extend(message.tool_calls.iter().map(|call| json!({"type":"tool_use", "id":call.id, "name":call.name, "input":call.arguments})));
+                messages.push(json!({"role":"assistant", "content":content}));
+            } else {
+                messages.push(json!({"role": message.role, "content": message.content}));
+            }
+        }
+        let tools = input.tools.iter().map(|tool| json!({"name":tool.name, "description":tool.description, "input_schema":tool.input_schema})).collect::<Vec<_>>();
+        let mut body = json!({
+            "model": input.model.model,
+            "system": system,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": input.temperature.unwrap_or(0.2),
+            "stream": stream,
+            "tools": tools
+        });
+        if tools.is_empty() {
+            body.as_object_mut().expect("model body").remove("tools");
+        }
+        body
+    } else {
+        let messages = input.messages.iter().map(|message| {
+            if message.role == "tool" {
+                json!({"role":"tool", "tool_call_id":message.tool_call_id, "content":message.content})
+            } else if message.role == "assistant" && !message.tool_calls.is_empty() {
+                json!({"role":"assistant", "content":if message.content.is_empty() { Value::Null } else { Value::String(message.content.clone()) }, "tool_calls":message.tool_calls.iter().map(|call| json!({"id":call.id, "type":"function", "function":{"name":call.name, "arguments":call.arguments.to_string()}})).collect::<Vec<_>>()})
+            } else {
+                json!({"role":message.role, "content":message.content})
+            }
+        }).collect::<Vec<_>>();
+        let tools = input.tools.iter().map(|tool| json!({"type":"function", "function":{"name":tool.name, "description":tool.description, "parameters":tool.input_schema}})).collect::<Vec<_>>();
+        let mut body = json!({
+            "model": input.model.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": input.temperature.unwrap_or(0.2),
+            "stream": stream,
+            "stream_options": if stream { json!({"include_usage": true}) } else { Value::Null },
+            "tools": tools
+        });
+        if tools.is_empty() {
+            body.as_object_mut().expect("model body").remove("tools");
+        }
+        body
+    }
+}
+
+async fn send_model_request(
+    input: &ModelStreamInput,
+    api_key: &str,
+    stream: bool,
+    max_tokens: u64,
+) -> Result<reqwest::Response, String> {
+    if input.provider.id.trim().is_empty()
+        || input.provider.name.trim().is_empty()
+        || input.model.id.trim().is_empty()
+        || input.model.display_name.trim().is_empty()
+        || input.model.max_context_tokens == 0
+    {
+        return Err("Provider and model metadata are incomplete".into());
+    }
+    if input.model.provider_id != input.provider.id {
+        return Err("Model does not belong to the selected provider".into());
+    }
+    let timeout = input.provider.timeout_seconds.clamp(1, 300);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .post(model_endpoint(&input.provider)?)
+        .headers(model_headers(&input.provider, api_key)?)
+        .json(&model_request_body(input, stream, max_tokens))
+        .send()
+        .await
+        .map_err(|error| format!("Provider request failed: {error}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let detail = body.chars().take(500).collect::<String>();
+        return Err(format!(
+            "Provider returned HTTP {}: {detail}",
+            status.as_u16()
+        ));
+    }
+    Ok(response)
+}
+
+fn stream_delta(format: &str, value: &Value) -> Option<String> {
+    if format == "anthropic" {
+        value
+            .pointer("/delta/text")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    } else {
+        value
+            .pointer("/choices/0/delta/content")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    }
+}
+
+fn stream_usage(format: &str, value: &Value) -> Option<Value> {
+    let (input, output) = if format == "anthropic" {
+        (
+            value.pointer("/usage/input_tokens").and_then(Value::as_u64),
+            value
+                .pointer("/usage/output_tokens")
+                .and_then(Value::as_u64),
+        )
+    } else {
+        (
+            value
+                .pointer("/usage/prompt_tokens")
+                .and_then(Value::as_u64),
+            value
+                .pointer("/usage/completion_tokens")
+                .and_then(Value::as_u64),
+        )
+    };
+    (input.is_some() || output.is_some())
+        .then(|| json!({"inputTokens": input.unwrap_or(0), "outputTokens": output.unwrap_or(0)}))
+}
+
+fn emit_model_event(
+    app: &AppHandle,
+    request_id: &str,
+    kind: &str,
+    text: Option<String>,
+    tool_calls: Option<Vec<ModelToolCallInput>>,
+    error: Option<String>,
+    usage: Option<Value>,
+) {
+    let _ = app.emit(
+        "model-stream",
+        ModelStreamEvent {
+            request_id: request_id.to_owned(),
+            kind: kind.to_owned(),
+            text,
+            tool_calls,
+            error,
+            usage,
+        },
+    );
+}
+
+#[derive(Default)]
+struct ToolCallAccumulator {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+fn accumulate_tool_calls(format: &str, value: &Value, calls: &mut Vec<ToolCallAccumulator>) {
+    if format == "anthropic" {
+        let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+        if value.get("type").and_then(Value::as_str) == Some("content_block_start")
+            && value.pointer("/content_block/type").and_then(Value::as_str) == Some("tool_use")
+        {
+            calls.resize_with(index + 1, ToolCallAccumulator::default);
+            calls[index].id = value
+                .pointer("/content_block/id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            calls[index].name = value
+                .pointer("/content_block/name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+        }
+        if let Some(partial) = value.pointer("/delta/partial_json").and_then(Value::as_str) {
+            calls.resize_with(index + 1, ToolCallAccumulator::default);
+            calls[index].arguments.push_str(partial);
+        }
+    } else if let Some(deltas) = value
+        .pointer("/choices/0/delta/tool_calls")
+        .and_then(Value::as_array)
+    {
+        for delta in deltas {
+            let index = delta.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+            calls.resize_with(index + 1, ToolCallAccumulator::default);
+            if let Some(id) = delta.get("id").and_then(Value::as_str) {
+                calls[index].id = id.to_owned();
+            }
+            if let Some(name) = delta.pointer("/function/name").and_then(Value::as_str) {
+                calls[index].name.push_str(name);
+            }
+            if let Some(arguments) = delta.pointer("/function/arguments").and_then(Value::as_str) {
+                calls[index].arguments.push_str(arguments);
+            }
+        }
+    }
+}
+
+async fn consume_model_stream<F>(
+    response: reqwest::Response,
+    format: &str,
+    cancelled: &AtomicBool,
+    mut on_delta: F,
+) -> Result<(&'static str, Option<Value>, Vec<ModelToolCallInput>), String>
+where
+    F: FnMut(String),
+{
+    let mut bytes = response.bytes_stream();
+    let mut pending = String::new();
+    let mut usage = None;
+    let mut tool_calls = Vec::new();
+    while let Some(chunk) = bytes.next().await {
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(("cancelled", usage, Vec::new()));
+        }
+        let chunk = chunk.map_err(|error| format!("Provider stream failed: {error}"))?;
+        pending.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(newline) = pending.find('\n') {
+            let line = pending[..newline].trim().trim_end_matches('\r').to_owned();
+            pending.drain(..=newline);
+            let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+                continue;
+            };
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            let value: Value = serde_json::from_str(data)
+                .map_err(|error| format!("Invalid provider stream event: {error}"))?;
+            if let Some(delta) = stream_delta(format, &value) {
+                on_delta(delta);
+            }
+            if let Some(event_usage) = stream_usage(format, &value) {
+                usage = Some(event_usage);
+            }
+            accumulate_tool_calls(format, &value, &mut tool_calls);
+        }
+    }
+    let tool_calls = tool_calls
+        .into_iter()
+        .filter(|call| !call.name.is_empty())
+        .map(|call| {
+            let arguments = if call.arguments.trim().is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str(&call.arguments)
+                    .map_err(|error| format!("Invalid tool arguments for {}: {error}", call.name))?
+            };
+            if call.id.is_empty() {
+                return Err(format!(
+                    "Provider tool call {} did not include an ID",
+                    call.name
+                ));
+            }
+            Ok(ModelToolCallInput {
+                id: call.id,
+                name: call.name,
+                arguments,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let kind = if tool_calls.is_empty() {
+        "done"
+    } else {
+        "tool_calls"
+    };
+    Ok((kind, usage, tool_calls))
+}
+
+async fn run_model_stream(
+    app: AppHandle,
+    engine: Engine,
+    input: ModelStreamInput,
+    api_key: String,
+    cancelled: Arc<AtomicBool>,
+) {
+    emit_model_event(&app, &input.request_id, "started", None, None, None, None);
+    let outcome = async {
+        let response = send_model_request(
+            &input,
+            &api_key,
+            true,
+            input.model.max_output_tokens.clamp(1, 65_536),
+        )
+        .await?;
+        consume_model_stream(response, &input.provider.format, &cancelled, |delta| {
+            emit_model_event(
+                &app,
+                &input.request_id,
+                "delta",
+                Some(delta),
+                None,
+                None,
+                None,
+            )
+        })
+        .await
+    }
+    .await;
+    match outcome {
+        Ok((kind, usage, tool_calls)) => emit_model_event(
+            &app,
+            &input.request_id,
+            kind,
+            None,
+            (!tool_calls.is_empty()).then_some(tool_calls),
+            None,
+            usage,
+        ),
+        Err(error) => emit_model_event(
+            &app,
+            &input.request_id,
+            "error",
+            None,
+            None,
+            Some(error),
+            None,
+        ),
+    }
+    if let Ok(mut requests) = engine.0.model_cancellations.lock() {
+        requests.remove(&input.request_id);
+    }
 }
 
 #[tauri::command]
@@ -752,6 +1413,11 @@ pub fn run() {
             choose_library,
             credential_set,
             credential_delete,
+            provider_credential_set,
+            provider_credential_delete,
+            provider_test_connection,
+            model_stream_start,
+            model_stream_cancel,
             ocr_consent_set,
             qwen_test_connection,
             ocr_status,
@@ -765,13 +1431,72 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{Engine, OcrLimiter};
+    use super::{
+        consume_model_stream, model_endpoint, model_headers, send_model_request, stream_delta,
+        Engine, ModelConfigInput, ModelMessageInput, ModelStreamInput, OcrLimiter,
+        ProviderConfigInput,
+    };
+    use serde_json::json;
+    use std::collections::HashMap;
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     };
     use std::time::Duration;
+
+    fn model_request(base_url: String, format: &str) -> ModelStreamInput {
+        ModelStreamInput {
+            request_id: "test-request".into(),
+            provider: ProviderConfigInput {
+                id: "provider".into(),
+                name: "Provider".into(),
+                format: format.into(),
+                base_url,
+                credential_id: "provider".into(),
+                headers: HashMap::new(),
+                timeout_seconds: 5,
+            },
+            model: ModelConfigInput {
+                id: "model".into(),
+                provider_id: "provider".into(),
+                model: "model".into(),
+                display_name: "Model".into(),
+                max_context_tokens: 4096,
+                max_output_tokens: 64,
+            },
+            messages: vec![ModelMessageInput {
+                role: "user".into(),
+                content: "test".into(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            }],
+            tools: Vec::new(),
+            temperature: Some(0.0),
+        }
+    }
+
+    fn mock_http_server(status: &str, content_type: &str, body: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock listener");
+        let address = listener.local_addr().expect("mock address");
+        let status = status.to_owned();
+        let content_type = content_type.to_owned();
+        let body = body.to_owned();
+        std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("mock connection");
+            let mut request = [0_u8; 16_384];
+            let _ = socket.read(&mut request).expect("mock request");
+            write!(
+                socket,
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("mock response");
+        });
+        format!("http://{address}/v1")
+    }
 
     #[test]
     fn ocr_limiter_allows_only_two_concurrent_requests() {
@@ -796,6 +1521,177 @@ mod tests {
             thread.join().expect("thread");
         }
         assert_eq!(maximum.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn model_endpoint_requires_https_except_local_test_servers() {
+        let provider = |base_url: &str, format: &str| ProviderConfigInput {
+            id: "provider".into(),
+            name: "Provider".into(),
+            format: format.into(),
+            base_url: base_url.into(),
+            credential_id: "provider".into(),
+            headers: HashMap::new(),
+            timeout_seconds: 30,
+        };
+        assert_eq!(
+            model_endpoint(&provider("https://gateway.example/v1", "openai")).unwrap(),
+            "https://gateway.example/v1/chat/completions"
+        );
+        assert_eq!(
+            model_endpoint(&provider("http://127.0.0.1:8080/v1", "anthropic")).unwrap(),
+            "http://127.0.0.1:8080/v1/messages"
+        );
+        assert!(model_endpoint(&provider("http://remote.example/v1", "openai")).is_err());
+    }
+
+    #[test]
+    fn model_stream_normalizes_openai_and_anthropic_deltas() {
+        assert_eq!(
+            stream_delta(
+                "openai",
+                &json!({"choices":[{"delta":{"content":"hello"}}]})
+            ),
+            Some("hello".into())
+        );
+        assert_eq!(
+            stream_delta(
+                "anthropic",
+                &json!({"delta":{"type":"text_delta","text":"world"}})
+            ),
+            Some("world".into())
+        );
+    }
+
+    #[test]
+    fn provider_headers_reject_secrets_but_allow_non_secret_routing_metadata() {
+        let mut headers = HashMap::from([
+            ("Authorization".into(), "Bearer persisted-secret".into()),
+            ("OpenAI-Organization".into(), "org-test".into()),
+        ]);
+        let provider = ProviderConfigInput {
+            id: "provider".into(),
+            name: "Provider".into(),
+            format: "openai".into(),
+            base_url: "https://gateway.example/v1".into(),
+            credential_id: "provider".into(),
+            headers: headers.clone(),
+            timeout_seconds: 30,
+        };
+        assert!(model_headers(&provider, "stronghold-secret").is_err());
+
+        headers.remove("Authorization");
+        let safe_provider = ProviderConfigInput {
+            headers,
+            ..provider
+        };
+        let result = model_headers(&safe_provider, "stronghold-secret").expect("safe headers");
+        assert_eq!(result.get("OpenAI-Organization").unwrap(), "org-test");
+    }
+
+    #[test]
+    fn local_mock_streams_normalize_openai_anthropic_and_cancellation() {
+        tauri::async_runtime::block_on(async {
+            let openai_body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+                "data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let openai_url = mock_http_server("200 OK", "text/event-stream", openai_body);
+            let openai = model_request(openai_url, "openai");
+            let response = send_model_request(&openai, "secret", true, 64)
+                .await
+                .expect("OpenAI mock request");
+            let mut deltas = Vec::new();
+            let (kind, usage, tool_calls) =
+                consume_model_stream(response, "openai", &AtomicBool::new(false), |delta| {
+                    deltas.push(delta)
+                })
+                .await
+                .expect("OpenAI mock stream");
+            assert_eq!(kind, "done");
+            assert_eq!(deltas, ["hello"]);
+            assert_eq!(usage.unwrap()["inputTokens"], 3);
+            assert!(tool_calls.is_empty());
+
+            let anthropic_body = concat!(
+                "data: {\"delta\":{\"type\":\"text_delta\",\"text\":\"world\"}}\n\n",
+                "data: {\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}\n\n"
+            );
+            let anthropic_url = mock_http_server("200 OK", "text/event-stream", anthropic_body);
+            let anthropic = model_request(anthropic_url, "anthropic");
+            let response = send_model_request(&anthropic, "secret", true, 64)
+                .await
+                .expect("Anthropic mock request");
+            let cancelled = AtomicBool::new(true);
+            let (kind, usage, tool_calls) =
+                consume_model_stream(response, "anthropic", &cancelled, |_| {
+                    panic!("cancelled stream emitted a delta")
+                })
+                .await
+                .expect("cancelled mock stream");
+            assert_eq!(kind, "cancelled");
+            assert!(usage.is_none());
+            assert!(tool_calls.is_empty());
+        });
+    }
+
+    #[test]
+    fn local_mock_normalizes_openai_and_anthropic_tool_calls() {
+        tauri::async_runtime::block_on(async {
+            let openai_body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"find_evidence\",\"arguments\":\"{\\\"query\\\":\"}}]}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"budget\\\"}\"}}]}}]}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let openai_url = mock_http_server("200 OK", "text/event-stream", openai_body);
+            let openai = model_request(openai_url, "openai");
+            let response = send_model_request(&openai, "secret", true, 64)
+                .await
+                .unwrap();
+            let (kind, _, calls) =
+                consume_model_stream(response, "openai", &AtomicBool::new(false), |_| {})
+                    .await
+                    .unwrap();
+            assert_eq!(kind, "tool_calls");
+            assert_eq!(calls[0].name, "find_evidence");
+            assert_eq!(calls[0].arguments["query"], "budget");
+
+            let anthropic_body = concat!(
+                "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"read_paper\",\"input\":{}}}\n\n",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"paperId\\\":\\\"paper-1\\\"}\"}}\n\n"
+            );
+            let anthropic_url = mock_http_server("200 OK", "text/event-stream", anthropic_body);
+            let anthropic = model_request(anthropic_url, "anthropic");
+            let response = send_model_request(&anthropic, "secret", true, 64)
+                .await
+                .unwrap();
+            let (kind, _, calls) =
+                consume_model_stream(response, "anthropic", &AtomicBool::new(false), |_| {})
+                    .await
+                    .unwrap();
+            assert_eq!(kind, "tool_calls");
+            assert_eq!(calls[0].name, "read_paper");
+            assert_eq!(calls[0].arguments["paperId"], "paper-1");
+        });
+    }
+
+    #[test]
+    fn local_mock_maps_provider_http_errors_without_exposing_the_key() {
+        tauri::async_runtime::block_on(async {
+            let url = mock_http_server(
+                "429 Too Many Requests",
+                "application/json",
+                r#"{"error":"rate limited"}"#,
+            );
+            let request = model_request(url, "openai");
+            let error = send_model_request(&request, "do-not-leak", true, 64)
+                .await
+                .expect_err("429 must fail");
+            assert!(error.contains("HTTP 429"));
+            assert!(error.contains("rate limited"));
+            assert!(!error.contains("do-not-leak"));
+        });
     }
 
     #[test]

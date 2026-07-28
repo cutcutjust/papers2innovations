@@ -82,6 +82,13 @@ class ParserInfo(BaseModel):
     version: str
 
 
+class MarkdownFormattingInfo(BaseModel):
+    model_id: str
+    prompt_version: str
+    source_sha256: str
+    updated_at: str = Field(default_factory=utc_now)
+
+
 class PaperDocument(BaseModel):
     schema_version: str = "1.0"
     paper_id: str
@@ -95,6 +102,7 @@ class PaperDocument(BaseModel):
     figures: list[PaperFigure] = Field(default_factory=list)
     tables: list[dict[str, Any]] = Field(default_factory=list)
     parser: ParserInfo
+    formatting: MarkdownFormattingInfo | None = None
     ocr: OcrUsage | None = None
     partial: bool = False
     warnings: list[str] = Field(default_factory=list)

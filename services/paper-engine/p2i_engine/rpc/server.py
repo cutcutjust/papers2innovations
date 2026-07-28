@@ -25,7 +25,9 @@ class RpcServer:
         self.host_pending_lock = threading.Lock()
 
     def send(self, payload: dict[str, Any]) -> None:
-        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        # JSON-RPC is a wire protocol. ASCII escaping keeps every response valid
+        # UTF-8 even when a frozen Windows Python process inherited a legacy code page.
+        encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
         with self.output_lock:
             self.output.write(encoded + "\n")
             self.output.flush()
@@ -117,6 +119,116 @@ class RpcServer:
             return {
                 "markdown": self.library(params["root"]).read_markdown(params["paperId"])
             }
+        if method == "paper.read_document":
+            return self.library(params["root"]).read_document(params["paperId"])
+        if method == "paper.format_markdown_save":
+            return self.library(params["root"]).save_formatted_document(
+                params["paperId"],
+                params.get("sections", []),
+                params["modelId"],
+                params["promptVersion"],
+                params["sourceSha256"],
+            )
+        if method == "paper.read_references":
+            return self.library(params["root"]).read_references(params["paperId"])
+        if method == "graph.build":
+            return self.library(params["root"]).build_citation_graph(
+                params["paperId"], int(params.get("maxDepth", 2)), bool(params.get("force", False))
+            )
+        if method == "translation.list":
+            return self.library(params["root"]).list_translations(params["paperId"])
+        if method == "translation.save":
+            return self.library(params["root"]).save_translation(params)
+        if method == "reader.analysis_list":
+            return self.library(params["root"]).list_reader_analyses(params["paperId"])
+        if method == "reader.analysis_save":
+            return self.library(params["root"]).save_reader_analysis(params)
+        if method == "reader.chat_get":
+            return self.library(params["root"]).get_reader_conversation(params["paperId"])
+        if method == "reader.chat_save":
+            return self.library(params["root"]).save_reader_chat_turn(params)
+        if method == "reader.chat_clear":
+            return {
+                "cleared": self.library(params["root"]).clear_reader_conversation(
+                    params["paperId"]
+                )
+            }
+        if method == "context.get":
+            return self.library(params["root"]).get_context_draft()
+        if method == "context.add_paper":
+            return self.library(params["root"]).add_paper_to_context(
+                params["paperId"], params.get("mode", "full")
+            )
+        if method == "context.add_selection":
+            return self.library(params["root"]).add_selection_to_context(params)
+        if method == "context.read_item":
+            return self.library(params["root"]).read_context_item(params["itemId"])
+        if method == "context.get_compression":
+            return self.library(params["root"]).get_context_compression(
+                params["itemId"], params["modelId"], params["promptVersion"]
+            )
+        if method == "context.activate_compression":
+            return self.library(params["root"]).activate_context_compression(
+                params["itemId"], params["modelId"], params["promptVersion"]
+            )
+        if method == "context.save_compression":
+            return self.library(params["root"]).save_context_compression(params)
+        if method == "context.remove_paper":
+            return self.library(params["root"]).remove_paper_from_context(params["paperId"])
+        if method == "context.clear":
+            return self.library(params["root"]).clear_context()
+        if method == "agent.list":
+            return self.library(params["root"]).list_agent_profiles()
+        if method == "agent.upsert":
+            return self.library(params["root"]).upsert_agent_profile(params)
+        if method == "agent.delete":
+            return {
+                "deleted": self.library(params["root"]).delete_agent_profile(
+                    params["agentProfileId"]
+                )
+            }
+        if method == "agent.run_list":
+            return self.library(params["root"]).list_agent_runs(
+                params.get("agentProfileId"), int(params.get("limit", 50))
+            )
+        if method == "agent.run_start":
+            return self.library(params["root"]).start_agent_run(params)
+        if method == "agent.run_update":
+            return self.library(params["root"]).update_agent_run(params["runId"], params)
+        if method == "agent.run_cancel":
+            return self.library(params["root"]).cancel_agent_run(params["runId"])
+        if method == "agent.run_retry":
+            return self.library(params["root"]).retry_agent_run(params["runId"])
+        if method == "agent.tool_registry":
+            return self.library(params["root"]).list_agent_tools(params["agentProfileId"])
+        if method == "agent.tool_execute":
+            return self.library(params["root"]).execute_agent_tool(params)
+        if method == "innovation.prompt_get":
+            return self.library(params["root"]).get_innovation_prompt(
+                params.get("promptVersion", "innovation-v1")
+            )
+        if method == "innovation.prompt_save":
+            return self.library(params["root"]).save_innovation_prompt(
+                params["promptText"], params.get("promptVersion", "innovation-v1")
+            )
+        if method == "innovation.run_list":
+            return self.library(params["root"]).list_innovation_runs(
+                int(params.get("limit", 30))
+            )
+        if method == "innovation.run_start":
+            return self.library(params["root"]).start_innovation_run(params)
+        if method == "innovation.stage_start":
+            return self.library(params["root"]).start_innovation_stage(
+                params["runId"], params["stage"]
+            )
+        if method == "innovation.stage_update":
+            return self.library(params["root"]).update_innovation_stage(
+                params["runId"], params["stage"], params
+            )
+        if method == "innovation.run_cancel":
+            return self.library(params["root"]).cancel_innovation_run(params["runId"])
+        if method == "innovation.run_retry":
+            return self.library(params["root"]).retry_innovation_run(params["runId"])
         if method == "zotero.inspect":
             from ..zotero import ZoteroImporter
 

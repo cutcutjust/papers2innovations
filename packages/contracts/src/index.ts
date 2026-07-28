@@ -59,6 +59,13 @@ export interface PaperDocumentFigure {
   mime_type: string;
 }
 
+export interface MarkdownFormattingInfo {
+  model_id: string;
+  prompt_version: string;
+  source_sha256: string;
+  updated_at: string;
+}
+
 export interface PaperDocument {
   schema_version: "1.0";
   paper_id: string;
@@ -72,6 +79,7 @@ export interface PaperDocument {
   figures: PaperDocumentFigure[];
   tables: Array<{ id: string; caption?: string; markdown: string; page?: number }>;
   parser: { name: string; version: string };
+  formatting?: MarkdownFormattingInfo;
   generated_at: string;
 }
 
@@ -171,9 +179,140 @@ export interface ParseArtifactBundle {
   warnings: string[];
 }
 
+export type ApiFormat = "openai" | "anthropic";
+
+export interface ProviderConfig {
+  id: string;
+  name: string;
+  format: ApiFormat;
+  baseUrl: string;
+  credentialId: string;
+  headers?: Record<string, string>;
+  timeoutSeconds: number;
+}
+
+export interface ModelConfig {
+  id: string;
+  providerId: string;
+  model: string;
+  displayName: string;
+  maxContextTokens: number;
+  maxOutputTokens: number;
+}
+
+export interface CredentialSummary {
+  credentialId: string;
+  configured: boolean;
+}
+
+export interface ModelMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string;
+  toolCallId?: string;
+  toolCalls?: ModelToolCall[];
+}
+
+export interface ModelToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+export interface ModelToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface ModelStreamRequest {
+  requestId: string;
+  provider: ProviderConfig;
+  model: ModelConfig;
+  messages: ModelMessage[];
+  tools?: ModelToolDefinition[];
+  temperature?: number;
+}
+
+export interface ModelStreamEvent {
+  requestId: string;
+  kind: "started" | "delta" | "tool_calls" | "done" | "cancelled" | "error";
+  text?: string;
+  toolCalls?: ModelToolCall[];
+  error?: string;
+  usage?: { inputTokens: number; outputTokens: number };
+}
+
+export interface TranslationRecord {
+  id: string;
+  paperId: string;
+  sectionId: string;
+  blockId: string;
+  sourceHash: string;
+  sourceText: string;
+  translatedText: string;
+  targetLanguage: string;
+  modelId: string;
+  promptVersion: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ReaderAnalysisType = "formula" | "theorem";
+
+export interface ReaderAnalysisRecord {
+  id: string;
+  paperId: string;
+  sectionId: string;
+  blockId: string;
+  analysisType: ReaderAnalysisType;
+  sourceHash: string;
+  sourceText: string;
+  adjacentContext: string;
+  resultText: string;
+  modelId: string;
+  promptVersion: string;
+  revision: number;
+  usage: { inputTokens: number; outputTokens: number; durationMs: number };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReaderChatResponse {
+  id: string;
+  assistantText: string;
+  modelId: string;
+  promptVersion: string;
+  revision: number;
+  status: "completed" | "cancelled" | "failed";
+  usage: { inputTokens: number; outputTokens: number; durationMs: number };
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReaderChatTurn {
+  id: string;
+  turnIndex: number;
+  userMessage: string;
+  contextSnapshot: ContextSnapshot;
+  response?: ReaderChatResponse;
+  createdAt: string;
+}
+
+export interface ReaderConversation {
+  id: string;
+  paperId: string;
+  turns: ReaderChatTurn[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface AgentProfile {
   id: string;
   name: string;
+  description: string;
+  color: string;
   enabled: boolean;
   providerId: string;
   modelId: string;
@@ -191,10 +330,160 @@ export interface AgentProfile {
   networkPolicy: "none" | "academic" | "full";
   writePolicy: "read-only" | "confirm-write" | "trusted-write";
   systemPromptId: string;
+  systemPrompt: string;
   promptVersion: string;
+  createdAt: string;
+  updatedAt: string;
+  latestRun?: AgentRun;
 }
 
-export type ContextLoadMode = "full" | "structured" | "retrieval" | "sections";
+export type AgentRunStatus = "running" | "completed" | "failed" | "cancelled" | "interrupted";
+
+export interface AgentRun {
+  id: string;
+  agentProfileId: string;
+  retryOf?: string;
+  status: AgentRunStatus;
+  providerId: string;
+  modelId: string;
+  promptVersion: string;
+  userPrompt: string;
+  contextSnapshot: ContextSnapshot;
+  outputText: string;
+  usage: { inputTokens: number; outputTokens: number; durationMs: number };
+  error?: string;
+  cancelRequested: boolean;
+  startedAt?: string;
+  finishedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  toolCalls: AgentToolCallRecord[];
+}
+
+export interface AgentToolCallRecord {
+  id: string;
+  runId: string;
+  toolCallId: string;
+  iteration: number;
+  position: number;
+  toolName: string;
+  arguments: Record<string, unknown>;
+  status: "running" | "completed" | "failed" | "denied";
+  result?: unknown;
+  error?: string;
+  startedAt: string;
+  finishedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type InnovationStageId = "compression" | "evidence" | "ideas" | "novelty" | "critique";
+export type InnovationRunStatus = "running" | "completed" | "failed" | "cancelled" | "interrupted";
+export type InnovationStageStatus = "pending" | InnovationRunStatus;
+
+export interface InnovationPromptRevision {
+  id: string;
+  promptText: string;
+  promptVersion: string;
+  revision: number;
+  createdAt: string;
+}
+
+export interface InnovationStageRecord {
+  id: string;
+  runId: string;
+  stage: InnovationStageId;
+  position: number;
+  status: InnovationStageStatus;
+  modelId: string;
+  attempt: number;
+  outputText: string;
+  usage: { inputTokens: number; outputTokens: number; durationMs: number };
+  error?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  updatedAt: string;
+}
+
+export interface InnovationRun {
+  id: string;
+  retryOf?: string;
+  status: InnovationRunStatus;
+  currentStage: InnovationStageId;
+  promptText: string;
+  promptVersion: string;
+  contextSnapshot: ContextSnapshot;
+  stageModels: Record<InnovationStageId, string>;
+  stages: InnovationStageRecord[];
+  cancelRequested: boolean;
+  error?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ContextLoadMode = "full" | "structured" | "compressed" | "retrieval" | "sections";
+
+export interface ContextCompressionSummary {
+  id: string;
+  modelId: string;
+  promptVersion: string;
+  revision: number;
+  estimatedTokens: number;
+  usage: { inputTokens: number; outputTokens: number; durationMs: number };
+  preview: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ContextCompressionRecord extends ContextCompressionSummary {
+  itemId: string;
+  sourceHash: string;
+  compressedText: string;
+}
+
+export interface ContextSourceItem {
+  id: string;
+  paperId: string;
+  paperTitle: string;
+  sectionId?: string;
+  blockId?: string;
+  sourceHash: string;
+  sourceText: string;
+  estimatedTokens: number;
+}
+
+export interface ContextDraftItem {
+  id: string;
+  paperId: string;
+  paperTitle: string;
+  sectionId?: string;
+  blockId?: string;
+  mode: ContextLoadMode;
+  sourceHash: string;
+  sourcePreview: string;
+  estimatedTokens: number;
+  compression?: ContextCompressionSummary;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ContextTokenBreakdown {
+  systemPrompt: number;
+  tools: number;
+  conversation: number;
+  papers: number;
+  figures: number;
+  outputReserve: number;
+  safetyBuffer: number;
+}
+
+export interface ContextDraft {
+  items: ContextDraftItem[];
+  tokenBreakdown: ContextTokenBreakdown;
+  updatedAt?: string;
+}
 
 export interface ContextSnapshot {
   id: string;
@@ -202,26 +491,74 @@ export interface ContextSnapshot {
   modelId: string;
   reasoningEffort?: string;
   items: Array<{
+    contextItemId?: string;
     paperId: string;
+    sourceHash?: string;
     mode: ContextLoadMode;
     sectionIds: string[];
     figureIds: string[];
     estimatedTokens: number;
   }>;
-  tokenBreakdown: {
-    systemPrompt: number;
-    tools: number;
-    conversation: number;
-    papers: number;
-    figures: number;
-    outputReserve: number;
-    safetyBuffer: number;
-  };
+  tokenBreakdown: ContextTokenBreakdown;
   promptVersion: string;
   toolVersions: Record<string, string>;
   retrievalQueries: string[];
   externalResults: Array<{ source: string; id: string; title: string }>;
   createdAt: string;
+}
+
+export interface CitationReference {
+  id: string;
+  index: number;
+  title: string;
+  authors: string[];
+  year?: number;
+  venue?: string;
+  doi?: string;
+  arxiv?: string;
+  rawCitation: string;
+  resolvedPaperId?: string;
+}
+
+export type CitationRelation = "cites" | "shared_reference" | "coauthor" | "topic_similarity" | "mutual_citation";
+
+export interface CitationGraphNode {
+  id: string;
+  paperId?: string;
+  title: string;
+  authors: string[];
+  year?: number;
+  depth: 0 | 1 | 2;
+  degree: number;
+  resolved: boolean;
+  status: "ready" | "unresolved" | "partial" | "error";
+  doi?: string;
+  arxiv?: string;
+  rawCitation?: string;
+}
+
+export interface CitationGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  relation: CitationRelation;
+  weight: number;
+}
+
+export interface CitationGraphResult {
+  schemaVersion: 1;
+  rootPaperId: string;
+  maxDepth: 1 | 2;
+  status: "ready" | "partial" | "error";
+  nodes: CitationGraphNode[];
+  edges: CitationGraphEdge[];
+  directCount: number;
+  secondLevelCount: number;
+  unresolvedCount: number;
+  warnings: string[];
+  libraryFingerprint: string;
+  generatedAt: string;
+  cacheHit: boolean;
 }
 
 export interface LibraryPaper {

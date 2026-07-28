@@ -44,6 +44,186 @@ def _safe_image_name(name: str, index: int) -> str:
     return cleaned or f"figure-{index}.bin"
 
 
+_KNOWN_SECTION_NAMES = {
+    "abstract",
+    "keywords",
+    "key words",
+    "introduction",
+    "background",
+    "related work",
+    "literature review",
+    "method",
+    "methods",
+    "methodology",
+    "materials and methods",
+    "approach",
+    "model",
+    "experiments",
+    "experimental setup",
+    "results",
+    "discussion",
+    "results and discussion",
+    "limitations",
+    "conclusion",
+    "conclusions",
+    "future work",
+    "acknowledgements",
+    "acknowledgments",
+    "references",
+    "bibliography",
+    "appendix",
+}
+_INTERNAL_ANCHOR = re.compile(
+    r"<a\b[^>]*\bdata-block-id=(?:\"[^\"]+\"|'[^']+')[^>]*>\s*</a>", re.I
+)
+_NUMBERED_HEADING = re.compile(
+    r"^(?P<number>(?:\d+(?:\.\d+)*|[IVXLC]+)[.)]?)\s+(?P<title>[A-Za-z][^\n]{1,100})$",
+    re.I,
+)
+
+
+def _clean_heading_title(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().strip("#*_` ").rstrip(":")).strip()
+
+
+def _heading_candidate(line: str) -> tuple[str, int, bool] | None:
+    stripped = line.strip()
+    if not stripped or len(stripped) > 120:
+        return None
+    markdown = re.match(r"^(#{1,6})\s+(.+?)\s*$", stripped)
+    if markdown:
+        title = _clean_heading_title(markdown.group(2))
+        if not title or re.fullmatch(r"page\s+\d+", title, re.I):
+            return None
+        return title, min(len(markdown.group(1)), 3), True
+
+    title = _clean_heading_title(stripped)
+    normalized = title.casefold()
+    if normalized in _KNOWN_SECTION_NAMES:
+        return title, 1, True
+    numbered = _NUMBERED_HEADING.match(title)
+    if numbered:
+        heading_title = _clean_heading_title(numbered.group("title"))
+        if heading_title.endswith(".") or len(heading_title.split()) > 12:
+            return None
+        level = min(numbered.group("number").count(".") + 1, 3)
+        return title, level, True
+    if (
+        2 <= len(title.split()) <= 8
+        and len(title) >= 4
+        and title.upper() == title
+        and any(character.isalpha() for character in title)
+    ):
+        return title.title(), 1, False
+    return None
+
+
+def _section_slug(title: str, used: dict[str, int]) -> str:
+    base = re.sub(r"[^a-z0-9]+", "-", title.casefold()).strip("-") or "section"
+    used[base] = used.get(base, 0) + 1
+    return base if used[base] == 1 else f"{base}-{used[base]}"
+
+
+def _semantic_sections(
+    pages: list[tuple[int, str]], paper_id: str
+) -> list[PaperSection]:
+    """Build reader sections while retaining page-level evidence provenance."""
+    cleaned_pages: list[tuple[int, list[str]]] = []
+    weak_heading_pages: dict[str, set[int]] = {}
+    for page, markdown in pages:
+        cleaned = _INTERNAL_ANCHOR.sub("", markdown)
+        lines = cleaned.splitlines()
+        cleaned_pages.append((page, lines))
+        for line in lines:
+            candidate = _heading_candidate(line)
+            if candidate and not candidate[2]:
+                weak_heading_pages.setdefault(candidate[0].casefold(), set()).add(page)
+
+    repeated_weak_headings = {
+        title for title, page_numbers in weak_heading_pages.items() if len(page_numbers) > 1
+    }
+    drafts: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    heading_count = 0
+
+    def ensure_current() -> dict[str, Any]:
+        nonlocal current
+        if current is None:
+            current = {"title": "Overview", "level": 1, "chunks": []}
+            drafts.append(current)
+        return current
+
+    def append_chunk(draft: dict[str, Any], page: int, lines: list[str]) -> None:
+        body = "\n".join(lines).strip()
+        if not body:
+            return
+        chunks: list[tuple[int, str]] = draft["chunks"]
+        if chunks and chunks[-1][0] == page:
+            chunks[-1] = (page, f"{chunks[-1][1]}\n{body}".strip())
+        else:
+            chunks.append((page, body))
+
+    for page, lines in cleaned_pages:
+        pending: list[str] = []
+        for line in lines:
+            candidate = _heading_candidate(line)
+            if candidate and not candidate[2] and candidate[0].casefold() in repeated_weak_headings:
+                continue
+            if candidate:
+                append_chunk(ensure_current(), page, pending)
+                pending = []
+                title, level, _ = candidate
+                if current and current["title"].casefold() == title.casefold():
+                    continue
+                current = {"title": title, "level": level, "chunks": []}
+                drafts.append(current)
+                heading_count += 1
+            else:
+                pending.append(line)
+        append_chunk(ensure_current(), page, pending)
+
+    drafts = [draft for draft in drafts if draft["chunks"]]
+    if heading_count == 0:
+        all_chunks = [chunk for draft in drafts for chunk in draft["chunks"]]
+        drafts = [{"title": "Document", "level": 1, "chunks": all_chunks}]
+
+    used_slugs: dict[str, int] = {}
+    sections: list[PaperSection] = []
+    for order, draft in enumerate(drafts):
+        section_id = _section_slug(str(draft["title"]), used_slugs)
+        anchors: list[EvidenceAnchor] = []
+        markdown_chunks: list[str] = []
+        for chunk_index, (page, body) in enumerate(draft["chunks"], start=1):
+            block_id = f"{section_id}-page-{page}-{chunk_index}"
+            anchors.append(
+                EvidenceAnchor(
+                    paper_id=paper_id,
+                    section_id=section_id,
+                    block_id=block_id,
+                    page=page,
+                    source_text=body[:500],
+                )
+            )
+            markdown_chunks.append(
+                f'<a data-paper-id="{paper_id}" data-page="{page}" '
+                f'data-block-id="{block_id}"></a>\n\n{body}'
+            )
+        page_numbers = [anchor.page for anchor in anchors]
+        sections.append(
+            PaperSection(
+                id=section_id,
+                title=str(draft["title"]),
+                level=int(draft["level"]),
+                order=order,
+                page_start=min(page_numbers),
+                page_end=max(page_numbers),
+                markdown="\n\n".join(markdown_chunks),
+                anchors=anchors,
+            )
+        )
+    return sections
+
+
 def _parse_with_pypdf(
     source: Path,
     output_dir: Path,
@@ -53,9 +233,8 @@ def _parse_with_pypdf(
     reader = PdfReader(str(source))
     figure_dir = output_dir / "figures"
     figure_dir.mkdir(parents=True, exist_ok=True)
-    sections: list[PaperSection] = []
+    page_contents: list[tuple[int, str]] = []
     figures: list[PaperFigure] = []
-    markdown_parts: list[str] = []
     title = source.stem.replace("_", " ").replace("-", " ").strip()
 
     for page_index, page in enumerate(reader.pages, start=1):
@@ -65,33 +244,8 @@ def _parse_with_pypdf(
             candidate = nonempty_lines[0]
             if 5 <= len(candidate) <= 240:
                 title = candidate
-        section_id = f"section-{page_index}"
-        block_id = f"page-{page_index}-block-1"
-        anchor = EvidenceAnchor(
-            paper_id=paper_id,
-            section_id=section_id,
-            block_id=block_id,
-            page=page_index,
-            source_text=text[:500],
-        )
-        anchor_html = (
-            f'<a data-paper-id="{paper_id}" data-page="{page_index}" '
-            f'data-block-id="{block_id}"></a>'
-        )
         body = text or "_No extractable text was found on this page._"
-        section_markdown = f"## Page {page_index}\n\n{anchor_html}\n\n{body}"
-        sections.append(
-            PaperSection(
-                id=section_id,
-                title=f"Page {page_index}",
-                order=page_index - 1,
-                page_start=page_index,
-                page_end=page_index,
-                markdown=section_markdown,
-                anchors=[anchor],
-            )
-        )
-        markdown_parts.append(section_markdown)
+        page_markdown = body
 
         try:
             for image_index, image in enumerate(page.images, start=1):
@@ -111,12 +265,14 @@ def _parse_with_pypdf(
                         thumbnail_path=f"figures/{thumbnail_name}" if thumbnail_name else None,
                     )
                 )
-                markdown_parts.append(
-                    f"\n![Figure on page {page_index}](figures/{image_name})\n"
-                )
+                page_markdown += f"\n\n![Figure on page {page_index}](figures/{image_name})"
         except Exception:
             # Image extraction varies across PDF encodings; text parsing remains valid.
             pass
+        page_contents.append((page_index, page_markdown))
+
+    sections = _semantic_sections(page_contents, paper_id)
+    markdown_parts = [section.markdown for section in sections]
 
     parser_version = importlib.metadata.version("pypdf")
     document = PaperDocument(
@@ -161,23 +317,7 @@ def _parse_with_docling(
     ).convert(str(source))
     markdown = conversion.document.export_to_markdown()
     exported = conversion.document.export_to_dict()
-    raw_text = markdown[:500]
-    section = PaperSection(
-        id="section-1",
-        title="Document",
-        order=0,
-        page_start=1,
-        markdown=markdown,
-        anchors=[
-            EvidenceAnchor(
-                paper_id=paper_id,
-                section_id="section-1",
-                block_id="document-block-1",
-                page=1,
-                source_text=raw_text,
-            )
-        ],
-    )
+    sections = _semantic_sections([(1, markdown)], paper_id)
     title = source.stem.replace("_", " ").replace("-", " ")
     figures: list[PaperFigure] = []
     figure_dir = output_dir / "figures"
@@ -259,7 +399,7 @@ def _parse_with_docling(
         source_sha256=sha256,
         title=title,
         page_count=max(1, len(conversion.document.pages)),
-        sections=[section],
+        sections=sections,
         figures=figures,
         tables=tables,
         parser=ParserInfo(
@@ -269,11 +409,10 @@ def _parse_with_docling(
     (output_dir / "docling-native.json").write_text(
         json.dumps(exported, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    anchored = (
-        f'<a data-paper-id="{paper_id}" data-page="1" '
-        'data-block-id="document-block-1"></a>\n\n'
+    return ParseResult(
+        document=document,
+        markdown="\n\n".join(section.markdown for section in sections),
     )
-    return ParseResult(document=document, markdown=anchored + markdown)
 
 
 def _render_page(source: Path, page_index: int, target: Path) -> tuple[int, int]:
@@ -301,8 +440,7 @@ def _apply_qwen_ocr(
 ) -> ParseResult:
     started = time.monotonic()
     usage = OcrUsage(page_count=result.document.page_count)
-    sections: list[PaperSection] = []
-    markdown_parts: list[str] = []
+    page_markdown: list[tuple[int, str]] = []
     warnings: list[str] = []
 
     def process_page(page_number: int) -> dict[str, Any]:
@@ -340,33 +478,8 @@ def _apply_qwen_ocr(
             text = str(response.get("markdown", "")).strip()
             if not text:
                 raise ValueError("Qwen OCR returned empty Markdown")
-            confidence = float(response.get("alignmentConfidence", 0))
-            section_id = f"section-{page_number}"
-            block_id = f"page-{page_number}-ocr"
-            anchor = EvidenceAnchor(
-                paper_id=paper_id,
-                section_id=section_id,
-                block_id=block_id,
-                page=page_number,
-                source_text=text[:500],
-            )
-            anchor_html = (
-                f'<a data-paper-id="{paper_id}" data-page="{page_number}" '
-                f'data-block-id="{block_id}" data-alignment-confidence="{confidence:.3f}"></a>'
-            )
-            markdown = f"## Page {page_number}\n\n{anchor_html}\n\n{text}"
-            section = PaperSection(
-                id=section_id,
-                title=f"Page {page_number}",
-                order=page_number - 1,
-                page_start=page_number,
-                page_end=page_number,
-                markdown=markdown,
-                anchors=[anchor],
-            )
             return {
-                "section": section,
-                "markdown": markdown,
+                "markdown": text,
                 "request_count": request_count,
                 "cache_hits": cache_hits,
                 "input_tokens": int(usage_data.get("inputTokens", 0)),
@@ -375,38 +488,17 @@ def _apply_qwen_ocr(
             }
         except Exception as error:
             warning = f"Qwen OCR page {page_number}: {type(error).__name__}: {error}"
-            fallback = next(
-                (section for section in result.document.sections if section.page_start == page_number),
-                None,
+            fallback_text = next(
+                (
+                    anchor.source_text
+                    for section in result.document.sections
+                    for anchor in section.anchors
+                    if anchor.page == page_number
+                ),
+                "_OCR failed for this page._",
             )
-            if fallback is None:
-                block_id = f"page-{page_number}-ocr-failed"
-                fallback_markdown = (
-                    f"## Page {page_number}\n\n"
-                    f'<a data-paper-id="{paper_id}" data-page="{page_number}" '
-                    f'data-block-id="{block_id}"></a>\n\n'
-                    "_OCR failed for this page._"
-                )
-                fallback = PaperSection(
-                    id=f"section-{page_number}",
-                    title=f"Page {page_number}",
-                    order=page_number - 1,
-                    page_start=page_number,
-                    page_end=page_number,
-                    markdown=fallback_markdown,
-                    anchors=[
-                        EvidenceAnchor(
-                            paper_id=paper_id,
-                            section_id=f"section-{page_number}",
-                            block_id=block_id,
-                            page=page_number,
-                            source_text="OCR failed for this page.",
-                        )
-                    ],
-                )
             return {
-                "section": fallback,
-                "markdown": fallback.markdown,
+                "markdown": fallback_text,
                 "request_count": request_count,
                 "cache_hits": cache_hits,
                 "input_tokens": 0,
@@ -420,8 +512,7 @@ def _apply_qwen_ocr(
             executor.map(process_page, range(1, result.document.page_count + 1))
         )
     for page_number, page_result in enumerate(page_results, start=1):
-        sections.append(page_result["section"])
-        markdown_parts.append(page_result["markdown"])
+        page_markdown.append((page_number, page_result["markdown"]))
         usage.request_count += page_result["request_count"]
         usage.cache_hits += page_result["cache_hits"]
         usage.input_tokens += page_result["input_tokens"]
@@ -433,7 +524,8 @@ def _apply_qwen_ocr(
     result.document.ocr = usage
     result.document.partial = bool(usage.failed_pages)
     result.document.warnings.extend(warnings)
-    if sections:
+    if page_markdown:
+        sections = _semantic_sections(page_markdown, paper_id)
         result.document.sections = sections
         frontmatter = (
             "---\n"
@@ -443,7 +535,9 @@ def _apply_qwen_ocr(
             "---\n\n"
             f"# {result.document.title}\n\n"
         )
-        result.markdown = frontmatter + "\n\n".join(markdown_parts)
+        result.markdown = frontmatter + "\n\n".join(
+            section.markdown for section in sections
+        )
     return result
 
 

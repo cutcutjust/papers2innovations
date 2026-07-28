@@ -12,12 +12,124 @@ from typing import Any, Iterable
 import fitz
 
 from .database import Database
+from .citations import GRAPH_SCHEMA_VERSION, build_two_level_graph, extract_references
 from .ingestion import FileEventQueue
 from .models import CancelledError, JobStatus, ProgressEvent, utc_now
 from .parsing import parse_pdf
 from .zotero import ZoteroImporter, ZoteroLockedError
 
 ProgressCallback = Callable[[ProgressEvent], None]
+
+AGENT_TOOLS = {
+    "search_library",
+    "read_paper",
+    "read_section",
+    "read_figure",
+    "find_evidence",
+    "get_references",
+    "get_related_papers",
+    "count_context_tokens",
+    "create_note",
+    "update_context",
+}
+
+AGENT_TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
+    "search_library": {
+        "name": "search_library",
+        "description": "Search titles in the local Papers2Innovations library.",
+        "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}, "required": ["query"], "additionalProperties": False},
+    },
+    "read_paper": {
+        "name": "read_paper",
+        "description": "Read the parsed Markdown for one local paper.",
+        "inputSchema": {"type": "object", "properties": {"paperId": {"type": "string"}, "maxCharacters": {"type": "integer", "minimum": 1000, "maximum": 100000}}, "required": ["paperId"], "additionalProperties": False},
+    },
+    "read_section": {
+        "name": "read_section",
+        "description": "Read a structured section from one local paper.",
+        "inputSchema": {"type": "object", "properties": {"paperId": {"type": "string"}, "sectionId": {"type": "string"}}, "required": ["paperId", "sectionId"], "additionalProperties": False},
+    },
+    "read_figure": {
+        "name": "read_figure",
+        "description": "Read extracted figure metadata, caption, page, and bounding box.",
+        "inputSchema": {"type": "object", "properties": {"paperId": {"type": "string"}, "figureId": {"type": "string"}}, "required": ["paperId"], "additionalProperties": False},
+    },
+    "find_evidence": {
+        "name": "find_evidence",
+        "description": "Find grounded snippets in parsed local paper sections.",
+        "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "paperId": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}, "required": ["query"], "additionalProperties": False},
+    },
+    "get_references": {
+        "name": "get_references",
+        "description": "Read structured references extracted from a local paper.",
+        "inputSchema": {"type": "object", "properties": {"paperId": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, "required": ["paperId"], "additionalProperties": False},
+    },
+}
+
+DEFAULT_AGENT_PROFILES = (
+    {
+        "id": "paper-analyst",
+        "name": "Paper Analyst",
+        "description": "Explain passages and ground every claim in local evidence.",
+        "color": "#4f6bed",
+        "modelId": "custom-chat-model",
+        "allowedTools": ["read_paper", "read_section", "find_evidence"],
+        "networkPolicy": "none",
+        "systemPrompt": "You are a scientific paper analyst. Answer from the supplied local context only. Cite paper, section, block, and page anchors for factual claims. State clearly when evidence is missing.",
+    },
+    {
+        "id": "translation-agent",
+        "name": "Translation Agent",
+        "description": "Translate scientific prose while preserving structure and terminology.",
+        "color": "#3984d8",
+        "modelId": "custom-fast-model",
+        "allowedTools": ["read_paper", "read_section"],
+        "networkPolicy": "none",
+        "systemPrompt": "Translate scientific text faithfully. Preserve Markdown, LaTeX, terminology, citations, numbers, and uncertainty. Do not add unsupported explanations.",
+    },
+    {
+        "id": "figure-analyst",
+        "name": "Figure Analyst",
+        "description": "Interpret diagrams, charts, captions, and linked paper evidence.",
+        "color": "#7357d8",
+        "modelId": "custom-chat-model",
+        "allowedTools": ["read_paper", "read_figure", "find_evidence"],
+        "networkPolicy": "none",
+        "systemPrompt": "Analyze scientific figures using their captions and surrounding paper context. Separate direct observations from interpretation and cite the source page.",
+    },
+    {
+        "id": "citation-agent",
+        "name": "Citation Agent",
+        "description": "Resolve references and explain shared citation paths.",
+        "color": "#28a06a",
+        "modelId": "custom-long-context-model",
+        "allowedTools": ["get_references", "get_related_papers", "find_evidence"],
+        "networkPolicy": "academic",
+        "systemPrompt": "Analyze citation relationships without inventing metadata. Distinguish resolved local papers from unresolved references and cite graph provenance.",
+    },
+    {
+        "id": "innovation-agent",
+        "name": "Innovation Agent",
+        "description": "Synthesize testable research directions from grounded context.",
+        "color": "#d98916",
+        "modelId": "custom-reasoning-model",
+        "allowedTools": ["search_library", "read_paper", "find_evidence", "create_note"],
+        "networkPolicy": "academic",
+        "systemPrompt": "Generate testable research ideas from supplied evidence. For every factual premise cite its paper anchor. Include a falsifiable hypothesis, minimum experiment, and novelty risks.",
+    },
+    {
+        "id": "novelty-critic",
+        "name": "Novelty Critic",
+        "description": "Challenge novelty and expose unsupported assumptions.",
+        "color": "#d64545",
+        "modelId": "custom-reasoning-model",
+        "allowedTools": ["search_library", "get_related_papers", "find_evidence"],
+        "networkPolicy": "academic",
+        "systemPrompt": "Act as a rigorous novelty critic. Identify closest prior work, unsupported assumptions, confounders, and decisive falsification tests. Never fabricate evidence.",
+    },
+)
+
+INNOVATION_STAGES = ("compression", "evidence", "ideas", "novelty", "critique")
 
 
 class Library:
@@ -47,6 +159,9 @@ class Library:
             directory.mkdir(parents=True, exist_ok=True)
         self.db.migrate()
         if not self._initialized:
+            self._ensure_default_agent_profiles()
+            self._recover_interrupted_agent_runs()
+            self._recover_interrupted_innovation_runs()
             recovered = self._recover_interrupted_jobs()
             self._initialized = True
             self._recovered_jobs = recovered
@@ -328,8 +443,19 @@ class Library:
                 ),
                 encoding="utf-8",
             )
-            references_path.write_text("[]\n", encoding="utf-8")
-            self._progress(callback, job_id, paper_id, JobStatus.PARSING_REFERENCES, 0.77, "Reference stage recorded", request_id)
+            references = extract_references(result.document.model_dump(by_alias=True))
+            references_path.write_text(
+                json.dumps(references, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            self._progress(
+                callback,
+                job_id,
+                paper_id,
+                JobStatus.PARSING_REFERENCES,
+                0.77,
+                f"Extracted {len(references)} references",
+                request_id,
+            )
             self._progress(callback, job_id, paper_id, JobStatus.RESOLVING_METADATA, 0.84, "Embedded metadata saved", request_id)
             self._progress(callback, job_id, paper_id, JobStatus.INDEXING, 0.92, "Indexing sections", request_id)
             now = utc_now()
@@ -944,6 +1070,1721 @@ class Library:
         if not row or not row["markdown_path"]:
             raise FileNotFoundError(f"No Markdown exists for paper {paper_id}")
         return Path(row["markdown_path"]).read_text(encoding="utf-8")
+
+    def read_document(self, paper_id: str) -> dict[str, Any]:
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT document_path FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone()
+        if not row or not row["document_path"]:
+            raise FileNotFoundError(f"No structured document exists for paper {paper_id}")
+        return json.loads(Path(row["document_path"]).read_text(encoding="utf-8"))
+
+    def save_formatted_document(
+        self,
+        paper_id: str,
+        sections: list[dict[str, Any]],
+        model_id: str,
+        prompt_version: str,
+        source_sha256: str,
+    ) -> dict[str, Any]:
+        if not model_id.strip() or not prompt_version.strip():
+            raise ValueError("Formatting model and prompt version are required")
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT canonical_sha256, markdown_path, document_path FROM papers WHERE id = ?",
+                (paper_id,),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Unknown paper: {paper_id}")
+        if row["canonical_sha256"] != source_sha256:
+            raise ValueError("Paper content changed while Markdown was being formatted")
+        if not row["markdown_path"] or not row["document_path"]:
+            raise FileNotFoundError(f"No parsed document exists for paper {paper_id}")
+
+        document_path = Path(row["document_path"])
+        markdown_path = Path(row["markdown_path"])
+        document = json.loads(document_path.read_text(encoding="utf-8"))
+        current_sections = document.get("sections", [])
+        supplied = {str(section.get("id", "")): str(section.get("markdown", "")).strip() for section in sections}
+        expected_ids = {str(section.get("id", "")) for section in current_sections}
+        if set(supplied) != expected_ids or not expected_ids:
+            raise ValueError("Formatted Markdown must include every document section exactly once")
+        if sum(len(markdown) for markdown in supplied.values()) > 20_000_000:
+            raise ValueError("Formatted Markdown exceeds the document size limit")
+
+        for section in current_sections:
+            section_id = str(section.get("id", ""))
+            formatted = supplied[section_id]
+            if not formatted:
+                raise ValueError(f"Formatted section is empty: {section_id}")
+            for anchor in section.get("anchors", []):
+                block_id = str(anchor.get("block_id", ""))
+                if block_id and f'data-block-id="{block_id}"' not in formatted:
+                    raise ValueError(f"Formatted section lost evidence anchor: {block_id}")
+            section["markdown"] = formatted
+
+        now = utc_now()
+        document["formatting"] = {
+            "model_id": model_id,
+            "prompt_version": prompt_version,
+            "source_sha256": source_sha256,
+            "updated_at": now,
+        }
+        document["generated_at"] = now
+        frontmatter = (
+            "---\n"
+            f"paper_id: {paper_id}\n"
+            f"source_sha256: {source_sha256}\n"
+            f"formatter: {model_id}@{prompt_version}\n"
+            "---\n\n"
+            f"# {document.get('title', 'Paper')}\n\n"
+        )
+        full_markdown = frontmatter + "\n\n".join(
+            str(section["markdown"]) for section in current_sections
+        )
+        document_temp = document_path.with_suffix(".json.tmp")
+        markdown_temp = markdown_path.with_suffix(".md.tmp")
+        document_temp.write_text(
+            json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        markdown_temp.write_text(full_markdown, encoding="utf-8")
+        document_temp.replace(document_path)
+        markdown_temp.replace(markdown_path)
+        with self.db.connect() as connection:
+            connection.executemany(
+                "UPDATE sections SET markdown = ? WHERE paper_id = ? AND id = ?",
+                [(supplied[section_id], paper_id, section_id) for section_id in expected_ids],
+            )
+            connection.execute(
+                "UPDATE papers SET updated_at = ? WHERE id = ?", (now, paper_id)
+            )
+        return document
+
+    def read_references(self, paper_id: str) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT document_path FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Unknown paper: {paper_id}")
+        document_path = Path(row["document_path"]) if row["document_path"] else None
+        references_path = document_path.with_name("references.json") if document_path else None
+        if references_path and references_path.is_file():
+            references = json.loads(references_path.read_text(encoding="utf-8"))
+            if references:
+                return references
+        if not document_path:
+            return []
+        if not document_path.is_file():
+            return []
+        references = extract_references(json.loads(document_path.read_text(encoding="utf-8")))
+        if references_path:
+            temporary = references_path.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(references, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            temporary.replace(references_path)
+        return references
+
+    def build_citation_graph(
+        self, paper_id: str, max_depth: int = 2, force: bool = False
+    ) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            papers = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT id, title, canonical_sha256, updated_at, document_path "
+                    "FROM papers ORDER BY id"
+                )
+            ]
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                [
+                    (paper["id"], paper["canonical_sha256"], paper["updated_at"])
+                    for paper in papers
+                ],
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        cache_dir = self.internal_dir / "cache" / "graphs"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / f"{paper_id}-depth-{max_depth}.json"
+        if not force and cache_path.is_file():
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if (
+                cached.get("schemaVersion") == GRAPH_SCHEMA_VERSION
+                and cached.get("libraryFingerprint") == fingerprint
+            ):
+                return {**cached, "cacheHit": True}
+        graph = build_two_level_graph(paper_id, papers, self.read_references, max_depth)
+        graph.update(
+            {
+                "libraryFingerprint": fingerprint,
+                "generatedAt": utc_now(),
+                "cacheHit": False,
+            }
+        )
+        temporary = cache_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(cache_path)
+        return graph
+
+    def list_translations(self, paper_id: str) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                "SELECT t.* FROM translations t "
+                "JOIN (SELECT block_id, target_language, MAX(revision) AS revision "
+                "FROM translations WHERE paper_id = ? GROUP BY block_id, target_language) latest "
+                "ON latest.block_id = t.block_id AND latest.target_language = t.target_language "
+                "AND latest.revision = t.revision WHERE t.paper_id = ? ORDER BY t.updated_at",
+                (paper_id, paper_id),
+            ).fetchall()
+        return [self._translation_contract(dict(row)) for row in rows]
+
+    def save_translation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        required = (
+            "paperId", "sectionId", "blockId", "sourceText", "translatedText",
+            "targetLanguage", "modelId", "promptVersion",
+        )
+        missing = [key for key in required if not str(payload.get(key, "")).strip()]
+        if missing:
+            raise ValueError("Missing translation fields: " + ", ".join(missing))
+        paper_id = str(payload["paperId"])
+        now = utc_now()
+        with self.db.connect() as connection:
+            paper = connection.execute(
+                "SELECT canonical_sha256 FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone()
+            if not paper:
+                raise KeyError(f"Unknown paper: {paper_id}")
+            revision = connection.execute(
+                "SELECT COALESCE(MAX(revision), 0) + 1 FROM translations "
+                "WHERE paper_id = ? AND block_id = ? AND target_language = ?",
+                (paper_id, payload["blockId"], payload["targetLanguage"]),
+            ).fetchone()[0]
+            record = {
+                "id": str(uuid.uuid4()),
+                "paper_id": paper_id,
+                "section_id": str(payload["sectionId"]),
+                "block_id": str(payload["blockId"]),
+                "source_hash": paper["canonical_sha256"],
+                "source_text": str(payload["sourceText"]),
+                "translated_text": str(payload["translatedText"]),
+                "target_language": str(payload["targetLanguage"]),
+                "model_id": str(payload["modelId"]),
+                "prompt_version": str(payload["promptVersion"]),
+                "revision": revision,
+                "created_at": now,
+                "updated_at": now,
+            }
+            connection.execute(
+                "INSERT INTO translations(id, paper_id, section_id, block_id, source_hash, "
+                "source_text, translated_text, target_language, model_id, prompt_version, "
+                "revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(record.values()),
+            )
+        return self._translation_contract(record)
+
+    def list_reader_analyses(self, paper_id: str) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                "SELECT ra.* FROM reader_analyses ra JOIN (SELECT block_id, analysis_type, "
+                "MAX(revision) revision FROM reader_analyses WHERE paper_id = ? "
+                "GROUP BY block_id, analysis_type) latest ON latest.block_id = ra.block_id "
+                "AND latest.analysis_type = ra.analysis_type AND latest.revision = ra.revision "
+                "WHERE ra.paper_id = ? ORDER BY ra.updated_at",
+                (paper_id, paper_id),
+            ).fetchall()
+        return [self._reader_analysis_contract(row) for row in rows]
+
+    def save_reader_analysis(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        required = (
+            "paperId",
+            "sectionId",
+            "blockId",
+            "analysisType",
+            "sourceText",
+            "resultText",
+            "modelId",
+            "promptVersion",
+        )
+        missing = [key for key in required if not str(payload.get(key, "")).strip()]
+        if missing:
+            raise ValueError("Missing reader analysis fields: " + ", ".join(missing))
+        analysis_type = str(payload["analysisType"])
+        if analysis_type not in {"formula", "theorem"}:
+            raise ValueError("Reader analysis type must be formula or theorem")
+        paper_id = str(payload["paperId"])
+        result_text = str(payload["resultText"])
+        if len(result_text) > 1_000_000:
+            raise ValueError("Reader analysis result exceeds 1 million characters")
+        now = utc_now()
+        with self.db.connect() as connection:
+            paper = connection.execute(
+                "SELECT canonical_sha256 FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone()
+            if not paper:
+                raise KeyError(f"Unknown paper: {paper_id}")
+            revision = connection.execute(
+                "SELECT COALESCE(MAX(revision), 0) + 1 FROM reader_analyses "
+                "WHERE paper_id = ? AND block_id = ? AND analysis_type = ?",
+                (paper_id, payload["blockId"], analysis_type),
+            ).fetchone()[0]
+            record = {
+                "id": str(uuid.uuid4()),
+                "paper_id": paper_id,
+                "section_id": str(payload["sectionId"]),
+                "block_id": str(payload["blockId"]),
+                "analysis_type": analysis_type,
+                "source_hash": paper["canonical_sha256"],
+                "source_text": str(payload["sourceText"]),
+                "adjacent_context": str(payload.get("adjacentContext", "")),
+                "result_text": result_text,
+                "model_id": str(payload["modelId"]),
+                "prompt_version": str(payload["promptVersion"]),
+                "revision": revision,
+                "input_tokens": max(0, int(payload.get("inputTokens", 0))),
+                "output_tokens": max(0, int(payload.get("outputTokens", 0))),
+                "duration_ms": max(0, int(payload.get("durationMs", 0))),
+                "created_at": now,
+                "updated_at": now,
+            }
+            connection.execute(
+                "INSERT INTO reader_analyses(id, paper_id, section_id, block_id, analysis_type, "
+                "source_hash, source_text, adjacent_context, result_text, model_id, prompt_version, "
+                "revision, input_tokens, output_tokens, duration_ms, created_at, updated_at) "
+                "VALUES (:id, :paper_id, :section_id, :block_id, :analysis_type, :source_hash, "
+                ":source_text, :adjacent_context, :result_text, :model_id, :prompt_version, "
+                ":revision, :input_tokens, :output_tokens, :duration_ms, :created_at, :updated_at)",
+                record,
+            )
+        return self._reader_analysis_contract(record)
+
+    def get_reader_conversation(self, paper_id: str) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            paper = connection.execute(
+                "SELECT id FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone()
+            if not paper:
+                raise KeyError(f"Unknown paper: {paper_id}")
+            conversation = connection.execute(
+                "SELECT * FROM reader_conversations WHERE paper_id = ?", (paper_id,)
+            ).fetchone()
+            if not conversation:
+                return {"id": "", "paperId": paper_id, "turns": []}
+            turns = connection.execute(
+                "SELECT * FROM reader_chat_turns WHERE conversation_id = ? ORDER BY turn_index",
+                (conversation["id"],),
+            ).fetchall()
+            contracts = []
+            for turn in turns:
+                response = connection.execute(
+                    "SELECT * FROM reader_chat_responses WHERE turn_id = ? "
+                    "ORDER BY revision DESC LIMIT 1",
+                    (turn["id"],),
+                ).fetchone()
+                contracts.append(self._reader_chat_turn_contract(turn, response))
+        return {
+            "id": conversation["id"],
+            "paperId": paper_id,
+            "turns": contracts,
+            "createdAt": conversation["created_at"],
+            "updatedAt": conversation["updated_at"],
+        }
+
+    def save_reader_chat_turn(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        required = (
+            "paperId",
+            "userMessage",
+            "modelId",
+            "promptVersion",
+            "status",
+        )
+        missing = [key for key in required if not str(payload.get(key, "")).strip()]
+        if missing:
+            raise ValueError("Missing reader chat fields: " + ", ".join(missing))
+        status = str(payload["status"])
+        if status not in {"completed", "cancelled", "failed"}:
+            raise ValueError("Invalid reader chat response status")
+        assistant_text = str(payload.get("assistantText", ""))
+        if status == "completed" and not assistant_text.strip():
+            raise ValueError("Completed reader chat responses require assistantText")
+        user_message = str(payload["userMessage"]).strip()
+        if len(user_message) > 100000 or len(assistant_text) > 1_000_000:
+            raise ValueError("Reader chat turn exceeds its size limit")
+        snapshot = payload.get("contextSnapshot") or {}
+        if not isinstance(snapshot, dict):
+            raise ValueError("Reader chat context snapshot must be an object")
+        snapshot_json = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+        if len(snapshot_json.encode("utf-8")) > 2 * 1024 * 1024:
+            raise ValueError("Reader chat context snapshot exceeds 2 MB")
+        paper_id = str(payload["paperId"])
+        now = utc_now()
+        with self.db.connect() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone():
+                raise KeyError(f"Unknown paper: {paper_id}")
+            conversation = connection.execute(
+                "SELECT * FROM reader_conversations WHERE paper_id = ?", (paper_id,)
+            ).fetchone()
+            if not conversation:
+                conversation_id = str(uuid.uuid4())
+                connection.execute(
+                    "INSERT INTO reader_conversations(id, paper_id, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (conversation_id, paper_id, now, now),
+                )
+            else:
+                conversation_id = conversation["id"]
+            turn_id = str(payload.get("turnId", "")).strip()
+            turn = None
+            if turn_id:
+                turn = connection.execute(
+                    "SELECT t.* FROM reader_chat_turns t JOIN reader_conversations c "
+                    "ON c.id = t.conversation_id WHERE t.id = ? AND c.paper_id = ?",
+                    (turn_id, paper_id),
+                ).fetchone()
+                if not turn:
+                    raise KeyError(f"Unknown reader chat turn: {turn_id}")
+            else:
+                turn_id = str(uuid.uuid4())
+                turn_index = connection.execute(
+                    "SELECT COALESCE(MAX(turn_index), 0) + 1 FROM reader_chat_turns "
+                    "WHERE conversation_id = ?",
+                    (conversation_id,),
+                ).fetchone()[0]
+                connection.execute(
+                    "INSERT INTO reader_chat_turns(id, conversation_id, turn_index, user_message, "
+                    "context_snapshot_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (turn_id, conversation_id, turn_index, user_message, snapshot_json, now),
+                )
+                turn = connection.execute(
+                    "SELECT * FROM reader_chat_turns WHERE id = ?", (turn_id,)
+                ).fetchone()
+            revision = connection.execute(
+                "SELECT COALESCE(MAX(revision), 0) + 1 FROM reader_chat_responses "
+                "WHERE turn_id = ?",
+                (turn_id,),
+            ).fetchone()[0]
+            response = {
+                "id": str(uuid.uuid4()),
+                "turn_id": turn_id,
+                "assistant_text": assistant_text,
+                "model_id": str(payload["modelId"]),
+                "prompt_version": str(payload["promptVersion"]),
+                "revision": revision,
+                "status": status,
+                "input_tokens": max(0, int(payload.get("inputTokens", 0))),
+                "output_tokens": max(0, int(payload.get("outputTokens", 0))),
+                "duration_ms": max(0, int(payload.get("durationMs", 0))),
+                "error": str(payload.get("error", ""))[:4000] or None,
+                "created_at": now,
+                "updated_at": now,
+            }
+            connection.execute(
+                "INSERT INTO reader_chat_responses(id, turn_id, assistant_text, model_id, "
+                "prompt_version, revision, status, input_tokens, output_tokens, duration_ms, "
+                "error, created_at, updated_at) VALUES (:id, :turn_id, :assistant_text, "
+                ":model_id, :prompt_version, :revision, :status, :input_tokens, :output_tokens, "
+                ":duration_ms, :error, :created_at, :updated_at)",
+                response,
+            )
+            connection.execute(
+                "UPDATE reader_conversations SET updated_at = ? WHERE id = ?",
+                (now, conversation_id),
+            )
+        return self._reader_chat_turn_contract(turn, response)
+
+    def clear_reader_conversation(self, paper_id: str) -> bool:
+        self.initialize()
+        with self.db.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM reader_conversations WHERE paper_id = ?", (paper_id,)
+            )
+        return bool(cursor.rowcount)
+
+    @staticmethod
+    def _estimate_context_tokens(text: str) -> int:
+        return max(1, (len(text.encode("utf-8")) + 3) // 4)
+
+    def get_context_draft(self) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                "SELECT ci.*, p.title FROM context_items ci "
+                "JOIN papers p ON p.id = ci.paper_id ORDER BY ci.created_at, ci.id"
+            ).fetchall()
+            compression_rows = connection.execute(
+                "SELECT cc.* FROM context_compressions cc "
+                "JOIN context_items ci ON ci.active_compression_id = cc.id"
+            ).fetchall()
+        compressions = {
+            row["context_item_id"]: self._context_compression_summary(row)
+            for row in compression_rows
+        }
+        items = []
+        for row in rows:
+            item = {
+                "id": row["id"],
+                "paperId": row["paper_id"],
+                "paperTitle": row["title"],
+                "sectionId": row["section_id"] or None,
+                "blockId": row["block_id"] or None,
+                "mode": row["mode"],
+                "sourceHash": row["source_hash"],
+                "sourcePreview": row["source_text"][:240],
+                "estimatedTokens": row["estimated_tokens"],
+                "createdAt": row["created_at"],
+                "updatedAt": row["updated_at"],
+            }
+            compression = compressions.get(row["id"])
+            if compression and row["mode"] == "compressed":
+                item["compression"] = compression
+            items.append(item)
+        paper_tokens = sum(item["estimatedTokens"] for item in items)
+        return {
+            "items": items,
+            "tokenBreakdown": {
+                "systemPrompt": 4200,
+                "tools": 7800,
+                "conversation": 0,
+                "papers": paper_tokens,
+                "figures": 0,
+                "outputReserve": 16000,
+                "safetyBuffer": 8000,
+            },
+            "updatedAt": max((item["updatedAt"] for item in items), default=None),
+        }
+
+    def read_context_item(self, item_id: str) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT ci.*, p.title FROM context_items ci "
+                "JOIN papers p ON p.id = ci.paper_id WHERE ci.id = ?",
+                (item_id,),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Unknown context item: {item_id}")
+        return {
+            "id": row["id"],
+            "paperId": row["paper_id"],
+            "paperTitle": row["title"],
+            "sectionId": row["section_id"] or None,
+            "blockId": row["block_id"] or None,
+            "sourceHash": row["source_hash"],
+            "sourceText": row["source_text"],
+            "estimatedTokens": self._estimate_context_tokens(row["source_text"]),
+        }
+
+    def get_context_compression(
+        self, item_id: str, model_id: str, prompt_version: str
+    ) -> dict[str, Any] | None:
+        self.initialize()
+        with self.db.connect() as connection:
+            item = connection.execute(
+                "SELECT source_hash FROM context_items WHERE id = ?", (item_id,)
+            ).fetchone()
+            if not item:
+                raise KeyError(f"Unknown context item: {item_id}")
+            row = connection.execute(
+                "SELECT * FROM context_compressions WHERE context_item_id = ? "
+                "AND source_hash = ? AND model_id = ? AND prompt_version = ? "
+                "ORDER BY revision DESC LIMIT 1",
+                (item_id, item["source_hash"], model_id, prompt_version),
+            ).fetchone()
+        return self._context_compression_contract(row) if row else None
+
+    def activate_context_compression(
+        self, item_id: str, model_id: str, prompt_version: str
+    ) -> dict[str, Any]:
+        compression = self.get_context_compression(item_id, model_id, prompt_version)
+        if not compression:
+            raise KeyError("No cached compression matches the current source and model")
+        with self.db.connect() as connection:
+            connection.execute(
+                "UPDATE context_items SET mode = 'compressed', estimated_tokens = ?, "
+                "active_compression_id = ?, updated_at = ? WHERE id = ?",
+                (compression["estimatedTokens"], compression["id"], utc_now(), item_id),
+            )
+        return self.get_context_draft()
+
+    def save_context_compression(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        required = ("itemId", "sourceHash", "compressedText", "modelId", "promptVersion")
+        missing = [key for key in required if not str(payload.get(key, "")).strip()]
+        if missing:
+            raise ValueError("Missing context compression fields: " + ", ".join(missing))
+        item_id = str(payload["itemId"])
+        source_hash = str(payload["sourceHash"])
+        compressed_text = str(payload["compressedText"]).strip()
+        model_id = str(payload["modelId"])
+        prompt_version = str(payload["promptVersion"])
+        input_tokens = max(0, int(payload.get("inputTokens", 0)))
+        output_tokens = max(0, int(payload.get("outputTokens", 0)))
+        duration_ms = max(0, int(payload.get("durationMs", 0)))
+        now = utc_now()
+        estimated_tokens = self._estimate_context_tokens(compressed_text)
+        with self.db.connect() as connection:
+            item = connection.execute(
+                "SELECT source_hash FROM context_items WHERE id = ?", (item_id,)
+            ).fetchone()
+            if not item:
+                raise KeyError(f"Unknown context item: {item_id}")
+            if item["source_hash"] != source_hash:
+                raise ValueError("Context source changed while compression was running")
+            revision = connection.execute(
+                "SELECT COALESCE(MAX(revision), 0) + 1 FROM context_compressions "
+                "WHERE context_item_id = ? AND source_hash = ? AND model_id = ? "
+                "AND prompt_version = ?",
+                (item_id, source_hash, model_id, prompt_version),
+            ).fetchone()[0]
+            record = {
+                "id": str(uuid.uuid4()),
+                "context_item_id": item_id,
+                "source_hash": source_hash,
+                "compressed_text": compressed_text,
+                "estimated_tokens": estimated_tokens,
+                "model_id": model_id,
+                "prompt_version": prompt_version,
+                "revision": revision,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "duration_ms": duration_ms,
+                "created_at": now,
+                "updated_at": now,
+            }
+            connection.execute(
+                "INSERT INTO context_compressions(id, context_item_id, source_hash, "
+                "compressed_text, estimated_tokens, model_id, prompt_version, revision, "
+                "input_tokens, output_tokens, duration_ms, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(record.values()),
+            )
+            connection.execute(
+                "UPDATE context_items SET mode = 'compressed', estimated_tokens = ?, "
+                "active_compression_id = ?, updated_at = ? WHERE id = ?",
+                (estimated_tokens, record["id"], now, item_id),
+            )
+        return self._context_compression_contract(record)
+
+    @staticmethod
+    def _context_compression_summary(record: Any) -> dict[str, Any]:
+        return {
+            "id": record["id"],
+            "modelId": record["model_id"],
+            "promptVersion": record["prompt_version"],
+            "revision": record["revision"],
+            "estimatedTokens": record["estimated_tokens"],
+            "usage": {
+                "inputTokens": record["input_tokens"],
+                "outputTokens": record["output_tokens"],
+                "durationMs": record["duration_ms"],
+            },
+            "preview": record["compressed_text"][:240],
+            "createdAt": record["created_at"],
+            "updatedAt": record["updated_at"],
+        }
+
+    @classmethod
+    def _context_compression_contract(cls, record: Any) -> dict[str, Any]:
+        return {
+            **cls._context_compression_summary(record),
+            "itemId": record["context_item_id"],
+            "sourceHash": record["source_hash"],
+            "compressedText": record["compressed_text"],
+        }
+
+    def add_paper_to_context(self, paper_id: str, mode: str = "full") -> dict[str, Any]:
+        self.initialize()
+        if mode not in {"full", "structured"}:
+            raise ValueError("Context mode must be full or structured")
+        with self.db.connect() as connection:
+            paper = connection.execute(
+                "SELECT title, canonical_sha256, document_path FROM papers WHERE id = ?",
+                (paper_id,),
+            ).fetchone()
+        if not paper:
+            raise KeyError(f"Unknown paper: {paper_id}")
+        if not paper["document_path"]:
+            raise FileNotFoundError(f"No structured document exists for paper {paper_id}")
+        document = json.loads(Path(paper["document_path"]).read_text(encoding="utf-8"))
+        sections = sorted(document.get("sections", []), key=lambda item: item.get("order", 0))
+        source_text = "\n\n".join(
+            str(section.get("markdown", "")).strip() for section in sections
+            if str(section.get("markdown", "")).strip()
+        )
+        return self._upsert_context_item(
+            paper_id=paper_id,
+            section_id="",
+            block_id="",
+            source_text=source_text,
+            mode=mode,
+            source_hash=paper["canonical_sha256"],
+        )
+
+    def add_selection_to_context(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        paper_id = str(payload.get("paperId", "")).strip()
+        section_id = str(payload.get("sectionId", "")).strip()
+        block_id = str(payload.get("blockId", "")).strip()
+        source_text = str(payload.get("sourceText", "")).strip()
+        if not paper_id or not section_id or not source_text:
+            raise ValueError("paperId, sectionId and sourceText are required")
+        with self.db.connect() as connection:
+            paper = connection.execute(
+                "SELECT canonical_sha256 FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone()
+        if not paper:
+            raise KeyError(f"Unknown paper: {paper_id}")
+        return self._upsert_context_item(
+            paper_id=paper_id,
+            section_id=section_id,
+            block_id=block_id,
+            source_text=source_text,
+            mode="sections",
+            source_hash=paper["canonical_sha256"],
+        )
+
+    def _upsert_context_item(
+        self,
+        *,
+        paper_id: str,
+        section_id: str,
+        block_id: str,
+        source_text: str,
+        mode: str,
+        source_hash: str,
+    ) -> dict[str, Any]:
+        if not source_text:
+            raise ValueError("Context source text is empty")
+        now = utc_now()
+        item_id = str(uuid.uuid4())
+        estimated_tokens = self._estimate_context_tokens(source_text)
+        with self.db.connect() as connection:
+            existing = connection.execute(
+                "SELECT id, created_at FROM context_items "
+                "WHERE paper_id = ? AND section_id = ? AND block_id = ?",
+                (paper_id, section_id, block_id),
+            ).fetchone()
+            if existing:
+                item_id = existing["id"]
+                created_at = existing["created_at"]
+            else:
+                created_at = now
+            connection.execute(
+                "INSERT INTO context_items(id, paper_id, section_id, block_id, mode, source_hash, "
+                "source_text, estimated_tokens, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(paper_id, section_id, block_id) DO UPDATE SET mode = excluded.mode, "
+                "source_hash = excluded.source_hash, source_text = excluded.source_text, "
+                "estimated_tokens = excluded.estimated_tokens, active_compression_id = NULL, "
+                "updated_at = excluded.updated_at",
+                (item_id, paper_id, section_id, block_id, mode, source_hash, source_text,
+                 estimated_tokens, created_at, now),
+            )
+        return self.get_context_draft()
+
+    def remove_paper_from_context(self, paper_id: str) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            connection.execute("DELETE FROM context_items WHERE paper_id = ?", (paper_id,))
+        return self.get_context_draft()
+
+    def clear_context(self) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            connection.execute("DELETE FROM context_items")
+        return self.get_context_draft()
+
+    @staticmethod
+    def _normalize_agent_profile(
+        payload: dict[str, Any], created_at: str | None = None
+    ) -> dict[str, Any]:
+        profile_id = str(payload.get("id") or uuid.uuid4()).strip()
+        name = str(payload.get("name", "")).strip()
+        description = str(payload.get("description", "")).strip()
+        provider_id = str(payload.get("providerId", "")).strip()
+        model_id = str(payload.get("modelId", "")).strip()
+        credential_id = str(payload.get("credentialId", "")).strip()
+        system_prompt = str(payload.get("systemPrompt", "")).strip()
+        if not all((profile_id, name, provider_id, model_id, credential_id, system_prompt)):
+            raise ValueError(
+                "Agent id, name, provider, model, credential, and system prompt are required"
+            )
+        if len(profile_id) > 120 or len(name) > 160 or len(system_prompt) > 50000:
+            raise ValueError("Agent profile fields exceed their size limit")
+
+        allowed_tools = list(dict.fromkeys(str(item) for item in payload.get("allowedTools", [])))
+        unknown_tools = sorted(set(allowed_tools) - AGENT_TOOLS)
+        if unknown_tools:
+            raise ValueError("Unknown agent tools: " + ", ".join(unknown_tools))
+        network_policy = str(payload.get("networkPolicy", "none"))
+        write_policy = str(payload.get("writePolicy", "read-only"))
+        if network_policy not in {"none", "academic", "full"}:
+            raise ValueError("Invalid agent network policy")
+        if write_policy not in {"read-only", "confirm-write", "trusted-write"}:
+            raise ValueError("Invalid agent write policy")
+
+        context_safety_ratio = float(payload.get("contextSafetyRatio", 0.85))
+        temperature = float(payload.get("temperature", 0.2))
+        max_context_tokens = int(payload.get("maxContextTokens", 128000))
+        max_output_tokens = int(payload.get("maxOutputTokens", 4096))
+        timeout_seconds = int(payload.get("timeoutSeconds", 90))
+        max_retries = int(payload.get("maxRetries", 2))
+        if not 0 < context_safety_ratio <= 1:
+            raise ValueError("Agent context safety ratio must be in (0, 1]")
+        if not 0 <= temperature <= 2:
+            raise ValueError("Agent temperature must be between 0 and 2")
+        if min(max_context_tokens, max_output_tokens, timeout_seconds) < 1 or max_retries < 0:
+            raise ValueError("Agent token, timeout, and retry limits are invalid")
+
+        color = str(payload.get("color", "#4f6bed")).strip().lower()
+        if len(color) != 7 or not color.startswith("#") or any(
+            character not in "0123456789abcdef" for character in color[1:]
+        ):
+            color = "#4f6bed"
+        now = utc_now()
+        return {
+            "id": profile_id,
+            "name": name,
+            "description": description,
+            "color": color,
+            "enabled": 1 if bool(payload.get("enabled", True)) else 0,
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "credential_id": credential_id,
+            "max_context_tokens": max_context_tokens,
+            "max_output_tokens": max_output_tokens,
+            "context_safety_ratio": context_safety_ratio,
+            "temperature": temperature,
+            "reasoning_effort": str(payload.get("reasoningEffort", "")).strip() or None,
+            "timeout_seconds": timeout_seconds,
+            "max_retries": max_retries,
+            "max_cost_per_run": payload.get("maxCostPerRun"),
+            "max_cost_per_day": payload.get("maxCostPerDay"),
+            "allowed_tools_json": json.dumps(allowed_tools, separators=(",", ":")),
+            "network_policy": network_policy,
+            "write_policy": write_policy,
+            "system_prompt_id": str(
+                payload.get("systemPromptId") or f"system:{profile_id}"
+            ),
+            "system_prompt": system_prompt,
+            "prompt_version": str(payload.get("promptVersion") or "agent-v1"),
+            "created_at": created_at or now,
+            "updated_at": now,
+        }
+
+    @staticmethod
+    def _write_agent_profile(connection: Any, record: dict[str, Any]) -> None:
+        connection.execute(
+            "INSERT INTO agent_profiles(id, name, description, color, enabled, provider_id, "
+            "model_id, credential_id, max_context_tokens, max_output_tokens, "
+            "context_safety_ratio, temperature, reasoning_effort, timeout_seconds, max_retries, "
+            "max_cost_per_run, max_cost_per_day, allowed_tools_json, network_policy, write_policy, "
+            "system_prompt_id, system_prompt, prompt_version, created_at, updated_at) "
+            "VALUES (:id, :name, :description, :color, :enabled, :provider_id, :model_id, "
+            ":credential_id, :max_context_tokens, :max_output_tokens, :context_safety_ratio, "
+            ":temperature, :reasoning_effort, :timeout_seconds, :max_retries, :max_cost_per_run, "
+            ":max_cost_per_day, :allowed_tools_json, :network_policy, :write_policy, "
+            ":system_prompt_id, :system_prompt, :prompt_version, :created_at, :updated_at) "
+            "ON CONFLICT(id) DO UPDATE SET name = excluded.name, description = excluded.description, "
+            "color = excluded.color, enabled = excluded.enabled, provider_id = excluded.provider_id, "
+            "model_id = excluded.model_id, credential_id = excluded.credential_id, "
+            "max_context_tokens = excluded.max_context_tokens, "
+            "max_output_tokens = excluded.max_output_tokens, "
+            "context_safety_ratio = excluded.context_safety_ratio, temperature = excluded.temperature, "
+            "reasoning_effort = excluded.reasoning_effort, timeout_seconds = excluded.timeout_seconds, "
+            "max_retries = excluded.max_retries, max_cost_per_run = excluded.max_cost_per_run, "
+            "max_cost_per_day = excluded.max_cost_per_day, "
+            "allowed_tools_json = excluded.allowed_tools_json, network_policy = excluded.network_policy, "
+            "write_policy = excluded.write_policy, system_prompt_id = excluded.system_prompt_id, "
+            "system_prompt = excluded.system_prompt, prompt_version = excluded.prompt_version, "
+            "updated_at = excluded.updated_at",
+            record,
+        )
+
+    def _ensure_default_agent_profiles(self) -> None:
+        with self.db.connect() as connection:
+            if connection.execute("SELECT COUNT(*) FROM agent_profiles").fetchone()[0]:
+                return
+            for default in DEFAULT_AGENT_PROFILES:
+                provider_id = (
+                    "provider-anthropic-demo"
+                    if default["modelId"] == "custom-long-context-model"
+                    else "provider-openai-demo"
+                )
+                payload = {
+                    **default,
+                    "enabled": True,
+                    "providerId": provider_id,
+                    "credentialId": provider_id,
+                    "maxContextTokens": 128000,
+                    "maxOutputTokens": 4096,
+                    "contextSafetyRatio": 0.85,
+                    "temperature": 0.2,
+                    "timeoutSeconds": 90,
+                    "maxRetries": 2,
+                    "writePolicy": "confirm-write",
+                    "systemPromptId": f"system:{default['id']}",
+                    "promptVersion": "agent-v1",
+                }
+                self._write_agent_profile(
+                    connection, self._normalize_agent_profile(payload)
+                )
+
+    def _recover_interrupted_agent_runs(self) -> None:
+        now = utc_now()
+        with self.db.connect() as connection:
+            connection.execute(
+                "UPDATE agent_runs SET status = 'interrupted', "
+                "error = COALESCE(error, 'Model stream interrupted by engine restart'), "
+                "finished_at = ?, updated_at = ? WHERE status = 'running'",
+                (now, now),
+            )
+
+    @classmethod
+    def _agent_profile_contract(
+        cls, record: Any, latest_run: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        profile = {
+            "id": record["id"],
+            "name": record["name"],
+            "description": record["description"],
+            "color": record["color"],
+            "enabled": bool(record["enabled"]),
+            "providerId": record["provider_id"],
+            "modelId": record["model_id"],
+            "credentialId": record["credential_id"],
+            "maxContextTokens": record["max_context_tokens"],
+            "maxOutputTokens": record["max_output_tokens"],
+            "contextSafetyRatio": record["context_safety_ratio"],
+            "temperature": record["temperature"],
+            "reasoningEffort": record["reasoning_effort"],
+            "timeoutSeconds": record["timeout_seconds"],
+            "maxRetries": record["max_retries"],
+            "maxCostPerRun": record["max_cost_per_run"],
+            "maxCostPerDay": record["max_cost_per_day"],
+            "allowedTools": json.loads(record["allowed_tools_json"]),
+            "networkPolicy": record["network_policy"],
+            "writePolicy": record["write_policy"],
+            "systemPromptId": record["system_prompt_id"],
+            "systemPrompt": record["system_prompt"],
+            "promptVersion": record["prompt_version"],
+            "createdAt": record["created_at"],
+            "updatedAt": record["updated_at"],
+        }
+        if latest_run:
+            profile["latestRun"] = latest_run
+        return profile
+
+    def list_agent_profiles(self) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.db.connect() as connection:
+            profiles = connection.execute(
+                "SELECT * FROM agent_profiles ORDER BY created_at, id"
+            ).fetchall()
+            latest_runs = {
+                row["agent_profile_id"]: self._agent_run_contract(row)
+                for row in connection.execute(
+                    "SELECT ar.* FROM agent_runs ar JOIN (SELECT agent_profile_id, MAX(created_at) "
+                    "created_at FROM agent_runs GROUP BY agent_profile_id) latest "
+                    "ON latest.agent_profile_id = ar.agent_profile_id "
+                    "AND latest.created_at = ar.created_at"
+                )
+            }
+        return [
+            self._agent_profile_contract(row, latest_runs.get(row["id"]))
+            for row in profiles
+        ]
+
+    def upsert_agent_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        profile_id = str(payload.get("id") or uuid.uuid4())
+        with self.db.connect() as connection:
+            existing = connection.execute(
+                "SELECT created_at FROM agent_profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+            record = self._normalize_agent_profile(
+                {**payload, "id": profile_id}, existing["created_at"] if existing else None
+            )
+            self._write_agent_profile(connection, record)
+        return self._agent_profile_contract(record)
+
+    def delete_agent_profile(self, profile_id: str) -> bool:
+        self.initialize()
+        with self.db.connect() as connection:
+            if connection.execute(
+                "SELECT 1 FROM agent_runs WHERE agent_profile_id = ? LIMIT 1", (profile_id,)
+            ).fetchone():
+                raise ValueError("Agent profiles with run history cannot be deleted; disable it instead")
+            cursor = connection.execute("DELETE FROM agent_profiles WHERE id = ?", (profile_id,))
+        return bool(cursor.rowcount)
+
+    def _agent_run_contract(self, record: Any) -> dict[str, Any]:
+        with self.db.connect() as connection:
+            tool_rows = connection.execute(
+                "SELECT * FROM agent_tool_calls WHERE run_id = ? ORDER BY iteration, position",
+                (record["id"],),
+            ).fetchall()
+        return {
+            "id": record["id"],
+            "agentProfileId": record["agent_profile_id"],
+            "retryOf": record["retry_of"],
+            "status": record["status"],
+            "providerId": record["provider_id"],
+            "modelId": record["model_id"],
+            "promptVersion": record["prompt_version"],
+            "userPrompt": record["user_prompt"],
+            "contextSnapshot": json.loads(record["context_snapshot_json"]),
+            "outputText": record["output_text"],
+            "usage": {
+                "inputTokens": record["input_tokens"],
+                "outputTokens": record["output_tokens"],
+                "durationMs": record["duration_ms"],
+            },
+            "error": record["error"],
+            "cancelRequested": bool(record["cancel_requested"]),
+            "startedAt": record["started_at"],
+            "finishedAt": record["finished_at"],
+            "createdAt": record["created_at"],
+            "updatedAt": record["updated_at"],
+            "toolCalls": [self._agent_tool_call_contract(row) for row in tool_rows],
+        }
+
+    @staticmethod
+    def _agent_tool_call_contract(record: Any) -> dict[str, Any]:
+        return {
+            "id": record["id"],
+            "runId": record["run_id"],
+            "toolCallId": record["tool_call_id"],
+            "iteration": record["iteration"],
+            "position": record["position"],
+            "toolName": record["tool_name"],
+            "arguments": json.loads(record["arguments_json"]),
+            "status": record["status"],
+            "result": json.loads(record["result_json"]) if record["result_json"] else None,
+            "error": record["error"],
+            "startedAt": record["started_at"],
+            "finishedAt": record["finished_at"],
+            "createdAt": record["created_at"],
+            "updatedAt": record["updated_at"],
+        }
+
+    def list_agent_tools(self, profile_id: str) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.db.connect() as connection:
+            profile = connection.execute(
+                "SELECT allowed_tools_json FROM agent_profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+        if not profile:
+            raise KeyError(f"Unknown agent profile: {profile_id}")
+        allowed = json.loads(profile["allowed_tools_json"])
+        return [AGENT_TOOL_DEFINITIONS[name] for name in allowed if name in AGENT_TOOL_DEFINITIONS]
+
+    @staticmethod
+    def _require_tool_string(arguments: dict[str, Any], name: str) -> str:
+        value = str(arguments.get(name, "")).strip()
+        if not value or len(value) > 1000:
+            raise ValueError(f"Tool argument {name} is required and must be at most 1000 characters")
+        return value
+
+    def _run_agent_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+        if tool_name == "search_library":
+            query = self._require_tool_string(arguments, "query").casefold()
+            limit = max(1, min(int(arguments.get("limit", 10)), 20))
+            matches = [paper for paper in self.list_papers() if query in paper["title"].casefold()]
+            return [{"paperId": paper["id"], "title": paper["title"], "status": paper["status"], "pageCount": paper["pageCount"]} for paper in matches[:limit]]
+        if tool_name == "read_paper":
+            paper_id = self._require_tool_string(arguments, "paperId")
+            maximum = max(1000, min(int(arguments.get("maxCharacters", 60000)), 100000))
+            markdown = self.read_markdown(paper_id)
+            return {"paperId": paper_id, "markdown": markdown[:maximum], "truncated": len(markdown) > maximum}
+        if tool_name == "read_section":
+            paper_id = self._require_tool_string(arguments, "paperId")
+            section_id = self._require_tool_string(arguments, "sectionId")
+            document = self.read_document(paper_id)
+            section = next((item for item in document.get("sections", []) if str(item.get("id")) == section_id or str(item.get("title", "")).casefold() == section_id.casefold()), None)
+            if not section:
+                raise KeyError(f"Unknown section {section_id} in paper {paper_id}")
+            return {"paperId": paper_id, "sectionId": section.get("id"), "title": section.get("title"), "pageStart": section.get("page_start"), "pageEnd": section.get("page_end"), "markdown": str(section.get("markdown", ""))[:80000], "anchors": section.get("anchors", [])[:100]}
+        if tool_name == "read_figure":
+            paper_id = self._require_tool_string(arguments, "paperId")
+            figure_id = str(arguments.get("figureId", "")).strip()
+            paper = next((item for item in self.list_papers() if item["id"] == paper_id), None)
+            if not paper:
+                raise KeyError(f"Unknown paper: {paper_id}")
+            figures = paper["figures"]
+            if figure_id:
+                figures = [figure for figure in figures if figure["id"] == figure_id]
+                if not figures:
+                    raise KeyError(f"Unknown figure {figure_id} in paper {paper_id}")
+            return {"paperId": paper_id, "figures": [{key: value for key, value in figure.items() if key not in {"relativePath", "thumbnailPath"}} for figure in figures[:50]]}
+        if tool_name == "find_evidence":
+            query = self._require_tool_string(arguments, "query")
+            terms = [term.casefold() for term in query.split() if len(term) > 1][:8]
+            if not terms:
+                raise ValueError("Evidence query must contain searchable terms")
+            requested_paper = str(arguments.get("paperId", "")).strip()
+            limit = max(1, min(int(arguments.get("limit", 10)), 20))
+            results = []
+            for paper in self.list_papers():
+                if requested_paper and paper["id"] != requested_paper:
+                    continue
+                try:
+                    sections = self.read_document(paper["id"]).get("sections", [])
+                except (FileNotFoundError, json.JSONDecodeError):
+                    continue
+                for section in sections:
+                    text = str(section.get("markdown", ""))
+                    folded = text.casefold()
+                    positions = [folded.find(term) for term in terms]
+                    positions = [position for position in positions if position >= 0]
+                    if not positions:
+                        continue
+                    position = min(positions)
+                    start = max(0, position - 180)
+                    end = min(len(text), position + 420)
+                    results.append({"paperId": paper["id"], "paperTitle": paper["title"], "sectionId": section.get("id"), "sectionTitle": section.get("title"), "page": section.get("page_start"), "snippet": text[start:end].strip()})
+                    if len(results) >= limit:
+                        return results
+            return results
+        if tool_name == "get_references":
+            paper_id = self._require_tool_string(arguments, "paperId")
+            limit = max(1, min(int(arguments.get("limit", 100)), 200))
+            return {"paperId": paper_id, "references": self.read_references(paper_id)[:limit]}
+        raise ValueError(f"Tool {tool_name} is not available in the read-only registry")
+
+    def execute_agent_tool(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        run_id = str(payload.get("runId", "")).strip()
+        tool_call_id = str(payload.get("toolCallId", "")).strip()
+        tool_name = str(payload.get("toolName", "")).strip()
+        arguments = payload.get("arguments") or {}
+        iteration = int(payload.get("iteration", 1))
+        if not run_id or not tool_call_id or not tool_name or not isinstance(arguments, dict):
+            raise ValueError("Agent tool run, call ID, name, and object arguments are required")
+        if len(tool_call_id) > 200 or len(tool_name) > 120 or not 1 <= iteration <= 6:
+            raise ValueError("Agent tool call metadata is invalid")
+        arguments_json = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+        if len(arguments_json.encode("utf-8")) > 128 * 1024:
+            raise ValueError("Agent tool arguments exceed 128 KB")
+        now = utc_now()
+        with self.db.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM agent_tool_calls WHERE run_id = ? AND tool_call_id = ?",
+                (run_id, tool_call_id),
+            ).fetchone()
+            if existing:
+                return self._agent_tool_call_contract(existing)
+            run = connection.execute(
+                "SELECT ar.status, ar.context_snapshot_json, ap.allowed_tools_json FROM agent_runs ar JOIN agent_profiles ap ON ap.id = ar.agent_profile_id WHERE ar.id = ?",
+                (run_id,),
+            ).fetchone()
+            if not run:
+                raise KeyError(f"Unknown agent run: {run_id}")
+            if run["status"] != "running":
+                raise ValueError("Agent tools can only execute for an active run")
+            allowed_tools = set(json.loads(run["allowed_tools_json"]))
+            snapshot = json.loads(run["context_snapshot_json"])
+            snapshot_tools = set((snapshot.get("toolVersions") or {}).keys())
+            if snapshot_tools:
+                allowed_tools &= snapshot_tools
+            if tool_name not in allowed_tools or tool_name not in AGENT_TOOL_DEFINITIONS:
+                status = "denied"
+                error = f"Tool {tool_name} is not allowed for this agent"
+            else:
+                status = "running"
+                error = None
+            position = connection.execute(
+                "SELECT COUNT(*) + 1 FROM agent_tool_calls WHERE run_id = ? AND iteration = ?",
+                (run_id, iteration),
+            ).fetchone()[0]
+            if position > 8:
+                raise ValueError("Agent tool call limit exceeded for this iteration")
+            record_id = str(uuid.uuid4())
+            connection.execute(
+                "INSERT INTO agent_tool_calls(id, run_id, tool_call_id, iteration, position, tool_name, arguments_json, status, error, started_at, finished_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (record_id, run_id, tool_call_id, iteration, position, tool_name, arguments_json, status, error, now, now if status == "denied" else None, now, now),
+            )
+        if status == "denied":
+            with self.db.connect() as connection:
+                return self._agent_tool_call_contract(connection.execute("SELECT * FROM agent_tool_calls WHERE id = ?", (record_id,)).fetchone())
+        try:
+            result = self._run_agent_tool(tool_name, arguments)
+            result_json = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+            if len(result_json.encode("utf-8")) > 512 * 1024:
+                raise ValueError("Agent tool result exceeds 512 KB")
+            final_status = "completed"
+            error = None
+        except Exception as tool_error:
+            result_json = None
+            final_status = "failed"
+            error = f"{type(tool_error).__name__}: {tool_error}"[:4000]
+        finished = utc_now()
+        with self.db.connect() as connection:
+            connection.execute(
+                "UPDATE agent_tool_calls SET status = ?, result_json = ?, error = ?, finished_at = ?, updated_at = ? WHERE id = ?",
+                (final_status, result_json, error, finished, finished, record_id),
+            )
+            record = connection.execute("SELECT * FROM agent_tool_calls WHERE id = ?", (record_id,)).fetchone()
+        return self._agent_tool_call_contract(record)
+
+    def list_agent_runs(
+        self, profile_id: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        limit = max(1, min(int(limit), 200))
+        with self.db.connect() as connection:
+            if profile_id:
+                rows = connection.execute(
+                    "SELECT * FROM agent_runs WHERE agent_profile_id = ? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (profile_id, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM agent_runs ORDER BY created_at DESC LIMIT ?", (limit,)
+                ).fetchall()
+        return [self._agent_run_contract(row) for row in rows]
+
+    def _insert_agent_run(
+        self,
+        connection: Any,
+        profile: Any,
+        user_prompt: str,
+        context_snapshot: dict[str, Any],
+        retry_of: str | None = None,
+    ) -> dict[str, Any]:
+        if not bool(profile["enabled"]):
+            raise ValueError("Agent profile is disabled")
+        user_prompt = user_prompt.strip()
+        if not user_prompt or len(user_prompt) > 100000:
+            raise ValueError("Agent run prompt is empty or too large")
+        snapshot_json = json.dumps(context_snapshot, ensure_ascii=False, separators=(",", ":"))
+        if len(snapshot_json.encode("utf-8")) > 2 * 1024 * 1024:
+            raise ValueError("Agent context snapshot exceeds 2 MB")
+        now = utc_now()
+        record = {
+            "id": str(uuid.uuid4()),
+            "agent_profile_id": profile["id"],
+            "retry_of": retry_of,
+            "status": "running",
+            "provider_id": profile["provider_id"],
+            "model_id": profile["model_id"],
+            "prompt_version": profile["prompt_version"],
+            "user_prompt": user_prompt,
+            "context_snapshot_json": snapshot_json,
+            "output_text": "",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "duration_ms": 0,
+            "error": None,
+            "cancel_requested": 0,
+            "started_at": now,
+            "finished_at": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        connection.execute(
+            "INSERT INTO agent_runs(id, agent_profile_id, retry_of, status, provider_id, "
+            "model_id, prompt_version, user_prompt, context_snapshot_json, output_text, "
+            "input_tokens, output_tokens, duration_ms, error, cancel_requested, started_at, "
+            "finished_at, created_at, updated_at) VALUES (:id, :agent_profile_id, :retry_of, "
+            ":status, :provider_id, :model_id, :prompt_version, :user_prompt, "
+            ":context_snapshot_json, :output_text, :input_tokens, :output_tokens, :duration_ms, "
+            ":error, :cancel_requested, :started_at, :finished_at, :created_at, :updated_at)",
+            record,
+        )
+        return record
+
+    def start_agent_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        profile_id = str(payload.get("agentProfileId", ""))
+        context_snapshot = payload.get("contextSnapshot") or {}
+        if not isinstance(context_snapshot, dict):
+            raise ValueError("Agent context snapshot must be an object")
+        with self.db.connect() as connection:
+            profile = connection.execute(
+                "SELECT * FROM agent_profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+            if not profile:
+                raise KeyError(f"Unknown agent profile: {profile_id}")
+            record = self._insert_agent_run(
+                connection, profile, str(payload.get("userPrompt", "")), context_snapshot
+            )
+        return self._agent_run_contract(record)
+
+    def update_agent_run(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        status = str(payload.get("status", "running"))
+        if status not in {"running", "completed", "failed", "cancelled"}:
+            raise ValueError("Invalid agent run status update")
+        output_text = str(payload.get("outputText", ""))
+        if len(output_text) > 2_000_000:
+            raise ValueError("Agent run output exceeds 2 million characters")
+        now = utc_now()
+        finished_at = now if status in {"completed", "failed", "cancelled"} else None
+        error = str(payload.get("error", ""))[:4000] or None
+        with self.db.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM agent_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if not existing:
+                raise KeyError(f"Unknown agent run: {run_id}")
+            if existing["status"] not in {"running", "interrupted"}:
+                if existing["status"] == status:
+                    return self._agent_run_contract(existing)
+                raise ValueError("Agent run is already terminal")
+            connection.execute(
+                "UPDATE agent_runs SET status = ?, output_text = ?, input_tokens = ?, "
+                "output_tokens = ?, duration_ms = ?, error = ?, cancel_requested = ?, "
+                "finished_at = COALESCE(?, finished_at), updated_at = ? WHERE id = ?",
+                (
+                    status,
+                    output_text,
+                    max(0, int(payload.get("inputTokens", existing["input_tokens"]))),
+                    max(0, int(payload.get("outputTokens", existing["output_tokens"]))),
+                    max(0, int(payload.get("durationMs", existing["duration_ms"]))),
+                    error,
+                    1 if status == "cancelled" else existing["cancel_requested"],
+                    finished_at,
+                    now,
+                    run_id,
+                ),
+            )
+            record = connection.execute(
+                "SELECT * FROM agent_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        return self._agent_run_contract(record)
+
+    def cancel_agent_run(self, run_id: str) -> dict[str, Any]:
+        return self.update_agent_run(run_id, {"status": "cancelled"})
+
+    def retry_agent_run(self, run_id: str) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            previous = connection.execute(
+                "SELECT * FROM agent_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if not previous:
+                raise KeyError(f"Unknown agent run: {run_id}")
+            if previous["status"] == "running":
+                raise ValueError("Cannot retry an active agent run")
+            profile = connection.execute(
+                "SELECT * FROM agent_profiles WHERE id = ?",
+                (previous["agent_profile_id"],),
+            ).fetchone()
+            record = self._insert_agent_run(
+                connection,
+                profile,
+                previous["user_prompt"],
+                json.loads(previous["context_snapshot_json"]),
+                retry_of=run_id,
+            )
+        return self._agent_run_contract(record)
+
+    def _recover_interrupted_innovation_runs(self) -> None:
+        now = utc_now()
+        with self.db.connect() as connection:
+            connection.execute(
+                "UPDATE innovation_stages SET status = 'interrupted', "
+                "error = COALESCE(error, 'Stage interrupted by engine restart'), "
+                "finished_at = ?, updated_at = ? WHERE status = 'running'",
+                (now, now),
+            )
+            connection.execute(
+                "UPDATE innovation_runs SET status = 'interrupted', "
+                "error = COALESCE(error, 'Pipeline interrupted by engine restart'), "
+                "finished_at = ?, updated_at = ? WHERE status = 'running'",
+                (now, now),
+            )
+
+    def save_innovation_prompt(
+        self, prompt_text: str, prompt_version: str = "innovation-v1"
+    ) -> dict[str, Any]:
+        self.initialize()
+        prompt_text = prompt_text.strip()
+        prompt_version = prompt_version.strip()
+        if not prompt_text or len(prompt_text) > 100000 or not prompt_version:
+            raise ValueError("Innovation prompt is empty or too large")
+        now = utc_now()
+        with self.db.connect() as connection:
+            revision = connection.execute(
+                "SELECT COALESCE(MAX(revision), 0) + 1 FROM innovation_prompt_revisions "
+                "WHERE prompt_version = ?",
+                (prompt_version,),
+            ).fetchone()[0]
+            record = {
+                "id": str(uuid.uuid4()),
+                "promptText": prompt_text,
+                "promptVersion": prompt_version,
+                "revision": revision,
+                "createdAt": now,
+            }
+            connection.execute(
+                "INSERT INTO innovation_prompt_revisions(id, prompt_text, prompt_version, "
+                "revision, created_at) VALUES (?, ?, ?, ?, ?)",
+                (record["id"], prompt_text, prompt_version, revision, now),
+            )
+        return record
+
+    def get_innovation_prompt(
+        self, prompt_version: str = "innovation-v1"
+    ) -> dict[str, Any] | None:
+        self.initialize()
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM innovation_prompt_revisions WHERE prompt_version = ? "
+                "ORDER BY revision DESC LIMIT 1",
+                (prompt_version,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "promptText": row["prompt_text"],
+            "promptVersion": row["prompt_version"],
+            "revision": row["revision"],
+            "createdAt": row["created_at"],
+        }
+
+    @staticmethod
+    def _innovation_stage_contract(record: Any) -> dict[str, Any]:
+        return {
+            "id": record["id"],
+            "runId": record["run_id"],
+            "stage": record["stage"],
+            "position": record["position"],
+            "status": record["status"],
+            "modelId": record["model_id"],
+            "attempt": record["attempt"],
+            "outputText": record["output_text"],
+            "usage": {
+                "inputTokens": record["input_tokens"],
+                "outputTokens": record["output_tokens"],
+                "durationMs": record["duration_ms"],
+            },
+            "error": record["error"],
+            "startedAt": record["started_at"],
+            "finishedAt": record["finished_at"],
+            "updatedAt": record["updated_at"],
+        }
+
+    @classmethod
+    def _innovation_run_contract(
+        cls, record: Any, stages: list[Any]
+    ) -> dict[str, Any]:
+        return {
+            "id": record["id"],
+            "retryOf": record["retry_of"],
+            "status": record["status"],
+            "currentStage": record["current_stage"],
+            "promptText": record["prompt_text"],
+            "promptVersion": record["prompt_version"],
+            "contextSnapshot": json.loads(record["context_snapshot_json"]),
+            "stageModels": json.loads(record["stage_models_json"]),
+            "stages": [cls._innovation_stage_contract(stage) for stage in stages],
+            "cancelRequested": bool(record["cancel_requested"]),
+            "error": record["error"],
+            "startedAt": record["started_at"],
+            "finishedAt": record["finished_at"],
+            "createdAt": record["created_at"],
+            "updatedAt": record["updated_at"],
+        }
+
+    def _read_innovation_run(self, connection: Any, run_id: str) -> dict[str, Any]:
+        run = connection.execute(
+            "SELECT * FROM innovation_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if not run:
+            raise KeyError(f"Unknown innovation run: {run_id}")
+        stages = connection.execute(
+            "SELECT * FROM innovation_stages WHERE run_id = ? ORDER BY position", (run_id,)
+        ).fetchall()
+        return self._innovation_run_contract(run, list(stages))
+
+    def list_innovation_runs(self, limit: int = 30) -> list[dict[str, Any]]:
+        self.initialize()
+        limit = max(1, min(int(limit), 100))
+        with self.db.connect() as connection:
+            run_ids = [
+                row["id"]
+                for row in connection.execute(
+                    "SELECT id FROM innovation_runs ORDER BY created_at DESC LIMIT ?", (limit,)
+                )
+            ]
+            return [self._read_innovation_run(connection, run_id) for run_id in run_ids]
+
+    def start_innovation_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        prompt_text = str(payload.get("promptText", "")).strip()
+        prompt_version = str(payload.get("promptVersion", "innovation-v1")).strip()
+        context_snapshot = payload.get("contextSnapshot") or {}
+        stage_models = payload.get("stageModels") or {}
+        if not prompt_text or len(prompt_text) > 100000:
+            raise ValueError("Innovation prompt is empty or too large")
+        if not isinstance(context_snapshot, dict) or not isinstance(stage_models, dict):
+            raise ValueError("Innovation context and stage models must be objects")
+        missing_models = [stage for stage in INNOVATION_STAGES if not stage_models.get(stage)]
+        if missing_models:
+            raise ValueError("Missing innovation stage models: " + ", ".join(missing_models))
+        snapshot_json = json.dumps(context_snapshot, ensure_ascii=False, separators=(",", ":"))
+        if len(snapshot_json.encode("utf-8")) > 2 * 1024 * 1024:
+            raise ValueError("Innovation context snapshot exceeds 2 MB")
+        now = utc_now()
+        run_id = str(uuid.uuid4())
+        with self.db.connect() as connection:
+            connection.execute(
+                "INSERT INTO innovation_runs(id, retry_of, status, current_stage, prompt_text, "
+                "prompt_version, context_snapshot_json, stage_models_json, cancel_requested, "
+                "error, started_at, finished_at, created_at, updated_at) "
+                "VALUES (?, NULL, 'running', ?, ?, ?, ?, ?, 0, NULL, ?, NULL, ?, ?)",
+                (
+                    run_id,
+                    INNOVATION_STAGES[0],
+                    prompt_text,
+                    prompt_version,
+                    snapshot_json,
+                    json.dumps(stage_models, separators=(",", ":")),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            for position, stage in enumerate(INNOVATION_STAGES):
+                connection.execute(
+                    "INSERT INTO innovation_stages(id, run_id, stage, position, status, model_id, "
+                    "attempt, output_text, input_tokens, output_tokens, duration_ms, error, "
+                    "started_at, finished_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, 'pending', ?, 0, '', 0, 0, 0, NULL, NULL, NULL, ?)",
+                    (str(uuid.uuid4()), run_id, stage, position, str(stage_models[stage]), now),
+                )
+            return self._read_innovation_run(connection, run_id)
+
+    def start_innovation_stage(self, run_id: str, stage: str) -> dict[str, Any]:
+        self.initialize()
+        if stage not in INNOVATION_STAGES:
+            raise ValueError("Unknown innovation stage")
+        position = INNOVATION_STAGES.index(stage)
+        now = utc_now()
+        with self.db.connect() as connection:
+            run = connection.execute(
+                "SELECT * FROM innovation_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if not run:
+                raise KeyError(f"Unknown innovation run: {run_id}")
+            if run["status"] not in {"running", "interrupted"}:
+                raise ValueError("Innovation run is not active")
+            if position:
+                previous = connection.execute(
+                    "SELECT status FROM innovation_stages WHERE run_id = ? AND position = ?",
+                    (run_id, position - 1),
+                ).fetchone()
+                if not previous or previous["status"] != "completed":
+                    raise ValueError("Previous innovation stage is incomplete")
+            stage_row = connection.execute(
+                "SELECT * FROM innovation_stages WHERE run_id = ? AND stage = ?", (run_id, stage)
+            ).fetchone()
+            if stage_row["status"] == "completed":
+                return self._innovation_stage_contract(stage_row)
+            connection.execute(
+                "UPDATE innovation_stages SET status = 'running', attempt = attempt + 1, "
+                "error = NULL, started_at = ?, finished_at = NULL, updated_at = ? "
+                "WHERE run_id = ? AND stage = ?",
+                (now, now, run_id, stage),
+            )
+            connection.execute(
+                "UPDATE innovation_runs SET status = 'running', current_stage = ?, "
+                "cancel_requested = 0, error = NULL, finished_at = NULL, updated_at = ? WHERE id = ?",
+                (stage, now, run_id),
+            )
+            updated = connection.execute(
+                "SELECT * FROM innovation_stages WHERE run_id = ? AND stage = ?", (run_id, stage)
+            ).fetchone()
+        return self._innovation_stage_contract(updated)
+
+    def update_innovation_stage(
+        self, run_id: str, stage: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.initialize()
+        if stage not in INNOVATION_STAGES:
+            raise ValueError("Unknown innovation stage")
+        status = str(payload.get("status", "running"))
+        if status not in {"running", "completed", "failed", "cancelled"}:
+            raise ValueError("Invalid innovation stage status")
+        output_text = str(payload.get("outputText", ""))
+        if len(output_text) > 2_000_000:
+            raise ValueError("Innovation stage output exceeds 2 million characters")
+        now = utc_now()
+        terminal = status in {"completed", "failed", "cancelled"}
+        error = str(payload.get("error", ""))[:4000] or None
+        with self.db.connect() as connection:
+            current = connection.execute(
+                "SELECT * FROM innovation_stages WHERE run_id = ? AND stage = ?", (run_id, stage)
+            ).fetchone()
+            if not current:
+                raise KeyError(f"Unknown innovation stage: {stage}")
+            if current["status"] == "completed" and status != "completed":
+                raise ValueError("Completed innovation stages are immutable")
+            connection.execute(
+                "UPDATE innovation_stages SET status = ?, output_text = ?, input_tokens = ?, "
+                "output_tokens = ?, duration_ms = ?, error = ?, finished_at = ?, updated_at = ? "
+                "WHERE run_id = ? AND stage = ?",
+                (
+                    status,
+                    output_text,
+                    max(0, int(payload.get("inputTokens", current["input_tokens"]))),
+                    max(0, int(payload.get("outputTokens", current["output_tokens"]))),
+                    max(0, int(payload.get("durationMs", current["duration_ms"]))),
+                    error,
+                    now if terminal else None,
+                    now,
+                    run_id,
+                    stage,
+                ),
+            )
+            if status == "completed":
+                position = INNOVATION_STAGES.index(stage)
+                if position == len(INNOVATION_STAGES) - 1:
+                    connection.execute(
+                        "UPDATE innovation_runs SET status = 'completed', error = NULL, "
+                        "finished_at = ?, updated_at = ? WHERE id = ?",
+                        (now, now, run_id),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE innovation_runs SET current_stage = ?, updated_at = ? WHERE id = ?",
+                        (INNOVATION_STAGES[position + 1], now, run_id),
+                    )
+            elif status in {"failed", "cancelled"}:
+                connection.execute(
+                    "UPDATE innovation_runs SET status = ?, error = ?, cancel_requested = ?, "
+                    "finished_at = ?, updated_at = ? WHERE id = ?",
+                    (status, error, 1 if status == "cancelled" else 0, now, now, run_id),
+                )
+            return self._read_innovation_run(connection, run_id)
+
+    def cancel_innovation_run(self, run_id: str) -> dict[str, Any]:
+        self.initialize()
+        with self.db.connect() as connection:
+            run = connection.execute(
+                "SELECT current_stage FROM innovation_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        if not run:
+            raise KeyError(f"Unknown innovation run: {run_id}")
+        return self.update_innovation_stage(
+            run_id, run["current_stage"], {"status": "cancelled", "error": "Cancelled by user"}
+        )
+
+    def retry_innovation_run(self, run_id: str) -> dict[str, Any]:
+        self.initialize()
+        now = utc_now()
+        with self.db.connect() as connection:
+            run = connection.execute(
+                "SELECT * FROM innovation_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if not run:
+                raise KeyError(f"Unknown innovation run: {run_id}")
+            if run["status"] not in {"failed", "cancelled", "interrupted"}:
+                raise ValueError("Only failed, cancelled, or interrupted pipelines can retry")
+            stages = connection.execute(
+                "SELECT * FROM innovation_stages WHERE run_id = ? ORDER BY position", (run_id,)
+            ).fetchall()
+            resume = next((stage for stage in stages if stage["status"] != "completed"), None)
+            if not resume:
+                raise ValueError("Innovation run has no incomplete stage")
+            connection.execute(
+                "UPDATE innovation_stages SET status = 'pending', output_text = '', error = NULL, "
+                "input_tokens = 0, output_tokens = 0, duration_ms = 0, started_at = NULL, "
+                "finished_at = NULL, updated_at = ? WHERE run_id = ? AND position >= ?",
+                (now, run_id, resume["position"]),
+            )
+            connection.execute(
+                "UPDATE innovation_runs SET status = 'running', current_stage = ?, "
+                "cancel_requested = 0, error = NULL, finished_at = NULL, updated_at = ? WHERE id = ?",
+                (resume["stage"], now, run_id),
+            )
+            return self._read_innovation_run(connection, run_id)
+
+    @staticmethod
+    def _reader_analysis_contract(record: Any) -> dict[str, Any]:
+        return {
+            "id": record["id"],
+            "paperId": record["paper_id"],
+            "sectionId": record["section_id"],
+            "blockId": record["block_id"],
+            "analysisType": record["analysis_type"],
+            "sourceHash": record["source_hash"],
+            "sourceText": record["source_text"],
+            "adjacentContext": record["adjacent_context"],
+            "resultText": record["result_text"],
+            "modelId": record["model_id"],
+            "promptVersion": record["prompt_version"],
+            "revision": record["revision"],
+            "usage": {
+                "inputTokens": record["input_tokens"],
+                "outputTokens": record["output_tokens"],
+                "durationMs": record["duration_ms"],
+            },
+            "createdAt": record["created_at"],
+            "updatedAt": record["updated_at"],
+        }
+
+    @staticmethod
+    def _reader_chat_turn_contract(turn: Any, response: Any | None) -> dict[str, Any]:
+        contract = {
+            "id": turn["id"],
+            "turnIndex": turn["turn_index"],
+            "userMessage": turn["user_message"],
+            "contextSnapshot": json.loads(turn["context_snapshot_json"]),
+            "createdAt": turn["created_at"],
+        }
+        if response:
+            contract["response"] = {
+                "id": response["id"],
+                "assistantText": response["assistant_text"],
+                "modelId": response["model_id"],
+                "promptVersion": response["prompt_version"],
+                "revision": response["revision"],
+                "status": response["status"],
+                "usage": {
+                    "inputTokens": response["input_tokens"],
+                    "outputTokens": response["output_tokens"],
+                    "durationMs": response["duration_ms"],
+                },
+                "error": response["error"],
+                "createdAt": response["created_at"],
+                "updatedAt": response["updated_at"],
+            }
+        return contract
+
+    @staticmethod
+    def _translation_contract(record: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": record["id"],
+            "paperId": record["paper_id"],
+            "sectionId": record["section_id"],
+            "blockId": record["block_id"],
+            "sourceHash": record["source_hash"],
+            "sourceText": record["source_text"],
+            "translatedText": record["translated_text"],
+            "targetLanguage": record["target_language"],
+            "modelId": record["model_id"],
+            "promptVersion": record["prompt_version"],
+            "revision": record["revision"],
+            "createdAt": record["created_at"],
+            "updatedAt": record["updated_at"],
+        }
 
 
 def watch_library(root: str | Path, interval: float = 2.0) -> None:
