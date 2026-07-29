@@ -24,6 +24,7 @@ type Pending = HashMap<u64, oneshot::Sender<Value>>;
 const PUBLIC_DASHSCOPE_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 const KEYRING_SERVICE: &str = "ai.papers2innovations.desktop";
 const KEYRING_USER: &str = "stronghold-vault-v1";
+const PROVIDER_KEYRING_PREFIX: &str = "model-provider-v1:";
 
 struct EngineInner {
     child: Mutex<Option<Child>>,
@@ -256,7 +257,13 @@ impl Engine {
     }
 
     fn allow_library_root(&self, root: &str) -> Result<(), String> {
-        let library_root = PathBuf::from(root)
+        if root.trim().is_empty() {
+            return Err("Library root cannot be empty".into());
+        }
+        let requested_root = PathBuf::from(root);
+        fs::create_dir_all(&requested_root)
+            .map_err(|error| format!("Cannot create library root: {error}"))?;
+        let library_root = requested_root
             .canonicalize()
             .map_err(|error| format!("Cannot register library root: {error}"))?;
         let cache_root = library_root.join(".p2i/cache/ocr");
@@ -846,6 +853,15 @@ fn validate_credential_id(credential_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn provider_keyring_entry(credential_id: &str) -> Result<keyring::Entry, String> {
+    validate_credential_id(credential_id)?;
+    keyring::Entry::new(
+        KEYRING_SERVICE,
+        &format!("{PROVIDER_KEYRING_PREFIX}{credential_id}"),
+    )
+    .map_err(|error| format!("Cannot access the provider credential backup: {error}"))
+}
+
 #[tauri::command(rename_all = "camelCase")]
 fn provider_credential_set(
     engine: State<'_, Engine>,
@@ -861,8 +877,42 @@ fn provider_credential_set(
         .model_credentials
         .lock()
         .map_err(|_| "Provider credential lock poisoned")?
-        .insert(credential_id, api_key);
+        .insert(credential_id.clone(), api_key.clone());
+    provider_keyring_entry(&credential_id)?
+        .set_password(&api_key)
+        .map_err(|error| format!("Cannot back up the provider credential: {error}"))?;
     Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn provider_credential_restore(
+    engine: State<'_, Engine>,
+    credential_id: String,
+    target_credential_id: Option<String>,
+) -> Result<bool, String> {
+    validate_credential_id(&credential_id)?;
+    let target = target_credential_id.unwrap_or_else(|| credential_id.clone());
+    validate_credential_id(&target)?;
+    let api_key = match provider_keyring_entry(&credential_id)?.get_password() {
+        Ok(value) => value,
+        Err(keyring::Error::NoEntry) => return Ok(false),
+        Err(error) => return Err(format!("Cannot restore the provider credential: {error}")),
+    };
+    if api_key.trim().is_empty() {
+        return Ok(false);
+    }
+    engine
+        .0
+        .model_credentials
+        .lock()
+        .map_err(|_| "Provider credential lock poisoned")?
+        .insert(target.clone(), api_key.clone());
+    if target != credential_id {
+        provider_keyring_entry(&target)?
+            .set_password(&api_key)
+            .map_err(|error| format!("Cannot migrate the provider credential backup: {error}"))?;
+    }
+    Ok(true)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -877,6 +927,14 @@ fn provider_credential_delete(
         .lock()
         .map_err(|_| "Provider credential lock poisoned")?
         .remove(&credential_id);
+    match provider_keyring_entry(&credential_id)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => {}
+        Err(error) => {
+            return Err(format!(
+                "Cannot delete the provider credential backup: {error}"
+            ))
+        }
+    }
     Ok(())
 }
 
@@ -1638,6 +1696,14 @@ fn choose_library() -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+#[tauri::command]
+fn choose_zotero_directory() -> Option<String> {
+    rfd::FileDialog::new()
+        .set_title("选择包含 zotero.sqlite 的 Zotero 数据目录")
+        .pick_folder()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PdfImportResult {
@@ -1792,10 +1858,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             rpc_call,
             choose_library,
+            choose_zotero_directory,
             import_pdfs,
             credential_set,
             credential_delete,
             provider_credential_set,
+            provider_credential_restore,
             provider_credential_delete,
             ocr_provider_configure,
             vision_provider_configure,
@@ -2105,6 +2173,26 @@ mod tests {
         assert!(!engine
             .is_allowed_ocr_path(&outside.canonicalize().expect("canonical outside"))
             .expect("outside check"));
+        fs::remove_dir_all(&test_root).expect("cleanup");
+    }
+
+    #[test]
+    fn registering_a_new_library_creates_the_root_first() {
+        let test_root = std::env::temp_dir().join(format!(
+            "p2i-new-library-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        if test_root.exists() {
+            fs::remove_dir_all(&test_root).expect("remove stale test directory");
+        }
+        Engine::new()
+            .allow_library_root(test_root.to_str().expect("root string"))
+            .expect("create and register root");
+        assert!(test_root.is_dir());
         fs::remove_dir_all(&test_root).expect("cleanup");
     }
 }

@@ -131,11 +131,12 @@ function BilingualBlock({ block, state, records, annotations, view, markdownPath
 }
 
 export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) {
-  const { setView, customModels, providers, contextCompressionModelId, markdownFormattingModelId, autoFormatMarkdown, readerFocusMode, setReaderFocusMode, readerZoom, setReaderZoom, readerTheme, setReaderTheme, readerBackgroundColor, readerTextColor, setReaderColors, readerTranslationView, setReaderTranslationView } = useWorkspace();
+  const { setView, customModels, providers, contextCompressionModelId, markdownFormattingModelId, autoFormatMarkdown, readerFocusMode, setReaderFocusMode, fontSize, readerZoom, setReaderZoom, readerTheme, setReaderTheme, readerBackgroundColor, readerTextColor, setReaderColors, readerTranslationView, setReaderTranslationView } = useWorkspace();
   const queryClient = useQueryClient();
   const [mode, setMode] = useState<ReaderMode>("integrated");
   const [selection, setSelection] = useState<SelectionSource | null>(null);
   const [translations, setTranslations] = useState<Record<string, TranslationState>>({});
+  const [translationBatchBusy, setTranslationBatchBusy] = useState(false);
   const [analysisStates, setAnalysisStates] = useState<Record<string, AnalysisState>>({});
   const [activeAnalysis, setActiveAnalysis] = useState<{ blockId: string; type: ReaderAnalysisType } | null>(null);
   const [annotationInspector, setAnnotationInspector] = useState<AnnotationInspectorState | null>(null);
@@ -482,7 +483,11 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const translate = async (block: ReaderBlock) => {
     const kind = "kind" in block && block.kind === "word" ? "word" : "passage";
     if (!selectedModel || !selectedProvider || !credentialReady) {
-      setTranslations((current) => ({ ...current, [block.id]: { status: "error", text: "", kind, error: "请先在设置中配置所选模型的 API Key。" } }));
+      const message = selectedModel && selectedProvider
+        ? `“${selectedModel.displayName}”缺少 API Key，请先到“模型与处理”中恢复或重新保存密钥。`
+        : "尚未选择可用于翻译的模型，请先完成模型配置。";
+      setTranslations((current) => ({ ...current, [block.id]: { status: "error", text: "", kind, error: message } }));
+      setContextNotice(message);
       return;
     }
     const existing = streamHandles.current.get(block.id);
@@ -493,27 +498,48 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     }
     setActiveBlock(block.id);
     setActiveAnalysis(null);
+    if (kind === "passage") setReaderTranslationView("translated");
     setTranslations((current) => ({ ...current, [block.id]: { status: "streaming", text: "", kind } }));
     const requestId = crypto.randomUUID();
+    let rawBuffer = "";
+    let textBuffer = "";
+    let activeHandle: ModelStreamHandle | null = null;
+    let finished = false;
+    let complete!: () => void;
+    const completion = new Promise<void>((resolve) => { complete = resolve; });
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      activeHandle?.dispose();
+      streamHandles.current.delete(block.id);
+      complete();
+    };
     const onEvent = (event: ModelStreamEvent) => {
       if (event.kind === "delta" && event.text) {
+        if (kind === "word") textBuffer += event.text;
+        else rawBuffer += event.text;
         updateTranslation(block.id, (current) => kind === "word"
           ? ({ ...current, status: "streaming", text: current.text + event.text })
           : ({ ...current, status: "streaming", raw: (current.raw ?? "") + event.text }));
       } else if (event.kind === "done") {
-        updateTranslation(block.id, (current) => {
-          if (kind === "word") return { ...current, status: "unsaved" };
-          const parsed = parseStructuredTranslation(block.text, current.raw ?? "");
-          return { ...current, status: "unsaved", text: parsed.translatedText, segments: parsed.segments, terms: parsed.terms };
-        });
+        const completedState: TranslationState = kind === "word"
+          ? { status: "unsaved", text: textBuffer, kind }
+          : (() => {
+              const parsed = parseStructuredTranslation(block.text, rawBuffer);
+              return { status: "unsaved", text: parsed.translatedText, raw: rawBuffer, segments: parsed.segments, terms: parsed.terms, kind };
+            })();
+        setTranslations((current) => ({ ...current, [block.id]: completedState }));
+        void persistTranslation(block, completedState)
+          .then(() => setContextNotice(kind === "word" ? "词义已保存到本篇论文。" : "译文已保存，可随时切换回英文原文。"))
+          .finally(finish);
       } else if (event.kind === "cancelled") {
         updateTranslation(block.id, (current) => ({ ...current, status: "cancelled" }));
+        finish();
       } else if (event.kind === "error") {
-        updateTranslation(block.id, (current) => ({ ...current, status: "error", error: event.error ?? "Model request failed." }));
-      }
-      if (["done", "cancelled", "error"].includes(event.kind)) {
-        streamHandles.current.get(block.id)?.dispose();
-        streamHandles.current.delete(block.id);
+        const message = event.error ?? "翻译请求失败，请检查模型、Base URL 与密钥。";
+        updateTranslation(block.id, (current) => ({ ...current, status: "error", error: message }));
+        setContextNotice(message);
+        finish();
       }
     };
     try {
@@ -527,18 +553,24 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
           { role: "user", content: structuredTranslationPrompt(block.text) },
         ],
       }, onEvent);
-      streamHandles.current.set(block.id, handle);
+      activeHandle = handle;
+      if (finished) handle.dispose();
+      else streamHandles.current.set(block.id, handle);
     } catch (error) {
-      updateTranslation(block.id, (current) => ({ ...current, status: "error", error: error instanceof Error ? error.message : String(error) }));
+      const message = error instanceof Error ? error.message : String(error);
+      updateTranslation(block.id, (current) => ({ ...current, status: "error", error: message }));
+      setContextNotice(message);
+      finish();
     }
+    await completion;
   };
 
   const cancelTranslation = async (blockId: string) => {
     await streamHandles.current.get(blockId)?.cancel();
   };
 
-  const persistTranslation = async (block: ReaderBlock, state: TranslationState) => {
-    if (!selectedModel || !state.text.trim()) return;
+  async function persistTranslation(block: ReaderBlock, state: TranslationState) {
+    if (!paper || !selectedModel || !state.text.trim()) return;
     const selectedRange = block as Partial<SelectionSource>;
     const sourceText = selectedRange.sourceBlockText ?? block.text;
     const sourceStart = selectedRange.start ?? 0;
@@ -575,6 +607,26 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       await annotationQuery.refetch();
     } catch (error) {
       updateTranslation(block.id, (current) => ({ ...current, status: "error", error: error instanceof Error ? error.message : String(error) }));
+    }
+  }
+
+  const translateCurrentSection = async () => {
+    const section = sections.find((candidate) => candidate.id === activeSection) ?? sections[0];
+    if (!section || translationBatchBusy) return;
+    if (!credentialReady) {
+      setContextNotice("当前翻译模型缺少密钥，请先在“模型与处理”中恢复或重新保存 API Key。");
+      return;
+    }
+    setReaderTranslationView("translated");
+    setTranslationBatchBusy(true);
+    try {
+      for (const block of section.blocks) {
+        const saved = (translationQuery.data ?? []).some((record) => record.blockId === block.id && !record.promptVersion.startsWith(WORD_LOOKUP_PROMPT_VERSION));
+        if (!saved && block.text.trim()) await translate(block);
+      }
+      setContextNotice(`“${section.title}”已完成逐段翻译。`);
+    } finally {
+      setTranslationBatchBusy(false);
     }
   };
 
@@ -1259,6 +1311,8 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const renderedOutlineWidth = outlineCollapsed ? COLLAPSED_OUTLINE_WIDTH : outlineWidth;
   const renderedAgentWidth = agentCollapsed ? COLLAPSED_AGENT_WIDTH : agentWidth;
   const selectionTranslation = selection ? translations[selection.id] ?? persistedTranslations[selection.id] : undefined;
+  const hasPassageTranslations = (translationQuery.data ?? []).some((record) => !record.promptVersion.startsWith(WORD_LOOKUP_PROMPT_VERSION))
+    || Object.values(translations).some((state) => state.kind !== "word" && Boolean(state.text));
   const themeColors = readerTheme === "custom"
     ? { background: readerBackgroundColor, text: readerTextColor }
     : READER_THEME_COLORS[readerTheme];
@@ -1275,6 +1329,9 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     "--reader-outline-width": `${outlineWidth}px`,
     "--reader-agent-width": `${agentWidth}px`,
     "--reader-zoom": readerZoom / 100,
+    "--reader-body-font-size": `${10 * (fontSize === "large" ? 1.3 : fontSize === "medium" ? 1.15 : 1) * (readerZoom / 100)}px`,
+    "--reader-section-font-size": `${12 * (fontSize === "large" ? 1.3 : fontSize === "medium" ? 1.15 : 1) * (readerZoom / 100)}px`,
+    "--reader-title-font-size": `${22 * (fontSize === "large" ? 1.3 : fontSize === "medium" ? 1.15 : 1) * (readerZoom / 100)}px`,
     "--reader-background": themeColors.background,
     "--reader-text": themeColors.text,
   } as CSSProperties;
@@ -1315,7 +1372,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
           <strong>阅读配色</strong><div className="reader-theme-presets">{Object.entries(READER_THEME_COLORS).map(([id, colors]) => <button key={id} className={readerTheme === id ? "active" : ""} title={id === "white" ? "白纸" : id === "warm" ? "暖纸" : id === "green" ? "柔绿" : "深色"} style={{ background: colors.background, color: colors.text }} onClick={() => setReaderTheme(id as keyof typeof READER_THEME_COLORS)}>{id === "white" ? "白" : id === "warm" ? "暖" : id === "green" ? "绿" : "暗"}</button>)}</div>
           <label><span>背景</span><input type="color" value={readerBackgroundColor} onChange={(event) => updateCustomReaderColor("background", event.target.value)} /></label><label><span>文字</span><input type="color" value={readerTextColor} onChange={(event) => updateCustomReaderColor("text", event.target.value)} /></label>
         </div>}</div>
-        <div className="reader-language-switch"><button className={readerTranslationView === "original" ? "active" : ""} onClick={() => setReaderTranslationView("original")}>原文</button><button className={readerTranslationView === "translated" ? "active" : ""} onClick={() => setReaderTranslationView("translated")}>译文</button></div>
+        <div className="reader-language-switch"><button className={readerTranslationView === "original" ? "active" : ""} onClick={() => setReaderTranslationView("original")}>原文</button><button className={readerTranslationView === "translated" ? "active" : ""} onClick={() => { setReaderTranslationView("translated"); if (!hasPassageTranslations) setContextNotice("当前论文还没有译文，可从下方入口翻译当前章节，或选中文字进行局部翻译。"); }}>译文</button></div>
       </div>}
       <button className="reader-focus-button" onClick={() => void toggleFocusMode(true)} title="只保留目录、Markdown 正文和论文阅读助手"><Maximize2 size={13} /> 纯享阅读</button>
       <button><Search size={13} /> 查找</button>
@@ -1338,6 +1395,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         {mode === "integrated" && <article className="integrated-paper">
           <header className="paper-reading-header"><span className="tag tag-primary">MD 章节阅读</span><h1>{paper.title}</h1><p>本地文档 · {paper.pageCount || "—"} 页 · 更新于 {new Date(paper.updatedAt).toLocaleDateString("zh-CN")}</p></header>
           {formattingStatus === "error" && <div className="formatting-notice error"><TriangleAlert size={13} /> {formattingError}</div>}
+          {readerTranslationView === "translated" && !hasPassageTranslations && <div className="reader-translation-empty"><div><Languages size={18} /><span><strong>当前还没有中文译文</strong><small>原始 Markdown 始终保持英文不变。翻译会按句覆盖显示，并自动保存术语与原文锚点。</small></span></div><button className="primary-button compact" disabled={translationBatchBusy || !credentialReady} onClick={() => void translateCurrentSection()}>{translationBatchBusy ? <LoaderCircle className="spin" size={14} /> : <Languages size={14} />} {credentialReady ? (translationBatchBusy ? "正在翻译本章" : "翻译当前章节") : "先恢复模型密钥"}</button></div>}
           {markdownQuery.isLoading || documentQuery.isLoading ? <div className="document-loading">Loading structured document…</div> : sections.map((section, sectionIndex) => {
             const displayBlocks = section.blocks;
             return <section id={`reader-section-${section.id}`} data-section-id={section.id} className={`reading-section ${activeSection === section.id ? "active" : ""}`} key={section.id}>
@@ -1351,7 +1409,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
               const blockAnnotations = (annotationQuery.data ?? []).filter((annotation) => annotation.blockId === block.id);
               return <div className={`paragraph-card ${block.compacted ? "compacted" : ""} ${activeBlock === block.id ? "active" : ""}`} key={block.id} onClick={(event) => { if (!(event.target as HTMLElement).closest("button, a")) setActiveBlock((current) => current === block.id ? "" : block.id); }} onMouseUp={(event) => captureSelection(block, event)}>
                 <div className="paragraph-main"><div className="paragraph-markdown"><BilingualBlock block={block} state={state} records={blockTranslations} annotations={blockAnnotations} view={readerTranslationView} markdownPath={paper.markdownPath} figureAnalysisFor={figureAnalysisFor} onToggleFigure={(source) => void toggleFigureAnalysis(source)} onOpenAnnotation={openAnnotationInspector} /></div></div>
-                <div className="paragraph-actions"><button className={state?.text ? "active" : ""} title={state?.status === "streaming" ? "停止翻译" : "翻译本段"} aria-label="翻译本段" onClick={() => void (state?.status === "streaming" ? cancelTranslation(block.id) : translate(block))}>{state?.status === "streaming" ? <LoaderCircle className="spin" size={14} /> : <Languages size={14} />}</button>{state?.status === "unsaved" && <button title="保存句子级译文" onClick={() => void persistTranslation(block, state)}><Check size={14} /></button>}<button title={hasFormula ? "解释公式" : "解释段落"} aria-label={hasFormula ? "解释公式" : "解释段落"} onClick={() => void (explanation?.status === "streaming" ? streamHandles.current.get(`analysis:${analysisKey(block.id, explanationType)}`)?.cancel() : explain(hasFormula ? "formula" : "theorem", block))}>{explanation?.status === "streaming" ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}</button><button className={contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.blockId === block.id) ? "active" : ""} title="加入论文上下文" aria-label="加入论文上下文" disabled={contextBusy === block.id} onClick={() => void addContext(block.sectionId, block.id, block.text)}><Layers3 size={14} /></button></div>
+                <div className="paragraph-actions"><button className={state?.text ? "active" : ""} title={state?.status === "streaming" ? "停止翻译" : "翻译本段"} aria-label="翻译本段" onClick={() => void (state?.status === "streaming" ? cancelTranslation(block.id) : translate(block))}>{state?.status === "streaming" ? <LoaderCircle className="spin" size={14} /> : <Languages size={14} />}</button>{state?.status === "unsaved" && <span className="paragraph-save-state"><LoaderCircle className="spin" size={11} /> 保存中</span>}<button title={hasFormula ? "解释公式" : "解释段落"} aria-label={hasFormula ? "解释公式" : "解释段落"} onClick={() => void (explanation?.status === "streaming" ? streamHandles.current.get(`analysis:${analysisKey(block.id, explanationType)}`)?.cancel() : explain(hasFormula ? "formula" : "theorem", block))}>{explanation?.status === "streaming" ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}</button><button className={contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.blockId === block.id) ? "active" : ""} title="加入论文上下文" aria-label="加入论文上下文" disabled={contextBusy === block.id} onClick={() => void addContext(block.sectionId, block.id, block.text)}><Layers3 size={14} /></button></div>
                 {state?.error && <p className="paragraph-translation-error"><TriangleAlert size={12} /> {state.error}</p>}
                 {explanation?.status === "error" && <p className="paragraph-translation-error"><TriangleAlert size={12} /> {explanation.error}</p>}
               </div>;

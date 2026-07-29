@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { documentDir, join } from "@tauri-apps/api/path";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FolderOpen } from "lucide-react";
 import { AppUpdater } from "./components/AppUpdater";
@@ -26,8 +27,9 @@ export function App() {
   const queryClient = useQueryClient();
   const settingsRecoveryStarted = useRef(false);
   const [settingsRecovered, setSettingsRecovered] = useState(!nativeRuntime);
-  const defaultRoot = nativeRuntime ? "E:/Papers2Innovations-Library" : "D:/Research/Papers2Innovations-Library";
-  const root = workspace.root || defaultRoot;
+  const [suggestedRoot, setSuggestedRoot] = useState("");
+  const [librarySetupBusy, setLibrarySetupBusy] = useState(false);
+  const root = workspace.root || (!nativeRuntime ? "D:/Research/Papers2Innovations-Library" : "");
   const papersQuery = useQuery({
     queryKey: ["papers", root],
     queryFn: async () => {
@@ -62,8 +64,12 @@ export function App() {
   });
 
   useEffect(() => {
-    if (!workspace.root) workspace.setRoot(root);
-  }, [root, workspace]);
+    if (root || !nativeRuntime) return;
+    void documentDir()
+      .then((directory) => join(directory, "Papers2Innovations-Library"))
+      .then(setSuggestedRoot)
+      .catch(() => setSuggestedRoot(""));
+  }, [root]);
 
   useEffect(() => {
     if (!nativeRuntime || settingsRecoveryStarted.current) return;
@@ -151,6 +157,19 @@ export function App() {
     await queryClient.invalidateQueries({ queryKey: ["papers"] });
   };
 
+  const createSuggestedLibrary = async () => {
+    if (!suggestedRoot || librarySetupBusy) return;
+    setLibrarySetupBusy(true);
+    try {
+      await initializeLibrary(suggestedRoot);
+      workspace.setRoot(suggestedRoot);
+      await scanLibrary(suggestedRoot);
+      await queryClient.invalidateQueries({ queryKey: ["papers"] });
+    } finally {
+      setLibrarySetupBusy(false);
+    }
+  };
+
   const papers = useMemo(() => {
     const all = papersQuery.data ?? [];
     const text = workspace.query.trim().toLowerCase();
@@ -199,7 +218,7 @@ export function App() {
   ) : workspace.view === "graph" ? (
     <CitationGraph papers={allPapers} rootPaper={selected} root={root} />
   ) : workspace.view === "import" ? (
-    <ZoteroImport root={root} />
+    <ZoteroImport root={root} onChooseLibrary={choose} />
   ) : workspace.view === "jobs" ? (
     <Activity
       papers={papersQuery.data ?? []}
@@ -223,9 +242,11 @@ export function App() {
     return (
       <div className="setup-screen">
         <div className="setup-mark"><FolderOpen size={24} /></div>
-        <h1>打开论文库</h1>
-        <p>选择一个文件夹，Papers2Innovations 会在其中创建并管理 <code>Papers/</code> 和 <code>.p2i/</code> 目录。</p>
-        <button className="primary-button" onClick={choose}><FolderOpen size={17} /> 选择文件夹</button>
+        <h1>创建你的论文工作区</h1>
+        <p>Papers2Innovations 会在独立目录中管理 PDF、结构化文档与本地索引，不会修改 Zotero 原库。</p>
+        {suggestedRoot && <code className="setup-path">{suggestedRoot}</code>}
+        <div className="setup-actions"><button className="primary-button" disabled={!suggestedRoot || librarySetupBusy} onClick={() => void createSuggestedLibrary()}><FolderOpen size={17} /> {librarySetupBusy ? "正在创建" : "使用推荐位置"}</button><button className="secondary-button" disabled={librarySetupBusy} onClick={() => void choose()}><FolderOpen size={17} /> 选择其他位置</button></div>
+        <small>稍后可在论文库中更换位置。已有论文库请选择其根目录。</small>
       </div>
     );
   }

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "p2i-paper-engine"
-version = "0.1.23"
+version = "0.1.24"
 description = "Local-first ingestion engine for Papers2Innovations"
 requires-python = ">=3.11"
 dependencies = [

@@ -1,7 +1,7 @@
 <div align="center">
   <img src="apps/desktop/src-tauri/icons/128x128.png" width="88" alt="Papers2Innovations 图标" />
   <h1>Papers2Innovations</h1>
-  <p><strong>为中文母语科研者打造：更轻松地读懂英文论文，从文献证据中提炼可验证的创新点。</strong></p>
+  <p><strong>让中文母语者真正读懂英文论文，并把文献证据变成可验证的研究创新点。</strong></p>
   <p><a href="README.md">中文</a> · <a href="README.en.md">English</a></p>
   <p>
     <a href="https://github.com/cutcutjust/papers2innovations/releases/latest"><img alt="最新版本" src="https://img.shields.io/github/v/release/cutcutjust/papers2innovations?style=flat-square&color=5865df" /></a>
@@ -12,115 +12,111 @@
   <p><a href="https://github.com/cutcutjust/papers2innovations/releases/latest"><strong>下载 Windows 安装包</strong></a></p>
 </div>
 
-![按章节组织的 Papers2Innovations 阅读器](docs/images/reader-workspace.png)
+![按章节组织的 Papers2Innovations 沉浸精读](docs/images/reader-workspace.png)
 
-Papers2Innovations 面向两类真实困难：中文母语者阅读英文论文时容易被语言、公式和长篇结构阻断；刚进入科研的人即使读完论文，也常常不知道如何比较工作、定位空白并形成研究问题。它把 PDF 解析成按章节组织、可定位回原页的 Markdown，再把翻译、解释、证据上下文和创新分析放到同一个可恢复的本地工作区中。
+Papers2Innovations 不是另一个“存 PDF + 一键摘要”工具。它解决两件更实际的事：中文母语者如何跨过英文、术语、公式和长篇结构的阅读门槛；科研新手如何从“看懂一篇”继续走到“比较多篇、发现空白、提出能做实验验证的新问题”。
 
-> 当前版本：Windows x64 `v0.1.23`。项目仍处于 `0.1.x` 快速迭代阶段，请保留不可替代源 PDF 的备份。
+系统把 PDF 解析为按章节组织、可回到原页核对的结构化文档，再把双语阅读、论文级上下文、图表解读、引用关系和创新分析放进同一个可恢复的本地工作区。
 
-## 为什么做 Papers2Innovations
+> 当前版本：Windows x64 `v0.1.24`。项目仍处于 `0.1.x` 快速迭代阶段，请保留不可替代源 PDF 的备份。
 
-很多论文工具停在“保存 PDF”或“生成一段摘要”。但真正困难的是持续的理解与研究判断：英文术语、公式和复杂结构会打断阅读；脱离原文的摘要又很难验证；科研新手还需要从多篇论文的共同假设、方法差异和失败边界中形成新的研究点。
+## 亮点功能
 
-Papers2Innovations 采用一条可检查的研究路径：
-
-| 阶段 | 系统做什么 | 用户得到什么 |
+| 你遇到的问题 | Papers2Innovations 的处理方式 | 最终得到什么 |
 | --- | --- | --- |
-| 组织 | 从本地或 Zotero 导入，使用文件树分类，拖动论文即可归组。 | 一个能长期维护的中文论文库，而不是散乱文件夹。 |
-| 读懂 | 按论文章节重建 Markdown，关联 PDF 页码、插图、表格与公式。 | 保留论文结构的清晰正文，可随时返回原页核对。 |
-| 理解 | 对选中文本翻译、解释公式和方法，默认使用中文回答。 | 不因英语门槛跳过关键论证，也不把 AI 结论当作无来源事实。 |
-| 积累 | 将论文、章节或段落加入共享上下文，保存证据锚点与 token 明细。 | 可复用、可追溯的研究材料，而不是一次性聊天记录。 |
-| 创新 | 比较证据、提取矛盾与空白，分阶段生成并批判研究想法。 | 从“读过论文”走向“提出可验证的研究问题和实验方案”。 |
+| 英文正文读得慢，术语反复查 | 句子级中文覆盖显示，原始英文和 Markdown 始终不变；固定搭配、专业术语和语境义就近查看。 | 在论文原结构中连续阅读，不丢失证据位置。 |
+| PDF 目录、正文、公式、图片混在一起 | Docling 优先解析章节、阅读顺序、页码、表格、图片和公式；失败阶段可恢复。 | 可检索、可定位、可复用的结构化论文。 |
+| AI 回答脱离原文，问完就找不到来源 | 每篇论文拥有独立的多轮会话与上下文快照，正文选区、图片和公式追问共用同一会话。 | 问答始终绑定当前论文证据，不污染其他论文。 |
+| 看完很多论文，仍不会提炼研究点 | 创新工作台分阶段做证据提取、差异比较、想法生成、创新性检查和实验批判。 | 从文献结论推进到可验证的研究问题与实验草案。 |
+| 文献越来越多，分类失控 | 文件树持久化分类，论文和文件夹均可拖动；Zotero 只读导入并保留来源。 | 一个可长期维护的本地研究资料库。 |
 
-系统不会承诺替代研究判断。它强调来源、边界和可复查性，让中文阅读辅助与创新探索建立在同一组论文证据上。
+## 沉浸精读与双语覆盖
 
-## 核心能力
+- 阅读器按论文章节组织 Markdown，不按 PDF 页机械切割；PDF 页码和来源锚点仍保留用于核对。
+- 正文支持 `80%`～`180%` 缩放、`Ctrl + 鼠标滚轮`、白纸/暖纸/柔绿/深色主题和自定义高对比配色。
+- “译文”模式把中文显示在英文原位置，未翻译部分继续保留英文；“原文”模式随时恢复完整英文。
+- 点击译文或标记可查看固定搭配、专业术语、直译、论文语境义以及关联问答。
+- 翻译、解释和对话只写入独立渲染层，不修改源 Markdown 或 PDF。
+- LaTeX 使用 KaTeX 渲染；插图可展开 AI 图解，结果按图片和模型缓存。
 
-| 模块 | 能力 |
-| --- | --- |
-| 论文库 | 监听本地 `Papers/`，只读导入 Zotero，SHA-256 去重；分类以持久化文件树展示，支持子分类、重命名、删除和拖拽归组。 |
-| 解析 | 生成章节 Markdown、页码锚点、插图、表格和规范化坐标；中断任务可从失败阶段恢复。 |
-| 阅读 | “沉浸精读”按章节组织 Markdown，支持 80%～180% 缩放、`Ctrl + 滚轮`、护眼主题、句子级中英切换与 LaTeX 渲染。 |
-| 图解 | 导入后用独立视觉模型缓存插图说明，并对检测到的可疑公式执行带置信度的视觉修复；原 PDF 永不修改。 |
-| 上下文 | 每篇论文的多轮对话与正文提问共用独立上下文；创新工作台使用另一套多论文研究上下文，二者互不污染。 |
-| 提示词库 | 按阅读助手、翻译、解释、Markdown 整理和创新工作台分类管理模板，各使用场景可直接选择。 |
-| 创新 | 依次执行上下文压缩、证据提取、想法生成、创新性验证与实验批判。 |
-| 更新 | 自动提示 GitHub 新版本，也可在设置页手动检查；签名更新完成后自动重启。 |
+![Papers2Innovations 非破坏性双语阅读入口](docs/images/bilingual-reader.png)
 
-## 模型、安全与应用
-
-![Papers2Innovations 模型设置](docs/images/model-settings.png)
-
-- 接口格式只分为 **OpenAI-compatible** 与 **Anthropic-compatible**，`Base URL` 始终由用户自定义。
-- 模型上下文可选 `128K`、`256K`、`1M`，也可输入 `4,096` 到 `2,000,000` 的自定义整数。
-- 每个模型可独立用于普通对话、Markdown 整理、全文 OCR 或图片解读；Markdown 整理会保留公式、引用、图片路径和证据锚点。
-- API Key 加密保存在 Tauri Stronghold，保险库密码由系统钥匙串保护；Python、SQLite 和日志均无法读取密钥。
-- 自定义模型、上下文限制、任务模型、OCR 授权、字号和论文库路径会同时保存在 WebView 设置与 Stronghold 非敏感快照中。
-- **覆盖安装与应用内更新不会清空已有设置或密钥。** 只有用户明确删除模型/密钥时才会移除对应凭据。
-- 设置分为“模型与处理”和“安全与应用”两个页面，模型工作流与更新、字体、隐私、卸载互不混杂。
-- 上下文页的“回答输出预留”是为模型生成回答保留的容量，不是发送给模型的输入文本；预算和当前文本估算会分别显示。
-
-## 研究工作区
-
-### 文件树分类
-
-分类不是装饰性标签。所有节点和论文归组关系都写入本地数据库；父分类自动统计整个子树，点击节点即可筛选，论文从列表拖到目标文件夹即可移动。Zotero collection 首次升级时会自动迁移到 `Zotero` 树中。
-
-![Papers2Innovations 文件树分类与拖拽归组](docs/images/collection-tree.png)
-
-### 纯享阅读
-
-纯享模式隐藏应用导航、全局侧栏、工具栏和底部状态条，只留下章节目录、结构化 Markdown 正文和论文阅读助手。它适合连续阅读长论文；目录仍可调宽，助手仍使用持久化证据上下文，按 `Esc` 即可退出。
+纯享模式隐藏全局导航，只保留可调宽的章节目录、正文与论文助手三列，适合连续阅读长论文。
 
 ![Papers2Innovations 纯享阅读模式](docs/images/focus-reading.png)
 
-### 提示词库
+## 从论文库到研究工作区
 
-提示词按实际使用场景分类，支持新增、编辑、移动分类和删除。阅读助手、翻译、解释、Markdown 整理和创新工作台分别记住所选模板；升级时保留旧版自定义提示词。
+### 文件树分类
 
-### 从证据到实验
+分类不是装饰标签。节点、层级和论文归组都写入本地数据库；父分类自动统计子树。论文可从列表拖到目标文件夹，文件夹也可调整层级。
 
-创新工作台把每次运行绑定到确定的上下文快照。各阶段可选择不同模型，已完成检查点会保留，失败后从中断阶段继续。
+![Papers2Innovations 文件树分类与拖拽归组](docs/images/collection-tree.png)
 
-![Papers2Innovations 创新流水线](docs/images/innovation-pipeline.png)
+### Zotero 只读导入
+
+首次打开可一键在“文档”目录创建推荐论文库，也可以选择已有目录。Zotero 会从 profile 自动发现；发现失败时可手动选择包含 `zotero.sqlite` 的数据目录。导入前可筛选 collection、预览页数和文件，PDF 校验 SHA-256 后原子复制，P2I 不修改 Zotero 数据。
+
+![Papers2Innovations Zotero 导入向导](docs/images/zotero-import.png)
+
+### 引用关系图谱
+
+引用图谱以中心论文为核心，稳定展示直接引用和二级证据来源。可以按标题、作者、年份搜索，按层级和本地关联状态筛选；选中节点后只强调相关路径，并在检查器中查看关系、权重和解析状态。
+
+![Papers2Innovations 引用关系图谱](docs/images/citation-graph.png)
+
+## 论文级上下文与创新工作台
+
+- 每篇论文有唯一、持久化的多轮阅读会话，默认使用该论文 Markdown；超出预算时可生成并复用压缩版本。
+- 用户可查看 token 预算与实际文本，增删改自定义上下文，并恢复默认全文。
+- 每轮回答保存不可变上下文快照，后续调整不会篡改历史来源。
+- 创新工作台使用独立的多论文研究上下文，与单篇阅读上下文完全隔离。
+- 提示词库只管理模板，支持新增、编辑、删除和分类，可直接用于阅读、翻译、解释、Markdown 整理和创新流程。
+
+![Papers2Innovations 从证据到实验的创新流程](docs/images/innovation-pipeline.png)
+
+## 模型、密钥与更新
+
+![Papers2Innovations 模型与文档处理设置](docs/images/model-settings.png)
+
+- 接口格式为 **OpenAI-compatible** 或 **Anthropic-compatible**，`Base URL` 始终自定义。
+- 上下文预设为 `128K`、`256K`、`1M`，也支持 `4,096`～`2,000,000` 的自定义整数。
+- 普通问答、Markdown 整理、全文 OCR 和图片解读可分配不同模型，无需重复保存密钥。
+- API Key 加密保存在 Tauri Stronghold；Windows 还保存系统凭据备份，用于模型 ID 或设置迁移后的自动恢复。
+- 密钥不会写入 Python、SQLite、日志、前端持久状态、源码或 Git。
+- 覆盖安装和应用内更新保留论文库、模型、密钥、提示词、字号、主题、上下文和任务状态。
+- 新版本启动时自动弹窗提醒，也可在“安全与应用”中手动检查；签名安装完成后原位重启。
 
 ## 快速开始
 
-1. 从 [GitHub Releases](https://github.com/cutcutjust/papers2innovations/releases/latest) 下载最新 Windows 安装包。
-2. 打开应用并选择论文库目录，推荐使用独立目录，如 `E:\Papers2Innovations-Library`。
-3. 将 PDF 放入 `Papers/`，或关闭 Zotero 后使用“导入 Zotero”。
-4. 在“任务活动”查看哈希、版面、OCR、图像、表格和索引进度；失败阶段可重试。
-5. 在侧栏新建分类或子分类，把论文拖入相应文件夹，建立自己的研究主题树。
-6. 在“模型与处理”中添加模型、自定义 Base URL、上下文长度和 API Key，再分配 Markdown、OCR 或图片解读模型。
-7. 在阅读器中按章节阅读；需要专注时进入纯享模式，从提示词库选择阅读、翻译、解释或整理模板，再在创新工作台提炼研究点。
+1. 从 [GitHub Releases](https://github.com/cutcutjust/papers2innovations/releases/latest) 下载最新 Windows x64 安装包。
+2. 首次启动选择“使用推荐位置”，或选择一个独立论文库目录。
+3. 点击“添加 PDF”，把文件放入 `Papers/`，或关闭 Zotero 后进入“导入 Zotero”。
+4. 在“任务活动”查看哈希、版面、OCR、图片、表格和索引阶段；失败后从对应阶段重试。
+5. 在“模型与处理”添加自己的接口和密钥，再选择翻译、问答、整理、OCR 或图片解读模型。
+6. 进入沉浸精读，按章节阅读、翻译与追问；需要跨论文比较时把证据加入创新工作台。
 
-本地导入与降级解析无需模型密钥。翻译、解释、Markdown 整理、OCR、阅读问答和综合功能才会调用用户配置的模型。
+本地导入与降级解析不要求模型密钥。只有翻译、解释、Markdown 整理、OCR、图片解读、问答和创新流程会调用用户配置的模型。
 
 ## 数据边界
 
 ```text
 Papers2Innovations-Library/
-|-- Papers/                 # 用户管理或从 Zotero 复制的 PDF
+|-- Papers/                 # 本地添加或从 Zotero 复制的 PDF
 |-- Exports/
 `-- .p2i/
     |-- library.sqlite      # 任务、章节、来源、上下文和运行记录
     |-- generated/          # Markdown、插图、表格和缩略图
-    |-- cache/              # OCR 页面和引用图谱缓存
+    |-- cache/              # OCR 页面、图片分析和引用图谱缓存
     |-- components/
     `-- logs/
 ```
 
-论文库独立于应用安装目录。升级或卸载 Papers2Innovations 不会删除论文库。全文 OCR 默认关闭，只有用户明确授权后才会发送渲染页面，且已缓存页面不会重复计费调用。
-
-## 更新与卸载
-
-应用启动后会检查签名的 GitHub `latest.json`。发现新版本时可直接下载、安装并重启；也可在“安全与应用”页面点击“检查新版本”。GitHub 暂时不可用时不会阻止本地功能。
-
-卸载可通过 Windows“已安装的应用”、开始菜单卸载快捷方式，或“设置 > 应用管理”。卸载程序仅移除应用文件，保留论文库与用户数据。
+论文库独立于安装目录。升级或卸载应用不会删除论文库。全文 OCR 默认关闭，只有明确授权后才发送渲染页面，已缓存页面不会重复调用。
 
 ## 本地开发
 
-需要 Node.js 20+、Python 3.11、Rust stable（含 `rustfmt`、`clippy`）以及 Tauri 2 的 Windows 构建依赖。
+需要 Node.js 20+、Python 3.11、Rust stable（含 `rustfmt`、`clippy`）和 Tauri 2 平台依赖。
 
 ```powershell
 git clone https://github.com/cutcutjust/papers2innovations.git
@@ -131,8 +127,6 @@ py -3.11 -m venv .venv
 .\scripts\build-sidecar.ps1
 npm run tauri:dev --workspace @p2i/desktop
 ```
-
-质量门：
 
 ```powershell
 npm run typecheck
@@ -146,4 +140,4 @@ cargo clippy -- -D warnings
 cargo test
 ```
 
-仓库不会提交 PDF、本地 manifest、论文库、Stronghold 文件、密钥、组件缓存或打包生成物。问题和功能建议请提交到 [GitHub Issues](https://github.com/cutcutjust/papers2innovations/issues)。
+仓库不提交 PDF、本地 manifest、论文库、Stronghold、密钥、组件缓存或打包生成物。可复现的问题和聚焦的功能建议请提交到 [GitHub Issues](https://github.com/cutcutjust/papers2innovations/issues)。

@@ -22,6 +22,11 @@ export async function chooseLibrary(): Promise<string | null> {
   return invoke<string | null>("choose_library");
 }
 
+export async function chooseZoteroDirectory(): Promise<string | null> {
+  if (!nativeRuntime) return "C:/Users/Researcher/Zotero";
+  return invoke<string | null>("choose_zotero_directory");
+}
+
 export interface PdfImportResult {
   selected: number;
   copied: number;
@@ -174,10 +179,38 @@ export async function buildCitationGraph(root: string, paperId: string, force = 
   if (!nativeRuntime) {
     const paper = demoPapers.find((candidate) => candidate.id === paperId) ?? demoPapers[0];
     const direct = demoPapers.filter((candidate) => candidate.id !== paper.id).slice(0, 2);
+    const externalDirect = [
+      ["demo-direct-1", "Evidence traceability in scientific question answering", 2024],
+      ["demo-direct-2", "Document structure aware retrieval for long papers", 2023],
+      ["demo-direct-3", "Local-first research assistants with source grounding", 2025],
+      ["demo-direct-4", "Reliable multimodal extraction from scholarly PDF files", 2022],
+    ] as const;
+    const secondLevel = [
+      ["demo-second-1", "Citation-aware synthesis for literature reviews", 2021],
+      ["demo-second-2", "Evaluating evidence attribution in language models", 2024],
+      ["demo-second-3", "Structured document representations for retrieval", 2020],
+      ["demo-second-4", "Unresolved reference on scientific provenance", 2019],
+    ] as const;
     const nodes: CitationGraphResult["nodes"] = [
-      { id: paper.id, paperId: paper.id, title: paper.title, authors: [], depth: 0, degree: direct.length, resolved: true, status: "ready" },
-      ...direct.map((candidate, index) => ({ id: candidate.id, paperId: candidate.id, title: candidate.title, authors: [], depth: 1 as const, degree: 1, resolved: true, status: "ready" as const, year: 2025 + index })),
-      { id: "demo-unresolved-reference", title: "Unresolved second-level scientific reference", authors: ["Local fixture"], depth: 2, degree: 1, resolved: false, status: "unresolved", year: 2024 },
+      { id: paper.id, paperId: paper.id, title: paper.title, authors: [], depth: 0, degree: direct.length + externalDirect.length, resolved: true, status: "ready" },
+      ...direct.map((candidate, index) => ({ id: candidate.id, paperId: candidate.id, title: candidate.title, authors: ["P2I Demo Team"], depth: 1 as const, degree: 3 + index, resolved: true, status: "ready" as const, year: 2025 + index })),
+      ...externalDirect.map(([id, title, year], index) => ({ id, title, authors: ["Research Group"], depth: 1 as const, degree: 2 + (index % 3), resolved: false, status: "unresolved" as const, year })),
+      ...secondLevel.map(([id, title, year], index) => ({ id, title, authors: ["Evidence Lab"], depth: 2 as const, degree: 1 + (index % 2), resolved: index < 3, status: index < 3 ? "ready" as const : "unresolved" as const, year })),
+    ];
+    const rootEdges = [
+      ...direct.map((candidate) => ({ id: `cites:${paper.id}:${candidate.id}`, source: paper.id, target: candidate.id, relation: "cites" as const, weight: 1 })),
+      ...externalDirect.map(([id], index) => ({ id: `cites:${paper.id}:${id}`, source: paper.id, target: id, relation: "cites" as const, weight: 1 + (index % 2) })),
+    ];
+    const secondaryEdges = secondLevel.map(([id], index) => ({
+      id: `cites:${externalDirect[index % externalDirect.length][0]}:${id}`,
+      source: externalDirect[index % externalDirect.length][0],
+      target: id,
+      relation: "cites" as const,
+      weight: 1,
+    }));
+    const similarityEdges = [
+      { id: "similarity:direct-1:direct-3", source: "demo-direct-1", target: "demo-direct-3", relation: "topic_similarity" as const, weight: 3 },
+      { id: "shared:direct-2:paper-2", source: "demo-direct-2", target: direct[0]?.id ?? paper.id, relation: "shared_reference" as const, weight: 2 },
     ];
     return {
       schemaVersion: 1,
@@ -185,14 +218,11 @@ export async function buildCitationGraph(root: string, paperId: string, force = 
       maxDepth: 2,
       status: "partial",
       nodes,
-      edges: [
-        ...direct.map((candidate) => ({ id: `cites:${paper.id}:${candidate.id}`, source: paper.id, target: candidate.id, relation: "cites" as const, weight: 1 })),
-        { id: `cites:${direct[0]?.id}:demo-unresolved-reference`, source: direct[0]?.id ?? paper.id, target: "demo-unresolved-reference", relation: "cites", weight: 1 },
-      ],
-      directCount: direct.length,
-      secondLevelCount: 1,
-      unresolvedCount: 1,
-      warnings: ["One second-level reference is unresolved in the browser fixture."],
+      edges: [...rootEdges, ...secondaryEdges, ...similarityEdges],
+      directCount: direct.length + externalDirect.length,
+      secondLevelCount: secondLevel.length,
+      unresolvedCount: externalDirect.length + 1,
+      warnings: ["Some references are not yet linked to local PDF files."],
       libraryFingerprint: "demo-library",
       generatedAt: new Date().toISOString(),
       cacheHit: false,
@@ -1054,7 +1084,7 @@ export async function retryJob(root: string, jobId: string): Promise<void> {
   await rpc("job.retry", { root, jobId });
 }
 
-export async function inspectZotero(): Promise<ZoteroInspection> {
+export async function inspectZotero(dataDir?: string): Promise<ZoteroInspection> {
   if (!nativeRuntime) return {
     dataDir: "E:/Zotero/lib",
     databasePath: "E:/Zotero/lib/zotero.sqlite",
@@ -1068,10 +1098,10 @@ export async function inspectZotero(): Promise<ZoteroInspection> {
       { id: 3, name: "多模态与会话情绪识别", parentId: 2 },
     ],
   };
-  return rpc<ZoteroInspection>("zotero.inspect");
+  return rpc<ZoteroInspection>("zotero.inspect", dataDir ? { dataDir } : {});
 }
 
-export async function previewZoteroImport(): Promise<ZoteroImportCandidate[]> {
+export async function previewZoteroImport(dataDir?: string): Promise<ZoteroImportCandidate[]> {
   if (!nativeRuntime) {
     const categories = [
       ...Array(13).fill("finft"), ...Array(17).fill("multimodal"),
@@ -1093,7 +1123,7 @@ export async function previewZoteroImport(): Promise<ZoteroImportCandidate[]> {
       selected: true,
     }));
   }
-  return rpc<ZoteroImportCandidate[]>("zotero.preview_import");
+  return rpc<ZoteroImportCandidate[]>("zotero.preview_import", dataDir ? { dataDir } : {});
 }
 
 export async function importFromZotero(root: string, dataDir: string, candidates: ZoteroImportCandidate[]): Promise<ZoteroImportResult> {
