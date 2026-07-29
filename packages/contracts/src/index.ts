@@ -276,7 +276,13 @@ export interface TranslationTerm {
   explanation: string;
   kind: "phrase" | "term";
   segmentId?: string;
+  sourceStart?: number;
+  sourceEnd?: number;
+  literalMeaning?: string;
+  contextMeaning?: string;
 }
+
+export type ReaderAnnotationTarget = "translation" | "chat_turn" | "analysis" | "conversation";
 
 export interface ReaderAnnotation {
   id: string;
@@ -287,7 +293,10 @@ export interface ReaderAnnotation {
   sourceStart: number;
   sourceEnd: number;
   annotationType: "translation" | "chat";
+  targetType: ReaderAnnotationTarget;
   relatedId?: string;
+  selectedText: string;
+  anchorHash: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -331,6 +340,16 @@ export interface ReaderChatTurn {
   userMessage: string;
   contextSnapshot: ContextSnapshot;
   response?: ReaderChatResponse;
+  revisions: ReaderChatTurnRevision[];
+  createdAt: string;
+}
+
+export interface ReaderChatTurnRevision {
+  id: string;
+  turnId: string;
+  userMessage: string;
+  contextSnapshot: ContextSnapshot;
+  revision: number;
   createdAt: string;
 }
 

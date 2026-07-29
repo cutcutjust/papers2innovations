@@ -3,8 +3,9 @@ const INLINE_CODE = /(`+)([^`\n]*?)\1/g;
 
 function normalizeTextMath(value: string): string {
   return value
-    .replace(/\\\[([\s\S]*?)\\\]/g, (_match, expression: string) => `\n\n$$\n${expression.trim()}\n$$\n\n`)
-    .replace(/\\\(([\s\S]*?)\\\)/g, (_match, expression: string) => `$${expression.trim()}$`);
+    // Keep replacement lengths stable so Reader source offsets remain valid.
+    .replace(/\\\[([\s\S]*?)\\\]/g, (_match, expression: string) => `$$${expression}$$`)
+    .replace(/\\\(([\s\S]*?)\\\)/g, (_match, expression: string) => `$ ${expression} $`);
 }
 
 function normalizeInlineCodeAware(value: string): string {

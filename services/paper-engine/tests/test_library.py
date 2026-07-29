@@ -39,7 +39,7 @@ def test_initializes_versioned_library_layout(tmp_path: Path) -> None:
 
     with sqlite3.connect(result["database"]) as connection:
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-        assert version == 13
+        assert version == 14
 
 
 def test_migration_0013_upgrades_existing_0012_context_without_data_loss(tmp_path: Path) -> None:
@@ -64,7 +64,7 @@ def test_migration_0013_upgrades_existing_0012_context_without_data_loss(tmp_pat
         )
     Database(database_path).migrate()
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 13
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 14
         assert connection.execute(
             "SELECT scope_id FROM context_scope_items WHERE context_item_id = 'context-1'"
         ).fetchone()[0] == "research:default"
@@ -122,7 +122,56 @@ def test_structured_translation_and_reader_annotation_round_trip(tmp_path: Path)
     })
     assert record["segments"][0]["translatedText"] == "第一个结果。"
     assert record["terms"][0]["kind"] == "term"
-    assert library.list_reader_annotations(paper["id"])[0]["id"] == annotation["id"]
+    annotations = library.list_reader_annotations(paper["id"])
+    assert next(item for item in annotations if item["annotationType"] == "chat")["id"] == annotation["id"]
+    assert next(item for item in annotations if item["annotationType"] == "translation")["targetType"] == "translation"
+
+
+def test_reader_annotation_targets_and_content_crud(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    make_pdf(library.papers_dir / "reader-crud.pdf")
+    library.scan()
+    paper = library.list_papers()[0]
+    translation = library.save_translation({
+        "paperId": paper["id"], "sectionId": "intro", "blockId": "intro:block-1",
+        "sourceText": "A useful result.", "translatedText": "一个有用的结果。",
+        "targetLanguage": "zh-CN", "modelId": "model", "promptVersion": "translate-v1",
+        "sourceStart": 0, "sourceEnd": 16,
+        "segments": [{"id": "sentence-1", "sourceStart": 0, "sourceEnd": 16,
+                      "sourceText": "A useful result.", "translatedText": "一个有用的结果。"}],
+    })
+    analysis = library.save_reader_analysis({
+        "paperId": paper["id"], "sectionId": "intro", "blockId": "intro:block-1",
+        "analysisType": "theorem", "sourceText": "A useful result.",
+        "adjacentContext": "", "resultText": "解释", "modelId": "model",
+        "promptVersion": "analysis-v1", "sourceStart": 2, "sourceEnd": 8,
+        "selectedText": "useful",
+    })
+    snapshot = {"id": "snapshot", "items": [], "tokenBreakdown": {}}
+    turn = library.save_reader_chat_turn({
+        "paperId": paper["id"], "userMessage": "What is useful?", "assistantText": "Answer",
+        "contextSnapshot": snapshot, "modelId": "model", "promptVersion": "chat-v1",
+        "status": "completed",
+    })
+    library.save_reader_annotation({
+        "paperId": paper["id"], "sectionId": "intro", "blockId": "intro:block-1",
+        "sourceStart": 2, "sourceEnd": 8, "annotationType": "chat",
+        "targetType": "chat_turn", "relatedId": turn["id"], "selectedText": "useful",
+    })
+    updated = library.update_reader_chat_turn({
+        "paperId": paper["id"], "turnId": turn["id"], "userMessage": "Why is it useful?",
+        "assistantText": "Updated answer", "contextSnapshot": snapshot, "modelId": "model",
+        "promptVersion": "chat-v1", "status": "completed",
+    })
+    assert updated["userMessage"] == "Why is it useful?"
+    assert len(updated["revisions"]) == 2
+    targets = {item["targetType"] for item in library.list_reader_annotations(paper["id"])}
+    assert {"translation", "analysis", "chat_turn"} <= targets
+    assert library.delete_translation(paper["id"], translation["id"])
+    assert library.delete_reader_analysis(paper["id"], analysis["id"])
+    assert library.delete_reader_chat_turn(paper["id"], turn["id"])
+    assert library.list_reader_annotations(paper["id"]) == []
 
 
 def test_figure_analysis_uses_content_model_prompt_cache(tmp_path: Path) -> None:

@@ -7,17 +7,16 @@ describe("AI Markdown math normalization", () => {
 
 \[ \mathbf{X}_{\text{hub}} = \frac{1}{3}[\mathbf{X}^{(t)} + \mathbf{X}^{(a)} + \mathbf{X}^{(v)}] \]`;
 
-    expect(normalizeMarkdownMath(source)).toContain(String.raw`$\mathbf{X}_{\text{hub}}$`);
-    expect(normalizeMarkdownMath(source)).toContain(String.raw`$$
-\mathbf{X}_{\text{hub}} = \frac{1}{3}[\mathbf{X}^{(t)} + \mathbf{X}^{(a)} + \mathbf{X}^{(v)}]
-$$`);
+    expect(normalizeMarkdownMath(source)).toContain(String.raw`$ \mathbf{X}_{\text{hub}} $`);
+    expect(normalizeMarkdownMath(source)).toContain(String.raw`$$ \mathbf{X}_{\text{hub}} = \frac{1}{3}[\mathbf{X}^{(t)} + \mathbf{X}^{(a)} + \mathbf{X}^{(v)}] $$`);
+    expect(normalizeMarkdownMath(source)).toHaveLength(source.length);
   });
 
   it("does not rewrite LaTeX examples inside Markdown code", () => {
     const source = "Use \\(x\\) but keep `\\(inline\\)`.\n\n```latex\n\\[block_example\\]\n```";
 
     const normalized = normalizeMarkdownMath(source);
-    expect(normalized).toContain('Use $x$ but keep `\\(inline\\)`.');
+    expect(normalized).toContain('Use $ x $ but keep `\\(inline\\)`.');
     expect(normalized).toContain(String.raw`\[block_example\]`);
   });
 

@@ -178,6 +178,10 @@ class RpcServer:
             return self.library(params["root"]).list_translations(params["paperId"])
         if method == "translation.save":
             return self.library(params["root"]).save_translation(params)
+        if method == "translation.delete":
+            return {"deleted": self.library(params["root"]).delete_translation(
+                params["paperId"], params["translationId"]
+            )}
         if method == "reader.annotation_list":
             return self.library(params["root"]).list_reader_annotations(params["paperId"])
         if method == "reader.annotation_save":
@@ -190,10 +194,20 @@ class RpcServer:
             return self.library(params["root"]).list_reader_analyses(params["paperId"])
         if method == "reader.analysis_save":
             return self.library(params["root"]).save_reader_analysis(params)
+        if method == "reader.analysis_delete":
+            return {"deleted": self.library(params["root"]).delete_reader_analysis(
+                params["paperId"], params["analysisId"]
+            )}
         if method == "reader.chat_get":
             return self.library(params["root"]).get_reader_conversation(params["paperId"])
         if method == "reader.chat_save":
             return self.library(params["root"]).save_reader_chat_turn(params)
+        if method == "reader.chat_turn_update":
+            return self.library(params["root"]).update_reader_chat_turn(params)
+        if method == "reader.chat_turn_delete":
+            return {"deleted": self.library(params["root"]).delete_reader_chat_turn(
+                params["paperId"], params["turnId"]
+            )}
         if method == "reader.chat_clear":
             return {
                 "cleared": self.library(params["root"]).clear_reader_conversation(

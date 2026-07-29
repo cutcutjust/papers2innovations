@@ -8,12 +8,15 @@ export interface StructuredTranslation {
 
 const PROTECTED_MARKDOWN = /(!\[[^\]]*\]\([^)]*\)|\$\$[\s\S]*?\$\$|\$[^$\n]+\$|\\\[[\s\S]*?\\\]|`[^`]+`|\[[^\]]+\]\([^)]*\))/g;
 
-export function splitTranslationSegments(source: string): TranslationSegment[] {
-  const protectedRanges: Array<[number, number]> = [];
-  for (const match of source.matchAll(PROTECTED_MARKDOWN)) {
+export function protectedMarkdownRanges(source: string): Array<[number, number]> {
+  return [...source.matchAll(PROTECTED_MARKDOWN)].map((match) => {
     const start = match.index ?? 0;
-    protectedRanges.push([start, start + match[0].length]);
-  }
+    return [start, start + match[0].length];
+  });
+}
+
+export function splitTranslationSegments(source: string): TranslationSegment[] {
+  const protectedRanges = protectedMarkdownRanges(source);
   const insideProtected = (index: number) => protectedRanges.some(([start, end]) => index >= start && index < end);
   const boundaries = [0];
   for (let index = 0; index < source.length; index += 1) {
@@ -27,16 +30,24 @@ export function splitTranslationSegments(source: string): TranslationSegment[] {
     }
   }
   if (boundaries.at(-1) !== source.length) boundaries.push(source.length);
-  return boundaries.slice(0, -1).map((start, index) => {
+  const rawSegments = boundaries.slice(0, -1).flatMap((start, index) => {
     const end = boundaries[index + 1];
-    return {
-      id: `sentence-${index + 1}`,
-      sourceStart: start,
-      sourceEnd: end,
-      sourceText: source.slice(start, end),
-      translatedText: "",
-    };
-  }).filter((segment) => segment.sourceText.trim());
+    const cuts = [start, end, ...protectedRanges.flatMap(([protectedStart, protectedEnd]) => (
+      protectedEnd <= start || protectedStart >= end ? [] : [Math.max(start, protectedStart), Math.min(end, protectedEnd)]
+    ))].sort((left, right) => left - right);
+    return cuts.slice(0, -1).flatMap((partStart, partIndex) => {
+      const partEnd = cuts[partIndex + 1];
+      const protectedPart = protectedRanges.some(([protectedStart, protectedEnd]) => partStart >= protectedStart && partEnd <= protectedEnd);
+      return protectedPart ? [] : [{ sourceStart: partStart, sourceEnd: partEnd }];
+    });
+  }).filter(({ sourceStart, sourceEnd }) => source.slice(sourceStart, sourceEnd).trim());
+  return rawSegments.map(({ sourceStart, sourceEnd }, index) => ({
+    id: `sentence-${index + 1}`,
+    sourceStart,
+    sourceEnd,
+    sourceText: source.slice(sourceStart, sourceEnd),
+    translatedText: "",
+  }));
 }
 
 export function structuredTranslationPrompt(source: string): string {
@@ -44,9 +55,9 @@ export function structuredTranslationPrompt(source: string): string {
   return [
     "请按句翻译下面的学术文本。公式、引用、数字、Markdown 链接和图片标记必须原样保留。",
     "只返回 JSON，不要使用 Markdown 代码围栏。格式：",
-    '{"segments":[{"id":"sentence-1","translatedText":"..."}],"terms":[{"text":"...","translation":"...","explanation":"结合本文语境的简短说明","kind":"phrase|term","segmentId":"sentence-1"}]}',
-    "segments 必须逐一返回且 id 不得改变；terms 只收录重要固定搭配和专业术语。",
-    JSON.stringify({ segments: segments.map(({ id, sourceText }) => ({ id, sourceText })) }),
+    '{"segments":[{"id":"sentence-1","translatedText":"..."}],"terms":[{"text":"...","translation":"...","sourceStart":0,"sourceEnd":8,"literalMeaning":"...","contextMeaning":"...","explanation":"...","kind":"phrase|term","segmentId":"sentence-1"}]}',
+    "segments 必须逐一返回且 id 不得改变；terms 只收录重要固定搭配和专业术语，sourceStart/sourceEnd 使用给定原文的绝对字符偏移。",
+    JSON.stringify({ segments: segments.map(({ id, sourceStart, sourceEnd, sourceText }) => ({ id, sourceStart, sourceEnd, sourceText })) }),
   ].join("\n\n");
 }
 
@@ -60,13 +71,30 @@ export function parseStructuredTranslation(source: string, response: string): St
     const parsed = JSON.parse(stripFence(response)) as { segments?: Array<{ id?: string; translatedText?: string }>; terms?: TranslationTerm[] };
     const values = new Map((parsed.segments ?? []).map((segment) => [segment.id, String(segment.translatedText ?? "").trim()]));
     const segments = sourceSegments.map((segment) => ({ ...segment, translatedText: values.get(segment.id) || segment.sourceText }));
-    const terms = (parsed.terms ?? []).filter((term) => term && term.text && term.translation).map((term) => ({
-      text: String(term.text),
-      translation: String(term.translation),
-      explanation: String(term.explanation ?? ""),
-      kind: term.kind === "phrase" ? "phrase" as const : "term" as const,
-      segmentId: term.segmentId ? String(term.segmentId) : undefined,
-    }));
+    const terms = (parsed.terms ?? []).filter((term) => term && term.text && term.translation).map((term) => {
+      const text = String(term.text);
+      const segment = sourceSegments.find((candidate) => candidate.id === term.segmentId);
+      const located = segment ? segment.sourceText.indexOf(text) : -1;
+      const proposedStart = Number(term.sourceStart);
+      const sourceStart = Number.isInteger(proposedStart) && proposedStart >= 0 && source.slice(proposedStart, proposedStart + text.length) === text
+        ? proposedStart
+        : located >= 0 && segment ? segment.sourceStart + located : undefined;
+      const proposedEnd = Number(term.sourceEnd);
+      const sourceEnd = sourceStart === undefined ? undefined : (
+        Number.isInteger(proposedEnd) && proposedEnd >= sourceStart && proposedEnd <= source.length ? proposedEnd : sourceStart + text.length
+      );
+      return {
+        text,
+        translation: String(term.translation),
+        explanation: String(term.explanation ?? ""),
+        kind: term.kind === "phrase" ? "phrase" as const : "term" as const,
+        segmentId: term.segmentId ? String(term.segmentId) : undefined,
+        sourceStart,
+        sourceEnd,
+        literalMeaning: String(term.literalMeaning ?? term.translation ?? ""),
+        contextMeaning: String(term.contextMeaning ?? term.explanation ?? ""),
+      };
+    });
     return { translatedText: segments.map((segment) => segment.translatedText).join(""), segments, terms };
   } catch {
     return {

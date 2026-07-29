@@ -1,0 +1,157 @@
+import type { ReaderAnnotation, TranslationTerm } from "@p2i/contracts";
+
+export interface ReaderTranslationRange {
+  recordId: string;
+  segmentId: string;
+  sourceStart: number;
+  sourceEnd: number;
+  sourceText: string;
+  translatedText: string;
+  terms: TranslationTerm[];
+}
+
+interface AstPosition {
+  start?: { offset?: number };
+  end?: { offset?: number };
+}
+
+interface AstNode {
+  type: string;
+  value?: string;
+  children?: AstNode[];
+  position?: AstPosition;
+  data?: Record<string, unknown>;
+}
+
+export interface ReaderAnnotationPluginOptions {
+  source: string;
+  view: "original" | "translated";
+  translations: ReaderTranslationRange[];
+  annotations: ReaderAnnotation[];
+}
+
+const ATOMIC_NODE_TYPES = new Set(["code", "inlineCode", "math", "inlineMath", "image", "imageReference", "link", "linkReference"]);
+
+const overlaps = (start: number, end: number, rangeStart: number, rangeEnd: number) => start < rangeEnd && end > rangeStart;
+
+function dataList(values: string[]): string {
+  return [...new Set(values.filter(Boolean))].join(",");
+}
+
+export function createReaderAnnotationPlugin(options: ReaderAnnotationPluginOptions) {
+  return () => (tree: AstNode) => {
+    const walk = (node: AstNode) => {
+      if (!node.children || ATOMIC_NODE_TYPES.has(node.type)) return;
+      const nextChildren: AstNode[] = [];
+      for (const child of node.children) {
+        const start = child.position?.start?.offset;
+        const end = child.position?.end?.offset;
+        if (child.type !== "text" || start === undefined || end === undefined || end <= start) {
+          walk(child);
+          nextChildren.push(child);
+          continue;
+        }
+        const raw = options.source.slice(start, end);
+        if (raw.length !== child.value?.length) {
+          nextChildren.push({
+            type: "emphasis",
+            children: [child],
+            data: { hName: "span", hProperties: { "data-source-start": start, "data-source-end": end, "data-source-exact": "false" } },
+          });
+          continue;
+        }
+        const relevantTranslations = options.translations.filter((range) => overlaps(start, end, range.sourceStart, range.sourceEnd));
+        const relevantAnnotations = options.annotations.filter((annotation) => overlaps(start, end, annotation.sourceStart, annotation.sourceEnd));
+        const boundaries = new Set([start, end]);
+        for (const range of relevantTranslations) {
+          boundaries.add(Math.max(start, range.sourceStart));
+          boundaries.add(Math.min(end, range.sourceEnd));
+        }
+        for (const annotation of relevantAnnotations) {
+          const insideTranslation = options.view === "translated" && relevantTranslations.some((range) => (
+            annotation.sourceStart > range.sourceStart && annotation.sourceStart < range.sourceEnd
+          ));
+          if (!insideTranslation) boundaries.add(Math.max(start, annotation.sourceStart));
+          const endInsideTranslation = options.view === "translated" && relevantTranslations.some((range) => (
+            annotation.sourceEnd > range.sourceStart && annotation.sourceEnd < range.sourceEnd
+          ));
+          if (!endInsideTranslation) boundaries.add(Math.min(end, annotation.sourceEnd));
+        }
+        const sorted = [...boundaries].sort((left, right) => left - right);
+        sorted.slice(0, -1).forEach((runStart, index) => {
+          const runEnd = sorted[index + 1];
+          if (runEnd <= runStart) return;
+          const translation = relevantTranslations.find((range) => range.sourceStart === runStart && range.sourceEnd === runEnd);
+          const translationMarker = translation ?? relevantTranslations.find((range) => overlaps(runStart, runEnd, range.sourceStart, range.sourceEnd));
+          const chatAnnotations = relevantAnnotations.filter((annotation) => annotation.annotationType === "chat" && overlaps(runStart, runEnd, annotation.sourceStart, annotation.sourceEnd));
+          const translationAnnotations = relevantAnnotations.filter((annotation) => annotation.annotationType === "translation" && overlaps(runStart, runEnd, annotation.sourceStart, annotation.sourceEnd));
+          const translated = options.view === "translated" && Boolean(translation?.translatedText);
+          const classes = [
+            "reader-annotated-run",
+            translated ? "translated-replacement" : "",
+            translationMarker || translationAnnotations.length ? "has-translation-marker" : "",
+            chatAnnotations.length ? "has-chat-marker" : "",
+          ].filter(Boolean).join(" ");
+          nextChildren.push({
+            type: "emphasis",
+            children: [{ type: "text", value: translated ? translation!.translatedText : options.source.slice(runStart, runEnd) }],
+            data: {
+              hName: "span",
+              hProperties: {
+                className: classes,
+                "data-source-start": runStart,
+                "data-source-end": runEnd,
+                "data-source-exact": translated ? "false" : "true",
+                "data-translation-id": translationMarker?.recordId ?? translationAnnotations[0]?.relatedId ?? "",
+                "data-translation-segment-id": translationMarker?.segmentId ?? "",
+                "data-chat-annotation-ids": dataList(chatAnnotations.map((annotation) => annotation.id)),
+              },
+            },
+          });
+        });
+      }
+      node.children = nextChildren;
+    };
+    walk(tree);
+  };
+}
+
+function sourceElement(node: Node | null): HTMLElement | null {
+  if (!node) return null;
+  const element = node.nodeType === Node.ELEMENT_NODE ? node as HTMLElement : node.parentElement;
+  return element?.closest<HTMLElement>("[data-source-start][data-source-end]") ?? null;
+}
+
+function textOffsetWithin(element: HTMLElement, container: Node, offset: number): number {
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  try {
+    range.setEnd(container, offset);
+    return range.toString().length;
+  } catch {
+    return 0;
+  }
+}
+
+export function sourceRangeFromDomRange(range: Range, source: string): { start: number; end: number; text: string } | undefined {
+  const startElement = sourceElement(range.startContainer);
+  const endElement = sourceElement(range.endContainer);
+  if (!startElement || !endElement) return undefined;
+  const startBase = Number(startElement.dataset.sourceStart);
+  const startLimit = Number(startElement.dataset.sourceEnd);
+  const endBase = Number(endElement.dataset.sourceStart);
+  const endLimit = Number(endElement.dataset.sourceEnd);
+  if (![startBase, startLimit, endBase, endLimit].every(Number.isFinite)) return undefined;
+  const start = startElement.dataset.sourceExact === "true"
+    ? Math.min(startLimit, startBase + textOffsetWithin(startElement, range.startContainer, range.startOffset))
+    : startBase;
+  const end = endElement.dataset.sourceExact === "true"
+    ? Math.min(endLimit, endBase + textOffsetWithin(endElement, range.endContainer, range.endOffset))
+    : endLimit;
+  let normalizedStart = Math.min(start, end);
+  let normalizedEnd = Math.max(start, end);
+  while (normalizedStart < normalizedEnd && /\s/.test(source[normalizedStart])) normalizedStart += 1;
+  while (normalizedEnd > normalizedStart && /\s/.test(source[normalizedEnd - 1])) normalizedEnd -= 1;
+  if (normalizedEnd <= normalizedStart) return undefined;
+  return { start: normalizedStart, end: normalizedEnd, text: source.slice(normalizedStart, normalizedEnd) };
+}

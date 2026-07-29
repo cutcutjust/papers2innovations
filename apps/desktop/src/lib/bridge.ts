@@ -201,31 +201,54 @@ export async function buildCitationGraph(root: string, paperId: string, force = 
   return rpc<CitationGraphResult>("graph.build", { root, paperId, maxDepth: 2, force });
 }
 
+let demoTranslations: TranslationRecord[] = [];
+let demoReaderAnnotations: ReaderAnnotation[] = [];
+
 export async function listTranslations(root: string, paperId: string): Promise<TranslationRecord[]> {
-  if (!nativeRuntime) return [];
+  if (!nativeRuntime) return demoTranslations.filter((record) => record.paperId === paperId);
   return rpc<TranslationRecord[]>("translation.list", { root, paperId });
 }
 
 export async function saveTranslation(root: string, input: Omit<TranslationRecord, "id" | "sourceHash" | "revision" | "createdAt" | "updatedAt" | "sourceStart" | "sourceEnd" | "segments" | "terms"> & Partial<Pick<TranslationRecord, "sourceStart" | "sourceEnd" | "segments" | "terms">>): Promise<TranslationRecord> {
   if (!nativeRuntime) {
     const now = new Date().toISOString();
-    return { ...input, sourceStart: input.sourceStart ?? 0, sourceEnd: input.sourceEnd ?? input.sourceText.length, segments: input.segments ?? [], terms: input.terms ?? [], id: crypto.randomUUID(), sourceHash: "demo-source-hash", revision: 1, createdAt: now, updatedAt: now };
+    const previous = demoTranslations.filter((record) => record.paperId === input.paperId && record.blockId === input.blockId && record.sourceStart === (input.sourceStart ?? 0) && record.sourceEnd === (input.sourceEnd ?? input.sourceText.length));
+    const record = { ...input, sourceStart: input.sourceStart ?? 0, sourceEnd: input.sourceEnd ?? input.sourceText.length, segments: input.segments ?? [], terms: input.terms ?? [], id: crypto.randomUUID(), sourceHash: "demo-source-hash", revision: Math.max(0, ...previous.map((item) => item.revision)) + 1, createdAt: now, updatedAt: now } satisfies TranslationRecord;
+    demoTranslations = [...demoTranslations.filter((item) => !previous.some((candidate) => candidate.id === item.id)), record];
+    demoReaderAnnotations = [...demoReaderAnnotations.filter((annotation) => !(annotation.targetType === "translation" && previous.some((candidate) => candidate.id === annotation.relatedId))), { id: crypto.randomUUID(), paperId: record.paperId, sectionId: record.sectionId, blockId: record.blockId, sourceHash: record.sourceHash, sourceStart: record.sourceStart, sourceEnd: record.sourceEnd, annotationType: "translation", targetType: "translation", relatedId: record.id, selectedText: record.sourceText.slice(record.sourceStart, record.sourceEnd), anchorHash: "demo-anchor-hash", createdAt: now, updatedAt: now }];
+    return record;
   }
   return rpc<TranslationRecord>("translation.save", { root, ...input });
 }
 
+export async function deleteTranslation(root: string, paperId: string, translationId: string): Promise<void> {
+  if (!nativeRuntime) {
+    demoTranslations = demoTranslations.filter((record) => record.id !== translationId);
+    demoReaderAnnotations = demoReaderAnnotations.filter((annotation) => annotation.relatedId !== translationId);
+    return;
+  }
+  await rpc("translation.delete", { root, paperId, translationId });
+}
+
 export async function listReaderAnnotations(root: string, paperId: string): Promise<ReaderAnnotation[]> {
-  if (!nativeRuntime) return [];
+  if (!nativeRuntime) return demoReaderAnnotations.filter((annotation) => annotation.paperId === paperId);
   return rpc<ReaderAnnotation[]>("reader.annotation_list", { root, paperId });
 }
 
-export async function saveReaderAnnotation(root: string, input: Omit<ReaderAnnotation, "id" | "sourceHash" | "createdAt" | "updatedAt">): Promise<ReaderAnnotation> {
-  if (!nativeRuntime) return { ...input, id: crypto.randomUUID(), sourceHash: "demo-source-hash", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+export async function saveReaderAnnotation(root: string, input: Omit<ReaderAnnotation, "id" | "sourceHash" | "createdAt" | "updatedAt" | "targetType" | "selectedText" | "anchorHash"> & Partial<Pick<ReaderAnnotation, "targetType" | "selectedText">>): Promise<ReaderAnnotation> {
+  if (!nativeRuntime) {
+    const record = { ...input, targetType: input.targetType ?? (input.annotationType === "translation" ? "translation" : "conversation"), selectedText: input.selectedText ?? "", anchorHash: "demo-anchor-hash", id: crypto.randomUUID(), sourceHash: "demo-source-hash", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } satisfies ReaderAnnotation;
+    demoReaderAnnotations = [...demoReaderAnnotations, record];
+    return record;
+  }
   return rpc<ReaderAnnotation>("reader.annotation_save", { root, ...input });
 }
 
 export async function deleteReaderAnnotation(root: string, paperId: string, annotationId: string): Promise<void> {
-  if (!nativeRuntime) return;
+  if (!nativeRuntime) {
+    demoReaderAnnotations = demoReaderAnnotations.filter((annotation) => annotation.id !== annotationId);
+    return;
+  }
   await rpc("reader.annotation_delete", { root, paperId, annotationId });
 }
 
@@ -250,6 +273,9 @@ export async function saveReaderAnalysis(root: string, input: {
   inputTokens?: number;
   outputTokens?: number;
   durationMs?: number;
+  sourceStart?: number;
+  sourceEnd?: number;
+  selectedText?: string;
 }): Promise<ReaderAnalysisRecord> {
   if (!nativeRuntime) {
     const now = new Date().toISOString();
@@ -264,9 +290,24 @@ export async function saveReaderAnalysis(root: string, input: {
       updatedAt: now,
     };
     demoReaderAnalyses = [...demoReaderAnalyses.filter((item) => !(item.paperId === record.paperId && item.blockId === record.blockId && item.analysisType === record.analysisType)), record];
+    demoReaderAnnotations = [...demoReaderAnnotations.filter((annotation) => !(annotation.targetType === "analysis" && previous.some((item) => item.id === annotation.relatedId))), {
+      id: crypto.randomUUID(), paperId: record.paperId, sectionId: record.sectionId, blockId: record.blockId,
+      sourceHash: record.sourceHash, sourceStart: input.sourceStart ?? 0, sourceEnd: input.sourceEnd ?? input.sourceText.length,
+      annotationType: "chat", targetType: "analysis", relatedId: record.id, selectedText: input.selectedText ?? input.sourceText,
+      anchorHash: "demo-anchor-hash", createdAt: now, updatedAt: now,
+    }];
     return record;
   }
   return rpc<ReaderAnalysisRecord>("reader.analysis_save", { root, ...input });
+}
+
+export async function deleteReaderAnalysis(root: string, paperId: string, analysisId: string): Promise<void> {
+  if (!nativeRuntime) {
+    demoReaderAnalyses = demoReaderAnalyses.filter((record) => record.id !== analysisId);
+    demoReaderAnnotations = demoReaderAnnotations.filter((annotation) => annotation.relatedId !== analysisId);
+    return;
+  }
+  await rpc("reader.analysis_delete", { root, paperId, analysisId });
 }
 
 export async function getReaderConversation(root: string, paperId: string): Promise<ReaderConversation> {
@@ -295,8 +336,12 @@ export async function saveReaderChatTurn(root: string, input: {
     const turn: ReaderChatTurn = {
       id: existing?.id ?? crypto.randomUUID(),
       turnIndex: existing?.turnIndex ?? existingTurns.length + 1,
-      userMessage: existing?.userMessage ?? input.userMessage,
-      contextSnapshot: existing?.contextSnapshot ?? input.contextSnapshot,
+      userMessage: input.userMessage,
+      contextSnapshot: input.contextSnapshot,
+      revisions: [...(existing?.revisions ?? []), {
+        id: crypto.randomUUID(), turnId: existing?.id ?? "demo-pending", userMessage: input.userMessage,
+        contextSnapshot: input.contextSnapshot, revision: (existing?.revisions.length ?? 0) + 1, createdAt: now,
+      }],
       createdAt: existing?.createdAt ?? now,
       response: {
         id: crypto.randomUUID(),
@@ -316,6 +361,22 @@ export async function saveReaderChatTurn(root: string, input: {
     return turn;
   }
   return rpc<ReaderChatTurn>("reader.chat_save", { root, ...input });
+}
+
+export async function updateReaderChatTurn(root: string, input: Parameters<typeof saveReaderChatTurn>[1] & { turnId: string }): Promise<ReaderChatTurn> {
+  if (!nativeRuntime) return saveReaderChatTurn(root, input);
+  return rpc<ReaderChatTurn>("reader.chat_turn_update", { root, ...input });
+}
+
+export async function deleteReaderChatTurn(root: string, paperId: string, turnId: string): Promise<void> {
+  if (!nativeRuntime) {
+    if (demoReaderConversation?.paperId === paperId) {
+      demoReaderConversation = { ...demoReaderConversation, turns: demoReaderConversation.turns.filter((turn) => turn.id !== turnId) };
+    }
+    demoReaderAnnotations = demoReaderAnnotations.filter((annotation) => annotation.relatedId !== turnId);
+    return;
+  }
+  await rpc("reader.chat_turn_delete", { root, paperId, turnId });
 }
 
 export async function clearReaderConversation(root: string, paperId: string): Promise<void> {
@@ -905,7 +966,21 @@ export async function startModelStream(input: ModelStreamRequest, onEvent: (even
       onEvent({ requestId: safeInput.requestId, kind: "tool_calls", toolCalls: [{ id: crypto.randomUUID(), name: tool.name, arguments: { query: "evidence" } }], usage: { inputTokens: 0, outputTokens: 0 } });
       return { cancel: async () => undefined, dispose: () => undefined };
     }
-    onEvent({ requestId: safeInput.requestId, kind: "delta", text: `Preview response: ${safeInput.messages.at(-1)?.content ?? ""}` });
+    const lastMessage = safeInput.messages.at(-1)?.content ?? "";
+    let previewText = `Preview response: ${lastMessage}`;
+    const structuredStart = lastMessage.lastIndexOf('{"segments":');
+    if (structuredStart >= 0) {
+      try {
+        const structured = JSON.parse(lastMessage.slice(structuredStart)) as { segments?: Array<{ id?: string; sourceText?: string }> };
+        previewText = JSON.stringify({
+          segments: (structured.segments ?? []).map((segment, index) => ({ id: segment.id, translatedText: `结构化译文示例 ${index + 1}：${segment.sourceText ?? ""}` })),
+          terms: [],
+        });
+      } catch {
+        // Keep the generic preview response when the last message is not a translation payload.
+      }
+    }
+    onEvent({ requestId: safeInput.requestId, kind: "delta", text: previewText });
     onEvent({ requestId: safeInput.requestId, kind: "done", usage: { inputTokens: 0, outputTokens: 0 } });
     return { cancel: async () => undefined, dispose: () => undefined };
   }

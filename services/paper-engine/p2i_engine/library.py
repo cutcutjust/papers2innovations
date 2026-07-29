@@ -1680,9 +1680,11 @@ class Library:
         with self.db.connect() as connection:
             rows = connection.execute(
                 "SELECT t.* FROM translations t "
-                "JOIN (SELECT block_id, target_language, MAX(revision) AS revision "
-                "FROM translations WHERE paper_id = ? GROUP BY block_id, target_language) latest "
+                "JOIN (SELECT block_id, target_language, source_start, source_end, "
+                "MAX(revision) AS revision FROM translations WHERE paper_id = ? "
+                "GROUP BY block_id, target_language, source_start, source_end) latest "
                 "ON latest.block_id = t.block_id AND latest.target_language = t.target_language "
+                "AND latest.source_start = t.source_start AND latest.source_end = t.source_end "
                 "AND latest.revision = t.revision WHERE t.paper_id = ? ORDER BY t.updated_at",
                 (paper_id, paper_id),
             ).fetchall()
@@ -1710,17 +1712,41 @@ class Library:
                 "WHERE paper_id = ? AND block_id = ? AND target_language = ?",
                 (paper_id, payload["blockId"], payload["targetLanguage"]),
             ).fetchone()[0]
+            source_text = str(payload["sourceText"])
+            source_start = max(0, int(payload.get("sourceStart", 0)))
+            source_end = int(payload.get("sourceEnd", -1))
+            if source_end < 0:
+                source_end = len(source_text)
+            if source_end < source_start or source_end > len(source_text):
+                raise ValueError("Translation source range is invalid")
+            selected_text = source_text[source_start:source_end]
+            segments = payload.get("segments", [])
+            if not isinstance(segments, list):
+                raise ValueError("Translation segments must be a list")
+            previous_end = source_start
+            for segment in segments:
+                if not isinstance(segment, dict):
+                    raise ValueError("Translation segment must be an object")
+                segment_start = int(segment.get("sourceStart", -1))
+                segment_end = int(segment.get("sourceEnd", -1))
+                if segment_start < source_start or segment_end > source_end or segment_end < segment_start:
+                    raise ValueError("Translation segment range is outside its source selection")
+                if segment_start < previous_end:
+                    raise ValueError("Translation segments must not overlap")
+                if str(segment.get("sourceText", "")) != source_text[segment_start:segment_end]:
+                    raise ValueError("Translation segment no longer matches the source text")
+                previous_end = segment_end
             record = {
                 "id": str(uuid.uuid4()),
                 "paper_id": paper_id,
                 "section_id": str(payload["sectionId"]),
                 "block_id": str(payload["blockId"]),
                 "source_hash": paper["canonical_sha256"],
-                "source_text": str(payload["sourceText"]),
+                "source_text": source_text,
                 "translated_text": str(payload["translatedText"]),
-                "source_start": max(0, int(payload.get("sourceStart", 0))),
-                "source_end": int(payload.get("sourceEnd", -1)),
-                "segments_json": json.dumps(payload.get("segments", []), ensure_ascii=False),
+                "source_start": source_start,
+                "source_end": source_end,
+                "segments_json": json.dumps(segments, ensure_ascii=False),
                 "terms_json": json.dumps(payload.get("terms", []), ensure_ascii=False),
                 "target_language": str(payload["targetLanguage"]),
                 "model_id": str(payload["modelId"]),
@@ -1738,7 +1764,60 @@ class Library:
                 ":target_language, :model_id, :prompt_version, :revision, :created_at, :updated_at)",
                 record,
             )
+            connection.execute(
+                "DELETE FROM reader_annotations WHERE paper_id = ? AND target_type = 'translation' "
+                "AND related_id IN (SELECT id FROM translations WHERE paper_id = ? "
+                "AND block_id = ? AND target_language = ? AND source_start = ? AND source_end = ? "
+                "AND id <> ?)",
+                (paper_id, paper_id, record["block_id"], record["target_language"],
+                 source_start, source_end, record["id"]),
+            )
+            self._upsert_reader_annotation(
+                connection,
+                paper_id=paper_id,
+                section_id=record["section_id"],
+                block_id=record["block_id"],
+                source_hash=record["source_hash"],
+                source_start=source_start,
+                source_end=source_end,
+                annotation_type="translation",
+                target_type="translation",
+                related_id=record["id"],
+                selected_text=selected_text,
+                now=now,
+            )
         return self._translation_contract(record)
+
+    def delete_translation(self, paper_id: str, translation_id: str) -> bool:
+        self.initialize()
+        with self.db.connect() as connection:
+            record = connection.execute(
+                "SELECT * FROM translations WHERE id = ? AND paper_id = ?",
+                (translation_id, paper_id),
+            ).fetchone()
+            if not record:
+                return False
+            rows = connection.execute(
+                "SELECT id FROM translations WHERE paper_id = ? AND block_id = ? "
+                "AND target_language = ? AND source_start = ? AND source_end = ?",
+                (paper_id, record["block_id"], record["target_language"],
+                 record["source_start"], record["source_end"]),
+            ).fetchall()
+            ids = [row["id"] for row in rows]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                connection.execute(
+                    f"DELETE FROM reader_annotations WHERE paper_id = ? "
+                    f"AND target_type = 'translation' AND related_id IN ({placeholders})",
+                    (paper_id, *ids),
+                )
+            cursor = connection.execute(
+                "DELETE FROM translations WHERE paper_id = ? AND block_id = ? "
+                "AND target_language = ? AND source_start = ? AND source_end = ?",
+                (paper_id, record["block_id"], record["target_language"],
+                 record["source_start"], record["source_end"]),
+            )
+        return bool(cursor.rowcount)
 
     def list_reader_annotations(self, paper_id: str) -> list[dict[str, Any]]:
         self.initialize()
@@ -1755,12 +1834,18 @@ class Library:
         section_id = str(payload.get("sectionId", "")).strip()
         block_id = str(payload.get("blockId", "")).strip()
         annotation_type = str(payload.get("annotationType", "")).strip()
+        target_type = str(payload.get("targetType", "")).strip() or (
+            "translation" if annotation_type == "translation" else "conversation"
+        )
         source_start = max(0, int(payload.get("sourceStart", 0)))
         source_end = int(payload.get("sourceEnd", -1))
         if not paper_id or not section_id or not block_id or annotation_type not in {"translation", "chat"}:
             raise ValueError("paperId, sectionId, blockId and a valid annotationType are required")
+        if target_type not in {"translation", "chat_turn", "analysis", "conversation"}:
+            raise ValueError("Reader annotation targetType is invalid")
         if source_end < source_start:
             raise ValueError("Reader annotation range is invalid")
+        selected_text = str(payload.get("selectedText", ""))
         now = utc_now()
         with self.db.connect() as connection:
             paper = connection.execute(
@@ -1768,35 +1853,73 @@ class Library:
             ).fetchone()
             if not paper:
                 raise KeyError(f"Unknown paper: {paper_id}")
-            record = {
-                "id": str(payload.get("id") or uuid.uuid4()),
-                "paper_id": paper_id,
-                "section_id": section_id,
-                "block_id": block_id,
-                "source_hash": paper["canonical_sha256"],
-                "source_start": source_start,
-                "source_end": source_end,
-                "annotation_type": annotation_type,
-                "related_id": str(payload.get("relatedId", "")).strip() or None,
-                "created_at": now,
-                "updated_at": now,
-            }
-            connection.execute(
-                "INSERT INTO reader_annotations(id, paper_id, section_id, block_id, source_hash, "
-                "source_start, source_end, annotation_type, related_id, created_at, updated_at) "
-                "VALUES (:id, :paper_id, :section_id, :block_id, :source_hash, :source_start, "
-                ":source_end, :annotation_type, :related_id, :created_at, :updated_at) "
-                "ON CONFLICT(paper_id, block_id, source_start, source_end, annotation_type, related_id) "
-                "DO UPDATE SET updated_at = excluded.updated_at",
-                record,
+            record = self._upsert_reader_annotation(
+                connection,
+                paper_id=paper_id,
+                section_id=section_id,
+                block_id=block_id,
+                source_hash=paper["canonical_sha256"],
+                source_start=source_start,
+                source_end=source_end,
+                annotation_type=annotation_type,
+                target_type=target_type,
+                related_id=str(payload.get("relatedId", "")).strip() or None,
+                selected_text=selected_text,
+                now=now,
+                annotation_id=str(payload.get("id") or uuid.uuid4()),
             )
-            row = connection.execute(
-                "SELECT * FROM reader_annotations WHERE paper_id = ? AND block_id = ? "
-                "AND source_start = ? AND source_end = ? AND annotation_type = ? "
-                "AND related_id IS ?",
-                (paper_id, block_id, source_start, source_end, annotation_type, record["related_id"]),
-            ).fetchone()
-        return self._reader_annotation_contract(row)
+        return self._reader_annotation_contract(record)
+
+    @staticmethod
+    def _upsert_reader_annotation(
+        connection: sqlite3.Connection,
+        *,
+        paper_id: str,
+        section_id: str,
+        block_id: str,
+        source_hash: str,
+        source_start: int,
+        source_end: int,
+        annotation_type: str,
+        target_type: str,
+        related_id: str | None,
+        selected_text: str,
+        now: str,
+        annotation_id: str | None = None,
+    ) -> Any:
+        record = {
+            "id": annotation_id or str(uuid.uuid4()),
+            "paper_id": paper_id,
+            "section_id": section_id,
+            "block_id": block_id,
+            "source_hash": source_hash,
+            "source_start": source_start,
+            "source_end": source_end,
+            "annotation_type": annotation_type,
+            "related_id": related_id,
+            "created_at": now,
+            "updated_at": now,
+            "target_type": target_type,
+            "selected_text": selected_text,
+            "anchor_hash": hashlib.sha256(selected_text.encode("utf-8")).hexdigest(),
+        }
+        connection.execute(
+            "INSERT INTO reader_annotations(id, paper_id, section_id, block_id, source_hash, "
+            "source_start, source_end, annotation_type, related_id, created_at, updated_at, "
+            "target_type, selected_text, anchor_hash) VALUES (:id, :paper_id, :section_id, "
+            ":block_id, :source_hash, :source_start, :source_end, :annotation_type, :related_id, "
+            ":created_at, :updated_at, :target_type, :selected_text, :anchor_hash) "
+            "ON CONFLICT(paper_id, block_id, source_start, source_end, annotation_type, related_id) "
+            "DO UPDATE SET updated_at = excluded.updated_at, target_type = excluded.target_type, "
+            "selected_text = excluded.selected_text, anchor_hash = excluded.anchor_hash",
+            record,
+        )
+        return connection.execute(
+            "SELECT * FROM reader_annotations WHERE paper_id = ? AND block_id = ? "
+            "AND source_start = ? AND source_end = ? AND annotation_type = ? "
+            "AND related_id IS ?",
+            (paper_id, block_id, source_start, source_end, annotation_type, related_id),
+        ).fetchone()
 
     def delete_reader_annotation(self, annotation_id: str, paper_id: str) -> bool:
         self.initialize()
@@ -1882,7 +2005,61 @@ class Library:
                 ":revision, :input_tokens, :output_tokens, :duration_ms, :created_at, :updated_at)",
                 record,
             )
+            connection.execute(
+                "DELETE FROM reader_annotations WHERE paper_id = ? AND target_type = 'analysis' "
+                "AND related_id IN (SELECT id FROM reader_analyses WHERE paper_id = ? "
+                "AND block_id = ? AND analysis_type = ? AND id <> ?)",
+                (paper_id, paper_id, record["block_id"], analysis_type, record["id"]),
+            )
+            source_start = max(0, int(payload.get("sourceStart", 0)))
+            source_end = int(payload.get("sourceEnd", len(record["source_text"])))
+            if source_end < source_start:
+                raise ValueError("Reader analysis source range is invalid")
+            selected_text = str(payload.get("selectedText", "")) or record["source_text"]
+            self._upsert_reader_annotation(
+                connection,
+                paper_id=paper_id,
+                section_id=record["section_id"],
+                block_id=record["block_id"],
+                source_hash=record["source_hash"],
+                source_start=source_start,
+                source_end=source_end,
+                annotation_type="chat",
+                target_type="analysis",
+                related_id=record["id"],
+                selected_text=selected_text,
+                now=now,
+            )
         return self._reader_analysis_contract(record)
+
+    def delete_reader_analysis(self, paper_id: str, analysis_id: str) -> bool:
+        self.initialize()
+        with self.db.connect() as connection:
+            record = connection.execute(
+                "SELECT * FROM reader_analyses WHERE id = ? AND paper_id = ?",
+                (analysis_id, paper_id),
+            ).fetchone()
+            if not record:
+                return False
+            rows = connection.execute(
+                "SELECT id FROM reader_analyses WHERE paper_id = ? AND block_id = ? "
+                "AND analysis_type = ?",
+                (paper_id, record["block_id"], record["analysis_type"]),
+            ).fetchall()
+            ids = [row["id"] for row in rows]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                connection.execute(
+                    f"DELETE FROM reader_annotations WHERE paper_id = ? "
+                    f"AND target_type = 'analysis' AND related_id IN ({placeholders})",
+                    (paper_id, *ids),
+                )
+            cursor = connection.execute(
+                "DELETE FROM reader_analyses WHERE paper_id = ? AND block_id = ? "
+                "AND analysis_type = ?",
+                (paper_id, record["block_id"], record["analysis_type"]),
+            )
+        return bool(cursor.rowcount)
 
     def get_reader_conversation(self, paper_id: str) -> dict[str, Any]:
         self.initialize()
@@ -1908,7 +2085,12 @@ class Library:
                     "ORDER BY revision DESC LIMIT 1",
                     (turn["id"],),
                 ).fetchone()
-                contracts.append(self._reader_chat_turn_contract(turn, response))
+                revisions = connection.execute(
+                    "SELECT * FROM reader_chat_turn_revisions WHERE turn_id = ? "
+                    "ORDER BY revision",
+                    (turn["id"],),
+                ).fetchall()
+                contracts.append(self._reader_chat_turn_contract(turn, response, revisions))
         return {
             "id": conversation["id"],
             "paperId": paper_id,
@@ -1973,6 +2155,26 @@ class Library:
                 ).fetchone()
                 if not turn:
                     raise KeyError(f"Unknown reader chat turn: {turn_id}")
+                if turn["user_message"] != user_message or turn["context_snapshot_json"] != snapshot_json:
+                    question_revision = connection.execute(
+                        "SELECT COALESCE(MAX(revision), 0) + 1 FROM reader_chat_turn_revisions "
+                        "WHERE turn_id = ?",
+                        (turn_id,),
+                    ).fetchone()[0]
+                    connection.execute(
+                        "INSERT INTO reader_chat_turn_revisions(id, turn_id, user_message, "
+                        "context_snapshot_json, revision, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (str(uuid.uuid4()), turn_id, user_message, snapshot_json,
+                         question_revision, now),
+                    )
+                    connection.execute(
+                        "UPDATE reader_chat_turns SET user_message = ?, context_snapshot_json = ? "
+                        "WHERE id = ?",
+                        (user_message, snapshot_json, turn_id),
+                    )
+                    turn = connection.execute(
+                        "SELECT * FROM reader_chat_turns WHERE id = ?", (turn_id,)
+                    ).fetchone()
             else:
                 turn_id = str(uuid.uuid4())
                 turn_index = connection.execute(
@@ -1984,6 +2186,11 @@ class Library:
                     "INSERT INTO reader_chat_turns(id, conversation_id, turn_index, user_message, "
                     "context_snapshot_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                     (turn_id, conversation_id, turn_index, user_message, snapshot_json, now),
+                )
+                connection.execute(
+                    "INSERT INTO reader_chat_turn_revisions(id, turn_id, user_message, "
+                    "context_snapshot_json, revision, created_at) VALUES (?, ?, ?, ?, 1, ?)",
+                    (str(uuid.uuid4()), turn_id, user_message, snapshot_json, now),
                 )
                 turn = connection.execute(
                     "SELECT * FROM reader_chat_turns WHERE id = ?", (turn_id,)
@@ -2020,11 +2227,49 @@ class Library:
                 "UPDATE reader_conversations SET updated_at = ? WHERE id = ?",
                 (now, conversation_id),
             )
-        return self._reader_chat_turn_contract(turn, response)
+        with self.db.connect() as connection:
+            revisions = connection.execute(
+                "SELECT * FROM reader_chat_turn_revisions WHERE turn_id = ? ORDER BY revision",
+                (turn_id,),
+            ).fetchall()
+        return self._reader_chat_turn_contract(turn, response, revisions)
+
+    def update_reader_chat_turn(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not str(payload.get("turnId", "")).strip():
+            raise ValueError("turnId is required when updating a reader chat turn")
+        return self.save_reader_chat_turn(payload)
+
+    def delete_reader_chat_turn(self, paper_id: str, turn_id: str) -> bool:
+        self.initialize()
+        with self.db.connect() as connection:
+            turn = connection.execute(
+                "SELECT t.id, t.conversation_id FROM reader_chat_turns t "
+                "JOIN reader_conversations c ON c.id = t.conversation_id "
+                "WHERE t.id = ? AND c.paper_id = ?",
+                (turn_id, paper_id),
+            ).fetchone()
+            if not turn:
+                return False
+            connection.execute(
+                "DELETE FROM reader_annotations WHERE paper_id = ? "
+                "AND target_type = 'chat_turn' AND related_id = ?",
+                (paper_id, turn_id),
+            )
+            cursor = connection.execute("DELETE FROM reader_chat_turns WHERE id = ?", (turn_id,))
+            connection.execute(
+                "UPDATE reader_conversations SET updated_at = ? WHERE id = ?",
+                (utc_now(), turn["conversation_id"]),
+            )
+        return bool(cursor.rowcount)
 
     def clear_reader_conversation(self, paper_id: str) -> bool:
         self.initialize()
         with self.db.connect() as connection:
+            connection.execute(
+                "DELETE FROM reader_annotations WHERE paper_id = ? "
+                "AND target_type IN ('chat_turn', 'conversation')",
+                (paper_id,),
+            )
             cursor = connection.execute(
                 "DELETE FROM reader_conversations WHERE paper_id = ?", (paper_id,)
             )
@@ -3601,13 +3846,26 @@ class Library:
         }
 
     @staticmethod
-    def _reader_chat_turn_contract(turn: Any, response: Any | None) -> dict[str, Any]:
+    def _reader_chat_turn_contract(
+        turn: Any, response: Any | None, revisions: Iterable[Any] = ()
+    ) -> dict[str, Any]:
         contract = {
             "id": turn["id"],
             "turnIndex": turn["turn_index"],
             "userMessage": turn["user_message"],
             "contextSnapshot": json.loads(turn["context_snapshot_json"]),
             "createdAt": turn["created_at"],
+            "revisions": [
+                {
+                    "id": revision["id"],
+                    "turnId": revision["turn_id"],
+                    "userMessage": revision["user_message"],
+                    "contextSnapshot": json.loads(revision["context_snapshot_json"]),
+                    "revision": revision["revision"],
+                    "createdAt": revision["created_at"],
+                }
+                for revision in revisions
+            ],
         }
         if response:
             contract["response"] = {
@@ -3673,6 +3931,9 @@ class Library:
             "sourceEnd": record["source_end"],
             "annotationType": record["annotation_type"],
             "relatedId": record["related_id"],
+            "targetType": record["target_type"],
+            "selectedText": record["selected_text"],
+            "anchorHash": record["anchor_hash"],
             "createdAt": record["created_at"],
             "updatedAt": record["updated_at"],
         }
