@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { contrastRatio, isDisplayableTranslationTerm, parseStructuredTranslation, projectTranslationSegments, splitTranslationChunks, splitTranslationSegments, translationTermParts } from "./readerTranslation";
+import { contrastRatio, isDisplayableTranslationTerm, parseStructuredTranslation, projectTranslationSegments, projectTranslationSegmentsAcrossBlocks, splitTranslationChunks, splitTranslationSegments, translationTermParts } from "./readerTranslation";
 
 describe("reader translation", () => {
   it("keeps formulas and Markdown images inside sentence anchors", () => {
@@ -95,6 +95,30 @@ describe("reader translation", () => {
     expect(segments).toHaveLength(8);
     expect(projections).toHaveLength(8);
     expect(projections.every((projection) => projection.status === "whitespace-remapped")).toBe(true);
+  });
+
+  it("restores a legacy paragraph after Markdown formatting splits it into two blocks", () => {
+    const first = "Humans typically process and integrate multimodal information from vision, audio, text, and other sources to perceive and identify emotions.";
+    const second = "Existing multimodal models primarily rely on multimodal data fusion, leveraging complementarity between modalities to enhance classification performance.";
+    const remaining = [
+      "However, when leveraging this complementarity, the acoustic and visual streams in video often carry dense, fine-grained content with substantial noise.",
+      "Furthermore, these approaches neglect the differential contributions of each modality to emotion recognition outcomes.",
+      "To address these issues, we propose a Selective Hub Fusion with Multimodal Heterogeneous Mixture of Experts (SH-MHMoE) for multimodal emotion recognition, achieving intermodal complementarity.",
+      "The Selective Hub-Mediated Fusion module imposes path constraints that curb cross-modal propagation of redundant information, thereby mitigating noise.",
+      "A subsequent multimodal heterogeneous MoE enhances the emotion-specific expressiveness of each unimodal representation.",
+      "Experimental results on the publicly available multimodal sentiment analysis datasets CMU-MOSI and CMU-MOSEI demonstrate that the SH-MHMoE model outperforms most existing methods.",
+    ];
+    const original = [first, second, ...remaining].join(" ");
+    const segments = splitTranslationSegments(original).map((segment) => ({ ...segment, translatedText: `译文-${segment.id}` }));
+    const projections = projectTranslationSegmentsAcrossBlocks(original, [
+      { id: "abstract:block-1", text: `${first} ${second}` },
+      { id: "abstract:block-2", text: remaining.join(" ") },
+      { id: "abstract:block-3", text: "**Index Terms** — Cross-modal Fusion" },
+    ], segments);
+    expect(projections).toHaveLength(8);
+    expect(projections.every((projection) => projection.status === "whitespace-remapped")).toBe(true);
+    expect(projections.filter((projection) => projection.blockId === "abstract:block-1")).toHaveLength(2);
+    expect(projections.filter((projection) => projection.blockId === "abstract:block-2")).toHaveLength(6);
   });
 
   it("marks substantively changed or ambiguous anchors as stale", () => {

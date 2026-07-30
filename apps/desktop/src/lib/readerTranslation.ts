@@ -18,6 +18,15 @@ export interface TranslationAnchorProjection {
   status: TranslationAnchorStatus;
 }
 
+export interface TranslationBlockSource {
+  id: string;
+  text: string;
+}
+
+export interface TranslationBlockProjection extends TranslationAnchorProjection {
+  blockId?: string;
+}
+
 export interface TranslationTermPart {
   text: string;
   term?: TranslationTerm;
@@ -217,6 +226,32 @@ export function projectTranslationSegments(recordSource: string, currentSource: 
       }
     }
     return { segmentId: segment.id, sourceStart: 0, sourceEnd: 0, status: "stale" };
+  });
+}
+
+export function projectTranslationSegmentsAcrossBlocks(
+  recordSource: string,
+  blocks: TranslationBlockSource[],
+  segments: TranslationSegment[],
+): TranslationBlockProjection[] {
+  const ranges: Array<{ blockId: string; start: number; end: number }> = [];
+  let currentSource = "";
+  for (const block of blocks) {
+    if (currentSource) currentSource += "\n\n";
+    const start = currentSource.length;
+    currentSource += block.text;
+    ranges.push({ blockId: block.id, start, end: currentSource.length });
+  }
+  return projectTranslationSegments(recordSource, currentSource, segments).map((projection) => {
+    if (projection.status === "stale") return projection;
+    const block = ranges.find((candidate) => projection.sourceStart >= candidate.start && projection.sourceEnd <= candidate.end);
+    if (!block) return { ...projection, sourceStart: 0, sourceEnd: 0, status: "stale" };
+    return {
+      ...projection,
+      blockId: block.blockId,
+      sourceStart: projection.sourceStart - block.start,
+      sourceEnd: projection.sourceEnd - block.start,
+    };
   });
 }
 

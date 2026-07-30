@@ -14,7 +14,7 @@ import { buildReaderSections, resolveMarkdownAssetPath, type ReaderDisplaySectio
 import { MARKDOWN_FORMAT_PROMPT_VERSION, prepareMarkdownForFormatting, restoreFormattedMarkdown, splitMarkdownForFormatting } from "../lib/markdownFormatting";
 import { normalizeMarkdownMath } from "../lib/markdownMath";
 import { CONTEXT_COMPRESSION_PROMPT_VERSION, contextCompressionBudgetError, contextCompressionMessages } from "../lib/contextCompression";
-import { contrastRatio, parseStructuredTranslation, projectTranslationSegments, splitTranslationChunks, structuredTranslationPrompt, translationTermParts } from "../lib/readerTranslation";
+import { contrastRatio, parseStructuredTranslation, projectTranslationSegmentsAcrossBlocks, splitTranslationChunks, structuredTranslationPrompt, translationTermParts, type TranslationBlockProjection } from "../lib/readerTranslation";
 import { createReaderAnnotationPlugin, domRangeFromSourceRange, readerTranslationKey, sentenceRangeAtOffset, sourceOffsetFromDomPoint, sourceRangeFromDomRange, type ReaderTranslationRange } from "../lib/readerAnnotations";
 import { resolvePromptTemplate, selectedPromptId, selectPromptTemplate } from "../lib/promptTemplates";
 import { buildWordLookupMessages, isSingleEnglishWord } from "../lib/wordLookup";
@@ -70,6 +70,10 @@ type AnnotationRail = {
   translationId?: string;
   annotationIds: string[];
   relatedId?: string;
+};
+type ProjectedTranslationRecord = {
+  record: TranslationRecord;
+  projections: TranslationBlockProjection[];
 };
 
 const TRANSLATION_PROMPT_VERSION = "reader-translate-v4";
@@ -136,16 +140,20 @@ function MarkdownBlock({ value, markdownPath, figureAnalysisFor, onToggleFigure 
   >{normalizeMarkdownMath(value)}</ReactMarkdown>;
 }
 
-function BilingualBlock({ block, state, records, annotations, activeTranslationKeys, annotationsVisible, markdownPath, figureAnalysisFor, onToggleFigure, onToggleTranslation, onOpenAnnotation, onOpenTerm, onLeaveTerm, onSentenceContextMenu }: { block: ReaderBlock; state?: TranslationState; records: TranslationRecord[]; annotations: ReaderAnnotation[]; activeTranslationKeys: ReadonlySet<string>; annotationsVisible: boolean; markdownPath?: string; figureAnalysisFor?: (source?: string) => FigureAnalysis | undefined; onToggleFigure?: (source?: string) => void; onToggleTranslation: (key: string) => void; onOpenAnnotation: (kind: "translation" | "chat", relatedId: string | undefined, annotationIds: string[], rect: DOMRect) => void; onOpenTerm: (term: TranslationTerm, sentence: string, language: "source" | "translated", rect: DOMRect, pinned: boolean) => void; onLeaveTerm: () => void; onSentenceContextMenu: (block: ReaderBlock, event: ReactMouseEvent<HTMLElement>) => void }) {
+function BilingualBlock({ block, state, records, annotations, activeTranslationKeys, annotationsVisible, markdownPath, figureAnalysisFor, onToggleFigure, onToggleTranslation, onOpenAnnotation, onOpenTerm, onLeaveTerm, onSentenceContextMenu }: { block: ReaderBlock; state?: TranslationState; records: ProjectedTranslationRecord[]; annotations: ReaderAnnotation[]; activeTranslationKeys: ReadonlySet<string>; annotationsVisible: boolean; markdownPath?: string; figureAnalysisFor?: (source?: string) => FigureAnalysis | undefined; onToggleFigure?: (source?: string) => void; onToggleTranslation: (key: string) => void; onOpenAnnotation: (kind: "translation" | "chat", relatedId: string | undefined, annotationIds: string[], rect: DOMRect) => void; onOpenTerm: (term: TranslationTerm, sentence: string, language: "source" | "translated", rect: DOMRect, pinned: boolean) => void; onLeaveTerm: () => void; onSentenceContextMenu: (block: ReaderBlock, event: ReactMouseEvent<HTMLElement>) => void }) {
   const sourceRef = useRef<HTMLDivElement | null>(null);
   const [rails, setRails] = useState<AnnotationRail[]>([]);
   const translationRanges = useMemo<ReaderTranslationRange[]>(() => {
-    const persisted = records.flatMap((record) => {
-      const projections = projectTranslationSegments(record.sourceText, block.text, record.segments);
+    const persisted = records.flatMap(({ record, projections }) => {
       return record.segments.flatMap((segment) => {
         const projection = projections.find((candidate) => candidate.segmentId === segment.id);
         if (!projection || projection.status === "stale") return [];
-        return [{ recordId: record.id, segmentId: segment.id, sourceStart: projection.sourceStart, sourceEnd: projection.sourceEnd, sourceText: block.text.slice(projection.sourceStart, projection.sourceEnd), translatedText: segment.translatedText, terms: record.terms.filter((term) => !term.segmentId || term.segmentId === segment.id), anchorStatus: projection.status }];
+        const terms = record.terms.filter((term) => !term.segmentId || term.segmentId === segment.id).map((term) => ({
+          ...term,
+          sourceStart: term.sourceStart === undefined ? undefined : projection.sourceStart + Math.max(0, term.sourceStart - segment.sourceStart),
+          sourceEnd: term.sourceEnd === undefined ? undefined : projection.sourceStart + Math.max(0, term.sourceEnd - segment.sourceStart),
+        }));
+        return [{ recordId: record.id, segmentId: segment.id, sourceStart: projection.sourceStart, sourceEnd: projection.sourceEnd, sourceText: block.text.slice(projection.sourceStart, projection.sourceEnd), translatedText: segment.translatedText, terms, anchorStatus: projection.status }];
       });
     });
     const draft = state?.text && state.segments?.length && !state.record ? state.segments.map((segment) => ({ recordId: `draft:${block.id}`, segmentId: segment.id, sourceStart: segment.sourceStart, sourceEnd: segment.sourceEnd, sourceText: segment.sourceText, translatedText: segment.translatedText, terms: state.terms?.filter((term) => !term.segmentId || term.segmentId === segment.id) ?? [], anchorStatus: "exact" as const })) : [];
@@ -359,10 +367,28 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     () => buildReaderSections(documentQuery.data, markdownQuery.data ?? ""),
     [documentQuery.data, markdownQuery.data],
   );
-  const persistedTranslations = useMemo(
-    () => Object.fromEntries((translationQuery.data ?? []).filter((record) => record.sourceStart === 0 && record.sourceEnd >= record.sourceText.length).map((record) => [record.blockId, { status: "saved", text: record.translatedText, segments: record.segments, terms: record.terms, kind: record.promptVersion.startsWith(WORD_LOOKUP_PROMPT_VERSION) ? "word" : "passage", record } satisfies TranslationState])),
-    [translationQuery.data],
-  );
+  const projectedTranslationsByBlock = useMemo(() => {
+    const projected = new Map<string, ProjectedTranslationRecord[]>();
+    for (const record of (translationQuery.data ?? []).filter((candidate) => !candidate.promptVersion.startsWith(WORD_LOOKUP_PROMPT_VERSION))) {
+      const section = sections.find((candidate) => candidate.id === record.sectionId);
+      if (!section) continue;
+      const projections = projectTranslationSegmentsAcrossBlocks(record.sourceText, section.blocks, record.segments);
+      for (const block of section.blocks) {
+        const blockProjections = projections.filter((projection) => projection.status !== "stale" && projection.blockId === block.id);
+        if (!blockProjections.length) continue;
+        projected.set(block.id, [...(projected.get(block.id) ?? []), { record, projections: blockProjections }]);
+      }
+    }
+    return projected;
+  }, [sections, translationQuery.data]);
+  const persistedTranslations = useMemo(() => {
+    const passageEntries = [...projectedTranslationsByBlock].flatMap(([blockId, records]) => {
+      const record = records.find((candidate) => candidate.record.sourceStart === 0 && candidate.record.sourceEnd >= candidate.record.sourceText.length)?.record;
+      return record ? [[blockId, { status: "saved", text: record.translatedText, segments: record.segments, terms: record.terms, kind: "passage", record } satisfies TranslationState]] : [];
+    });
+    const wordEntries = (translationQuery.data ?? []).filter((record) => record.promptVersion.startsWith(WORD_LOOKUP_PROMPT_VERSION)).map((record) => [record.blockId, { status: "saved", text: record.translatedText, segments: record.segments, terms: record.terms, kind: "word", record } satisfies TranslationState]);
+    return Object.fromEntries([...passageEntries, ...wordEntries]);
+  }, [projectedTranslationsByBlock, translationQuery.data]);
   const selectedModel = customModels.find((model) => model.id === agentModel) ?? customModels.find((model) => model.id === defaultTextModelId) ?? customModels[0];
   const selectedProvider = providers.find((provider) => provider.id === selectedModel?.providerId);
   const formattingModel = customModels.find((model) => model.id === markdownFormattingModelId) ?? customModels[0];
@@ -913,7 +939,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     }
     setTranslationBatchBusy(true);
     try {
-      const pendingBlocks = section.blocks.filter((block) => block.text.trim() && !(translationQuery.data ?? []).some((record) => record.blockId === block.id && !record.promptVersion.startsWith(WORD_LOOKUP_PROMPT_VERSION)));
+      const pendingBlocks = section.blocks.filter((block) => block.text.trim() && !(projectedTranslationsByBlock.get(block.id)?.length));
       const batch = { groupKey: `translation-batch:${paper.id}:${section.id}:${Date.now()}`, totalItems: pendingBlocks.length, label: `翻译章节：${section.title}` };
       let succeeded = 0;
       let failed = 0;
@@ -1645,12 +1671,15 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       ? inspectorTranslation.sourceText.slice(inspectorTranslation.sourceStart, inspectorTranslation.sourceEnd)
       : inspectorTranslation.sourceText)
     : "";
-  const inspectorTranslationBlock = inspectorTranslation
-    ? sections.flatMap((section) => section.blocks).find((block) => block.id === inspectorTranslation.blockId)
+  const inspectorTranslationSection = inspectorTranslation
+    ? sections.find((section) => section.id === inspectorTranslation.sectionId)
     : undefined;
-  const inspectorTranslationProjections = inspectorTranslation && inspectorTranslationBlock
-    ? projectTranslationSegments(inspectorTranslation.sourceText, inspectorTranslationBlock.text, inspectorTranslation.segments)
+  const inspectorTranslationProjections = inspectorTranslation && inspectorTranslationSection
+    ? projectTranslationSegmentsAcrossBlocks(inspectorTranslation.sourceText, inspectorTranslationSection.blocks, inspectorTranslation.segments)
     : [];
+  const inspectorTranslationBlock = inspectorTranslationSection?.blocks.find((block) => (
+    inspectorTranslationProjections.some((projection) => projection.status !== "stale" && projection.blockId === block.id)
+  )) ?? inspectorTranslationSection?.blocks.find((block) => block.id === inspectorTranslation?.blockId);
   const inspectorTranslationMatched = inspectorTranslationProjections.filter((projection) => projection.status !== "stale").length;
   const inspectorTranslationStale = inspectorTranslation ? inspectorTranslationMatched < inspectorTranslation.segments.length : false;
   const inspectorDraftBlockId = annotationInspector?.relatedId?.startsWith("draft:") ? annotationInspector.relatedId.slice(6) : undefined;
@@ -1820,7 +1849,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
               const hasFormula = /\$|\\\[|\\begin\{equation/.test(block.text);
               const explanationType = activeAnalysis?.blockId === block.id ? activeAnalysis.type : hasFormula ? "formula" : "theorem";
               const explanation = analysisStates[analysisKey(block.id, explanationType)];
-              const blockTranslations = (translationQuery.data ?? []).filter((record) => record.blockId === block.id && !record.promptVersion.startsWith(WORD_LOOKUP_PROMPT_VERSION));
+              const blockTranslations = projectedTranslationsByBlock.get(block.id) ?? [];
               const blockAnnotations = (annotationQuery.data ?? []).filter((annotation) => annotation.blockId === block.id);
               return <div className={`paragraph-card ${block.compacted ? "compacted" : ""} ${activeBlock === block.id ? "active" : ""}`} key={block.id} onClick={(event) => { if (!(event.target as HTMLElement).closest("button, a")) setActiveBlock((current) => current === block.id ? "" : block.id); }} onMouseUp={(event) => captureSelection(block, event)}>
                 <div className="paragraph-main"><div className="paragraph-markdown"><BilingualBlock block={block} state={state} records={blockTranslations} annotations={blockAnnotations} activeTranslationKeys={activeTranslationKeys} annotationsVisible={readerAnnotationsVisible} markdownPath={paper.markdownPath} figureAnalysisFor={figureAnalysisFor} onToggleFigure={(source) => void toggleFigureAnalysis(source)} onToggleTranslation={toggleInlineTranslation} onOpenAnnotation={openAnnotationInspector} onOpenTerm={openTermPanel} onLeaveTerm={scheduleTermPanelClose} onSentenceContextMenu={openSentenceMenu} /></div></div>
