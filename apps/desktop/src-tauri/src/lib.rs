@@ -1858,7 +1858,7 @@ fn choose_zotero_directory() -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PdfImportResult {
     selected: usize,
@@ -1884,27 +1884,27 @@ fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
     Ok(digest.finalize().to_vec())
 }
 
-#[tauri::command]
-fn import_pdfs(engine: State<'_, Engine>, root: String) -> Result<PdfImportResult, String> {
-    engine.allow_library_root(&root)?;
-    let selected = rfd::FileDialog::new()
-        .set_title("添加 PDF 到 Papers2Innovations")
-        .add_filter("PDF 论文", &["pdf"])
-        .pick_files()
-        .unwrap_or_default();
-    let destination = PathBuf::from(&root).join("Papers").join("Manual");
+fn validate_pdf_sources(selected: &[PathBuf]) -> Result<(), String> {
+    for source in selected {
+        let is_pdf = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("pdf"));
+        if !source.is_file() || !is_pdf {
+            return Err("只能导入现有的 PDF 文件；文件夹和其他格式不会进入论文库。".into());
+        }
+    }
+    Ok(())
+}
+
+fn import_pdf_sources(root: &str, selected: Vec<PathBuf>) -> Result<PdfImportResult, String> {
+    validate_pdf_sources(&selected)?;
+    let destination = PathBuf::from(root).join("Papers").join("Manual");
     fs::create_dir_all(&destination)
         .map_err(|error| format!("Cannot create {}: {error}", destination.display()))?;
     let mut copied = 0;
     let mut deduplicated = 0;
     for (index, source) in selected.iter().enumerate() {
-        if !source
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case("pdf"))
-        {
-            continue;
-        }
         let file_name = source.file_name().ok_or("Selected PDF has no file name")?;
         let mut target = destination.join(file_name);
         let source_hash = sha256_file(source)?;
@@ -1952,6 +1952,27 @@ fn import_pdfs(engine: State<'_, Engine>, root: String) -> Result<PdfImportResul
         deduplicated,
         destination: destination.to_string_lossy().into_owned(),
     })
+}
+
+#[tauri::command]
+fn import_pdfs(engine: State<'_, Engine>, root: String) -> Result<PdfImportResult, String> {
+    engine.allow_library_root(&root)?;
+    let selected = rfd::FileDialog::new()
+        .set_title("添加 PDF 到 Papers2Innovations")
+        .add_filter("PDF 论文", &["pdf"])
+        .pick_files()
+        .unwrap_or_default();
+    import_pdf_sources(&root, selected)
+}
+
+#[tauri::command]
+fn import_pdf_paths(
+    engine: State<'_, Engine>,
+    root: String,
+    paths: Vec<String>,
+) -> Result<PdfImportResult, String> {
+    engine.allow_library_root(&root)?;
+    import_pdf_sources(&root, paths.into_iter().map(PathBuf::from).collect())
 }
 
 #[tauri::command]
@@ -2014,6 +2035,7 @@ pub fn run() {
             choose_library,
             choose_zotero_directory,
             import_pdfs,
+            import_pdf_paths,
             credential_set,
             credential_delete,
             provider_credential_set,
@@ -2039,9 +2061,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        consume_model_stream, model_endpoint, model_headers, send_model_request, stream_delta,
-        validate_credential_id, Engine, ModelConfigInput, ModelMessageInput, ModelStreamInput,
-        OcrLimiter, ProviderConfigInput,
+        consume_model_stream, import_pdf_sources, model_endpoint, model_headers,
+        send_model_request, stream_delta, validate_credential_id, Engine, ModelConfigInput,
+        ModelMessageInput, ModelStreamInput, OcrLimiter, ProviderConfigInput,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -2348,5 +2370,42 @@ mod tests {
             .expect("create and register root");
         assert!(test_root.is_dir());
         fs::remove_dir_all(&test_root).expect("cleanup");
+    }
+
+    #[test]
+    fn local_pdf_import_rejects_other_formats_and_deduplicates_content() {
+        let base = std::env::temp_dir().join(format!(
+            "p2i-local-import-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let source_dir = base.join("source");
+        let library = base.join("library");
+        fs::create_dir_all(&source_dir).expect("source directory");
+        let pdf = source_dir.join("paper.pdf");
+        fs::write(&pdf, b"%PDF-1.7\nlocal import fixture").expect("pdf fixture");
+        let text = source_dir.join("notes.txt");
+        fs::write(&text, b"not a paper").expect("text fixture");
+
+        let first =
+            import_pdf_sources(library.to_str().expect("library string"), vec![pdf.clone()])
+                .expect("first import");
+        assert_eq!(first.selected, 1);
+        assert_eq!(first.copied, 1);
+        assert_eq!(first.deduplicated, 0);
+
+        let second = import_pdf_sources(library.to_str().expect("library string"), vec![pdf])
+            .expect("duplicate import");
+        assert_eq!(second.copied, 0);
+        assert_eq!(second.deduplicated, 1);
+        assert!(
+            import_pdf_sources(library.to_str().expect("library string"), vec![text])
+                .expect_err("non-PDF must fail")
+                .contains("PDF")
+        );
+        fs::remove_dir_all(&base).expect("cleanup");
     }
 }

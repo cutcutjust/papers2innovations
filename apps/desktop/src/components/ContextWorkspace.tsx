@@ -56,6 +56,7 @@ export function ContextWorkspace({ papers, root }: { papers: LibraryPaper[]; roo
   const {
     customModels,
     providers,
+    defaultTextModelId,
     contextCompressionModelId,
     setContextCompressionModelId,
   } = useWorkspace();
@@ -94,7 +95,7 @@ export function ContextWorkspace({ papers, root }: { papers: LibraryPaper[]; roo
     enabled: Boolean(inspectedAgent?.id && expandedBreakdown === "tools"),
     retry: false,
   });
-  const selectedModel = customModels.find((model) => model.id === contextCompressionModelId) ?? customModels[0];
+  const selectedModel = customModels.find((model) => model.id === contextCompressionModelId) ?? customModels.find((model) => model.id === defaultTextModelId) ?? customModels[0];
   const selectedProvider = providers.find((provider) => provider.id === selectedModel?.providerId);
   const credentialReady = Boolean(selectedProvider && providerCredentialQuery.data?.some(
     (summary) => summary.credentialId === selectedProvider.credentialId && summary.configured,

@@ -35,12 +35,14 @@ export interface PdfImportResult {
   destination: string;
 }
 
-export async function importPdfs(root: string): Promise<PdfImportResult> {
+export async function importPdfs(root: string, paths: string[] = []): Promise<PdfImportResult> {
   if (!nativeRuntime) {
     await new Promise((resolve) => setTimeout(resolve, 500));
-    return { selected: 2, copied: 2, deduplicated: 0, destination: `${root}/Papers/Manual` };
+    return { selected: paths.length || 2, copied: paths.length || 2, deduplicated: 0, destination: `${root}/Papers/Manual` };
   }
-  return invoke<PdfImportResult>("import_pdfs", { root });
+  return paths.length
+    ? invoke<PdfImportResult>("import_pdf_paths", { root, paths })
+    : invoke<PdfImportResult>("import_pdfs", { root });
 }
 
 export async function initializeLibrary(root: string): Promise<void> {

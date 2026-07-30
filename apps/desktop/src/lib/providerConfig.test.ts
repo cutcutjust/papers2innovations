@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isSensitiveProviderHeader, providerIdForModel, sanitizeProviderConfig } from "./providerConfig";
+import { isPlaceholderProvider, isSensitiveProviderHeader, providerIdForModel, sanitizeProviderConfig } from "./providerConfig";
 
 describe("provider configuration security", () => {
   it("recognizes credential-bearing headers case-insensitively", () => {
@@ -31,5 +31,10 @@ describe("provider configuration security", () => {
   it("creates credential IDs accepted by the native vault", () => {
     expect(providerIdForModel("qwen3.6-plus")).toBe("provider-qwen3.6-plus");
     expect(providerIdForModel("vendor/model latest")).toBe("provider-vendor-model-latest");
+  });
+
+  it("recognizes only the bundled placeholder endpoints", () => {
+    expect(isPlaceholderProvider({ id: "provider-openai-demo", name: "Demo", format: "openai", baseUrl: "https://api.example.com/v1", credentialId: "provider-openai-demo", timeoutSeconds: 90 })).toBe(true);
+    expect(isPlaceholderProvider({ id: "provider-real", name: "Real", format: "openai", baseUrl: "https://api.example.com/v1", credentialId: "provider-real", timeoutSeconds: 90 })).toBe(false);
   });
 });

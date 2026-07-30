@@ -1,11 +1,10 @@
 import type { LibraryCollection, LibraryPaper } from "@p2i/contracts";
-import { BookOpen, CheckCircle2, ChevronRight, FileCheck2, FileText, Filter, FolderOpen, Grid2X2, GripVertical, Layers3, List, LoaderCircle, RefreshCw, Search, ShieldCheck, SortAsc, Upload, X } from "lucide-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { BookOpen, CheckCircle2, ChevronRight, FileText, Filter, FolderOpen, Grid2X2, GripVertical, Layers3, List, RefreshCw, Search, SortAsc, Upload } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Status } from "./Status";
 import { useWorkspace } from "../store";
-import { importPdfs, type PdfImportResult } from "../lib/bridge";
 import { startPointerCollectionDrag, subscribeCollectionDrag } from "../lib/collectionDrag";
+import { ModelReadinessBanner } from "./ModelReadinessBanner";
 
 interface Props {
   papers: LibraryPaper[];
@@ -18,56 +17,30 @@ interface Props {
 }
 
 export function LibraryWorkspace({ papers, allPapers, collections, selected, scanning, onScan, onChooseLibrary }: Props) {
-  const { root, selectedPaperId, selectPaper, openReader, query, setQuery, setView } = useWorkspace();
-  const queryClient = useQueryClient();
+  const { selectedPaperId, selectPaper, openReader, query, setQuery, openPaperImport } = useWorkspace();
   const [draggingPaperId, setDraggingPaperId] = useState("");
-  const [importOpen, setImportOpen] = useState(false);
-  const [importStatus, setImportStatus] = useState<"idle" | "importing" | "done" | "error">("idle");
-  const [importResult, setImportResult] = useState<PdfImportResult | null>(null);
-  const [importError, setImportError] = useState("");
   const collectionNames = useMemo(() => new Map(collections.map((item) => [item.id, item.name])), [collections]);
   useEffect(() => subscribeCollectionDrag((payload) => setDraggingPaperId(payload?.kind === "paper" ? payload.id : "")), []);
-  const addPdfs = async () => {
-    setImportStatus("importing");
-    setImportError("");
-    try {
-      const result = await importPdfs(root);
-      if (result.selected === 0) {
-        setImportStatus("idle");
-        return;
-      }
-      setImportResult(result);
-      setImportStatus("done");
-      onScan();
-      window.setTimeout(() => void queryClient.invalidateQueries({ queryKey: ["papers", root] }), 1_000);
-    } catch (error) {
-      setImportStatus("error");
-      setImportError(error instanceof Error ? error.message : String(error));
-    }
-  };
   return (
     <div className="library-workspace">
-      {importOpen && <div className="pdf-import-backdrop" role="presentation"><section className="pdf-import-dialog" role="dialog" aria-modal="true" aria-labelledby="pdf-import-title">
-        <header><span><Upload size={20} /></span><div><h2 id="pdf-import-title">添加本地 PDF</h2><p>论文会复制到独立资料库，原文件不会被移动或修改。</p></div><button title="关闭" onClick={() => setImportOpen(false)}><X size={16} /></button></header>
-        <button className={`pdf-import-dropzone ${importStatus}`} onClick={() => void addPdfs()} disabled={importStatus === "importing"}>{importStatus === "importing" ? <LoaderCircle className="spin" size={28} /> : importStatus === "done" ? <FileCheck2 size={28} /> : <Upload size={28} />}<strong>{importStatus === "importing" ? "正在复制并校验 PDF…" : importStatus === "done" ? "论文已加入解析队列" : "选择一篇或多篇 PDF"}</strong><span>{importStatus === "done" && importResult ? `复制 ${importResult.copied} 篇，跳过重复 ${importResult.deduplicated} 篇` : "支持批量选择；重复论文会按内容自动识别"}</span></button>
-        <div className="pdf-import-assurance"><span><ShieldCheck size={15} /><b>原子复制</b><small>复制完成并校验后才进入论文库</small></span><span><Layers3 size={15} /><b>自动解析</b><small>生成 MD、章节、插图和表格</small></span><span><FileText size={15} /><b>可随时归类</b><small>导入后拖到左侧文件树即可</small></span></div>
-        {importStatus === "error" && <p className="pdf-import-error">{importError}</p>}
-        <footer><small>保存位置：{importResult?.destination ?? `${root}/Papers/Manual`}</small><div><button className="secondary-button" onClick={() => setImportOpen(false)}>{importStatus === "done" ? "完成" : "取消"}</button>{importStatus === "done" && <button className="primary-button compact" onClick={() => { setImportOpen(false); setView("jobs"); }}>查看解析进度</button>}</div></footer>
-      </section></div>}
       <header className="page-header figma-page-header">
         <div><h1>论文库</h1><p>{allPapers.length} 篇论文 · 本地研究资料库</p></div>
         <div className="page-actions">
-          <button className="primary-button compact" onClick={() => { setImportOpen(true); setImportStatus("idle"); setImportResult(null); }}><Upload size={14} /> 添加 PDF</button>
+          <button className="primary-button compact" onClick={() => openPaperImport()}><Upload size={14} /> 添加论文</button>
           <button className="secondary-button" onClick={onChooseLibrary}><FolderOpen size={14} /> 更换资料库</button>
         </div>
       </header>
+      <ModelReadinessBanner />
       <div className="library-toolbar">
         <label className="figma-input library-search"><Search size={13} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="在论文库中搜索" /></label>
         <button><Filter size={13} /> 筛选</button><button><SortAsc size={13} /> 排序</button><button><Layers3 size={13} /> 分组</button>
         <button onClick={onScan} disabled={scanning}><RefreshCw size={13} className={scanning ? "spin" : ""} /> 扫描</button>
         <div className="view-switch"><button className="active" title="表格视图"><List size={13} /></button><button title="网格视图"><Grid2X2 size={13} /></button></div>
       </div>
-      <div className="library-surface">
+      {!allPapers.length ? <section className="empty-library-welcome">
+        <div className="empty-library-copy"><span className="empty-library-mark"><Upload size={24} /></span><p>本地论文库已准备好</p><h2>添加第一批论文开始阅读</h2><span>选择或拖入一篇或多篇 PDF。Papers2Innovations 会复制、去重并在本地建立结构化文档。</span><button className="primary-button" onClick={() => openPaperImport()}><Upload size={16} /> 添加本地 PDF</button><small>原文件不会被移动或修改</small></div>
+        <div className="empty-library-details"><article><FileText size={18} /><div><strong>自动结构化</strong><span>提取章节、公式、插图和表格</span></div></article><article><Layers3 size={18} /><div><strong>自动进入任务队列</strong><span>关闭应用后仍可恢复解析进度</span></div></article><button onClick={() => useWorkspace.getState().setView("import")}><FolderOpen size={17} /><span><strong>从 Zotero 导入</strong><small>可选，按 collection 预览并选择</small></span><ChevronRight size={14} /></button></div>
+      </section> : <div className="library-surface">
         <section className="paper-table-wrap">
           <div className="paper-table-head"><span>标题</span><span>状态</span><span>页数</span><span>更新时间</span><span /></div>
           <div className="figma-paper-table">
@@ -95,7 +68,7 @@ export function LibraryWorkspace({ papers, allPapers, collections, selected, sca
             </div>
           </>}
         </aside>
-      </div>
+      </div>}
     </div>
   );
 }

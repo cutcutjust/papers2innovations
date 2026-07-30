@@ -213,7 +213,7 @@ function BilingualBlock({ block, state, records, annotations, activeTranslationK
 }
 
 export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) {
-  const { setView, customModels, providers, contextCompressionModelId, markdownFormattingModelId, autoFormatMarkdown, readerFocusMode, setReaderFocusMode, fontSize, readerZoom, setReaderZoom, readerTheme, setReaderTheme, readerBackgroundColor, readerTextColor, setReaderColors, readerAnnotationsVisible, setReaderAnnotationsVisible } = useWorkspace();
+  const { setView, customModels, providers, defaultTextModelId, contextCompressionModelId, markdownFormattingModelId, autoFormatMarkdown, readerFocusMode, setReaderFocusMode, fontSize, readerZoom, setReaderZoom, readerTheme, setReaderTheme, readerBackgroundColor, readerTextColor, setReaderColors, readerAnnotationsVisible, setReaderAnnotationsVisible } = useWorkspace();
   const queryClient = useQueryClient();
   const [mode, setMode] = useState<ReaderMode>("integrated");
   const [selection, setSelection] = useState<SelectionSource | null>(null);
@@ -229,7 +229,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const [activeBlock, setActiveBlock] = useState("");
   const [activeSection, setActiveSection] = useState("");
   const [contextBusy, setContextBusy] = useState("");
-  const [agentModel, setAgentModel] = useState(customModels[0]?.id ?? "");
+  const [agentModel, setAgentModel] = useState(defaultTextModelId || customModels[0]?.id || "");
   const [chatInput, setChatInput] = useState("");
   const [chatLive, setChatLive] = useState("");
   const [chatPendingQuestion, setChatPendingQuestion] = useState("");
@@ -340,7 +340,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     () => Object.fromEntries((translationQuery.data ?? []).filter((record) => record.sourceStart === 0 && record.sourceEnd >= record.sourceText.length).map((record) => [record.blockId, { status: "saved", text: record.translatedText, segments: record.segments, terms: record.terms, kind: record.promptVersion.startsWith(WORD_LOOKUP_PROMPT_VERSION) ? "word" : "passage", record } satisfies TranslationState])),
     [translationQuery.data],
   );
-  const selectedModel = customModels.find((model) => model.id === agentModel) ?? customModels[0];
+  const selectedModel = customModels.find((model) => model.id === agentModel) ?? customModels.find((model) => model.id === defaultTextModelId) ?? customModels[0];
   const selectedProvider = providers.find((provider) => provider.id === selectedModel?.providerId);
   const formattingModel = customModels.find((model) => model.id === markdownFormattingModelId) ?? customModels[0];
   const formattingProvider = providers.find((provider) => provider.id === formattingModel?.providerId);
@@ -350,6 +350,10 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const explanationPrompt = resolvePromptTemplate(promptTemplates, "explanation", explanationPromptId);
   const markdownPrompt = resolvePromptTemplate(promptTemplates, "markdown", markdownPromptId);
   const markdownPromptVersion = `${MARKDOWN_FORMAT_PROMPT_VERSION}:${markdownPrompt?.id ?? "default"}`;
+
+  useEffect(() => {
+    if (!customModels.some((model) => model.id === agentModel)) setAgentModel(defaultTextModelId || customModels[0]?.id || "");
+  }, [agentModel, customModels, defaultTextModelId]);
   const maxContextTokens = selectedModel?.maxContextTokens ?? 128000;
   const tokenBreakdown = contextDraftQuery.data?.tokenBreakdown;
   const contextUsed = tokenBreakdown ? Object.values(tokenBreakdown).reduce((total, value) => total + value, 0) : 36000;
@@ -1686,7 +1690,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         {mode === "integrated" && <article className="integrated-paper">
           <header className="paper-reading-header"><span className="tag tag-primary">MD 章节阅读</span><h1>{paper.title}</h1><p>本地文档 · {paper.pageCount || "—"} 页 · 更新于 {new Date(paper.updatedAt).toLocaleDateString("zh-CN")}</p></header>
           {formattingStatus === "error" && <div className="formatting-notice error"><TriangleAlert size={13} /> {formattingError}</div>}
-          {readerAnnotationsVisible && !hasPassageTranslations && <div className="reader-translation-empty"><div><Languages size={18} /><span><strong>当前还没有中文译文</strong><small>原始 Markdown 始终保持英文不变。翻译完成后，点击蓝色下划线即可在原位置切换中英文。</small></span></div><button className="primary-button compact" disabled={translationBatchBusy || !credentialReady} onClick={() => void translateCurrentSection()}>{translationBatchBusy ? <LoaderCircle className="spin" size={14} /> : <Languages size={14} />} {credentialReady ? (translationBatchBusy ? "正在翻译本章" : "翻译当前章节") : "先恢复模型密钥"}</button></div>}
+          {readerAnnotationsVisible && !hasPassageTranslations && <div className="reader-translation-empty"><div><Languages size={18} /><span><strong>当前还没有中文译文</strong><small>原始 Markdown 始终保持英文不变。翻译完成后，点击蓝色下划线即可在原位置切换中英文。</small></span></div><button className="primary-button compact" disabled={translationBatchBusy} onClick={() => credentialReady ? void translateCurrentSection() : setView("settings")}>{translationBatchBusy ? <LoaderCircle className="spin" size={14} /> : <Languages size={14} />} {credentialReady ? (translationBatchBusy ? "正在翻译本章" : "翻译当前章节") : "配置文本模型"}</button></div>}
           {markdownQuery.isLoading || documentQuery.isLoading ? <div className="document-loading">Loading structured document…</div> : sections.map((section, sectionIndex) => {
             const displayBlocks = section.blocks;
             return <section id={`reader-section-${section.id}`} data-section-id={section.id} className={`reading-section ${activeSection === section.id ? "active" : ""}`} key={section.id}>
@@ -1718,13 +1722,14 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         {!agentCollapsed && <div className="reader-agent-resizer" role="separator" aria-label="调整论文助手宽度" aria-orientation="vertical" aria-valuemin={MIN_AGENT_WIDTH} aria-valuemax={MAX_AGENT_WIDTH} aria-valuenow={agentWidth} tabIndex={0} title="拖动调整论文助手宽度" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.focus(); agentDrag.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: agentWidth }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={resizeAgent} onPointerUp={finishAgentResize} onPointerCancel={finishAgentResize} onKeyDown={resizeAgentWithKeyboard} />}
         <header><Bot size={15} /><strong>论文分析助手</strong><span className={`tag ${credentialReady ? "tag-success" : "tag-warning"}`}>{credentialReady ? "接口就绪" : selectedProvider ? "缺少密钥" : "缺少模型"}</span><button className="reader-agent-collapse" title={agentCollapsed ? "展开论文助手" : "收起论文助手"} onClick={() => setAgentCollapsed((value) => !value)}>{agentCollapsed ? <PanelRightOpen size={14} /> : <PanelRightClose size={14} />}</button><button className="reader-agent-close" title="关闭助手" onClick={() => setAgentOpen(false)}><ChevronLeft size={13} /></button></header>
         {!agentCollapsed && <div className="agent-panel-scroll">
+          {!credentialReady && <div className="reader-model-required"><Bot size={18} /><div><strong>{selectedModel ? "模型密钥尚未就绪" : "先配置一个文本模型"}</strong><span>配置后即可翻译、解释并与当前论文多轮对话。</span></div><button onClick={() => setView("settings")}>前往配置</button></div>}
           <div className="agent-chat-summary"><div><strong>本篇论文上下文</strong><b>{contextPercent}%</b></div><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><span>{(contextUsed / 1000).toFixed(1)}K / {(maxContextTokens / 1000).toFixed(0)}K · {contextDraftQuery.data?.items.length ?? 0} 项</span><button className={contextManagerOpen ? "active" : ""} title="管理本篇论文上下文" onClick={() => setContextManagerOpen((value) => !value)}><Layers3 size={11} /></button>{Boolean(chatQuery.data?.turns.length) && <button title="清空对话" onClick={() => void clearChat()}><Trash2 size={11} /></button>}</div>
           {contextManagerOpen && <section className="paper-context-manager">
             <header><strong>上下文管理</strong><button title="新增自定义文字" onClick={() => setContextEditor({ title: "阅读笔记", text: "" })}><Plus size={12} /></button><button title="恢复默认 Markdown 全文" onClick={() => void restorePaperContext()}><RotateCcw size={12} /></button></header>
             <div className="paper-context-list">{contextDraftQuery.data?.items.map((item) => <article key={item.id}><div><b>{item.title || (item.itemType === "compressed_markdown" ? "AI 压缩后的原文" : item.itemType === "custom" ? "自定义文字" : "MD 原文")}</b><small>{item.estimatedTokens.toLocaleString()} tokens</small></div><p>{item.sourcePreview}</p><footer>{item.itemType === "custom" && <button onClick={() => void editContextItem(item.id)}>编辑</button>}<button className="danger" onClick={() => void deleteContextItem(item.id)}>移除</button></footer></article>)}</div>
             {contextEditor && <div className="paper-context-editor"><input value={contextEditor.title} onChange={(event) => setContextEditor({ ...contextEditor, title: event.target.value })} placeholder="上下文名称" /><textarea value={contextEditor.text} onChange={(event) => setContextEditor({ ...contextEditor, text: event.target.value })} placeholder="输入需要随论文对话携带的自定义文字" /><footer><button onClick={() => setContextEditor(null)}>取消</button><button className="primary" disabled={!contextEditor.text.trim()} onClick={() => void saveContextItem()}>保存</button></footer></div>}
           </section>}
-          <label className="agent-model-field"><span>论文分析模型</span><select value={agentModel} onChange={(event) => setAgentModel(event.target.value)}>{customModels.map((model) => <option key={model.id} value={model.id}>{model.displayName} · {providers.find((provider) => provider.id === model.providerId)?.format ?? "不可用"}</option>)}</select></label>
+          <label className="agent-model-field"><span>论文分析模型</span><select value={agentModel} onChange={(event) => setAgentModel(event.target.value)}><option value="">未配置</option>{customModels.map((model) => <option key={model.id} value={model.id}>{model.displayName} · {providers.find((provider) => provider.id === model.providerId)?.format ?? "不可用"}</option>)}</select></label>
           <label className="agent-model-field"><span>阅读助手提示词</span><select value={readerPrompt?.id ?? ""} onChange={(event) => choosePrompt("reader", event.target.value)}>{promptTemplates.filter((template) => template.category === "reader").map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select></label>
           <div className="agent-chat-thread">
             {!chatQuery.data?.turns.length && chatStatus !== "streaming" && <div className="agent-chat-empty"><MessageSquareText size={18} /><strong>询问这篇论文</strong><span>默认携带本篇 Markdown 原文，并保留每轮上下文快照。</span></div>}
@@ -1736,7 +1741,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
             {chatError && <p className="agent-chat-error"><TriangleAlert size={12} /> {chatError}</p>}
           </div>
         </div>}
-        {!agentCollapsed && <form className="agent-chat-input" onSubmit={(event) => { event.preventDefault(); void sendChat(); }}><MessageSquareText size={13} /><input aria-label="询问这篇论文" value={chatInput} onChange={(event) => setChatInput(event.target.value)} disabled={chatStatus === "streaming"} placeholder="输入关于这篇论文的问题…" /><button title="发送" type="submit" disabled={!chatInput.trim() || chatStatus === "streaming"}><Send size={13} /></button></form>}
+        {!agentCollapsed && <form className="agent-chat-input" onSubmit={(event) => { event.preventDefault(); if (credentialReady) void sendChat(); else setView("settings"); }}><MessageSquareText size={13} /><input aria-label="询问这篇论文" value={chatInput} onChange={(event) => setChatInput(event.target.value)} disabled={chatStatus === "streaming" || !credentialReady} placeholder={credentialReady ? "输入关于这篇论文的问题…" : "配置文本模型后开始提问"} /><button title={credentialReady ? "发送" : "配置文本模型"} type="submit" disabled={!credentialReady || !chatInput.trim() || chatStatus === "streaming"}><Send size={13} /></button></form>}
       </aside>
     </div>
     <footer className="reader-context-bar"><Layers3 size={14} /><strong>本篇论文上下文</strong><span className="tag tag-primary">{contextDraftQuery.data?.items.length ?? 0} 个条目</span><div className="context-track"><i style={{ width: `${contextPercent}%` }} /></div><code>{(contextUsed / 1000).toFixed(1)}K / {(maxContextTokens / 1000).toFixed(0)}K · {contextPercent}%</code><span>与多论文研究上下文独立。</span><button onClick={() => { setAgentOpen(true); setAgentCollapsed(false); setContextManagerOpen(true); }}>管理</button></footer>

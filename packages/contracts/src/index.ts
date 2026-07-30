@@ -180,6 +180,7 @@ export interface ParseArtifactBundle {
 }
 
 export type ApiFormat = "openai" | "anthropic";
+export type ModelCapability = "text" | "vision";
 
 export interface ProviderConfig {
   id: string;
@@ -198,6 +199,7 @@ export interface ModelConfig {
   displayName: string;
   maxContextTokens: number;
   maxOutputTokens: number;
+  capabilities?: ModelCapability[];
 }
 
 export interface CredentialSummary {

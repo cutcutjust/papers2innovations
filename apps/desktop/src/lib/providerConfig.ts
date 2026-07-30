@@ -29,3 +29,12 @@ export function providerIdForModel(modelId: string): string {
   const safeModelId = modelId.trim().replace(/[^A-Za-z0-9._:-]+/g, "-").replace(/^-+|-+$/g, "");
   return `provider-${safeModelId || "custom"}`.slice(0, 128);
 }
+
+export function isPlaceholderProvider(provider: ProviderConfig): boolean {
+  try {
+    const url = new URL(provider.baseUrl);
+    return url.hostname === "api.example.com" && provider.id.endsWith("-demo");
+  } catch {
+    return false;
+  }
+}

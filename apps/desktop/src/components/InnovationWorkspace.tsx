@@ -1,6 +1,6 @@
 import type { ContextSnapshot, InnovationRun, InnovationStageId, LibraryPaper, ModelStreamEvent } from "@p2i/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Circle, FileText, LoaderCircle, Plus, RotateCcw, Save, Settings2, Sparkles, Square, TriangleAlert } from "lucide-react";
+import { Bot, CheckCircle2, Circle, FileText, LoaderCircle, Plus, RotateCcw, Save, Settings2, Sparkles, Square, TriangleAlert } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   addPaperToContext,
@@ -65,11 +65,11 @@ function stageStatusText(status: string) {
 }
 
 export function InnovationWorkspace({ papers }: { papers: LibraryPaper[] }) {
-  const { root, customModels, providers, setView } = useWorkspace();
+  const { root, customModels, providers, defaultTextModelId, setView } = useWorkspace();
   const queryClient = useQueryClient();
   const [prompt, setPrompt] = useState(defaultPrompt);
   const [innovationPromptId, setInnovationPromptId] = useState(() => selectedPromptId("innovation"));
-  const [routeModels, setRouteModels] = useState<Record<InnovationStageId, string>>(() => Object.fromEntries(routes.map((route) => [route.id, customModels[0]?.id ?? ""])) as Record<InnovationStageId, string>);
+  const [routeModels, setRouteModels] = useState<Record<InnovationStageId, string>>(() => Object.fromEntries(routes.map((route) => [route.id, defaultTextModelId || customModels[0]?.id || ""])) as Record<InnovationStageId, string>);
   const [notice, setNotice] = useState("准备就绪");
   const [activeRunId, setActiveRunId] = useState("");
   const [activeStage, setActiveStage] = useState<InnovationStageId | "">("");
@@ -110,9 +110,9 @@ export function InnovationWorkspace({ papers }: { papers: LibraryPaper[] }) {
 
   useEffect(() => {
     const available = new Set(customModels.map((model) => model.id));
-    const fallback = customModels[0]?.id ?? "";
+    const fallback = customModels.find((model) => model.id === defaultTextModelId)?.id ?? customModels[0]?.id ?? "";
     setRouteModels((current) => Object.fromEntries(routes.map((route) => [route.id, available.has(current[route.id]) ? current[route.id] : fallback])) as Record<InnovationStageId, string>);
-  }, [customModels]);
+  }, [customModels, defaultTextModelId]);
 
   useEffect(() => () => {
     if (streamHandle.current) {
@@ -323,6 +323,7 @@ export function InnovationWorkspace({ papers }: { papers: LibraryPaper[] }) {
       <div className="innovation-title"><div><h1>Papers2Innovations</h1><span>提示词工作台</span></div><p>在一个绑定来源的共享上下文快照上运行五个可恢复的 AI 阶段。</p></div>
       <div className="innovation-header-actions"><span className="compact-badge">{includedPapers.length} 篇论文</span><span className="compact-badge">{contextPercent}% 上下文</span><button className="secondary-button" onClick={() => setView("settings")}><Settings2 size={14} /> 模型设置</button>{running ? <button className="danger-button" onClick={() => void cancel()}><Square size={14} /> 停止</button> : <button className="primary-button compact" onClick={() => void run()} disabled={!includedPapers.length || !credentialReady}><Sparkles size={14} /> 开始综合</button>}</div>
     </header>
+    {!credentialReady && <section className="innovation-model-required"><Bot size={19} /><div><strong>创新工作台需要可用的文本模型</strong><span>先连接并指定默认文本模型，当前论文上下文不会丢失。</span></div><button className="primary-button compact" onClick={() => setView("settings")}><Settings2 size={14} /> 前往配置</button></section>}
 
     <div className="innovation-layout">
       <aside className="context-panel">

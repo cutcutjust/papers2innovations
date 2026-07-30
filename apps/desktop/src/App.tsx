@@ -18,10 +18,13 @@ import { PromptLibrary } from "./components/PromptLibrary";
 import { ContextWorkspace } from "./components/ContextWorkspace";
 import { CitationGraph } from "./components/CitationGraph";
 import { ModelActivityCenter } from "./components/ModelActivityCenter";
+import { PaperImportDialog } from "./components/PaperImportDialog";
+import { FirstRunOnboarding } from "./components/FirstRunOnboarding";
 import { chooseLibrary, initializeLibrary, listCollections, listJobs, listPapers, nativeRuntime, onEngineProgress, scanLibrary, startLibraryWatcher } from "./lib/bridge";
 import { clearVisionProvider, configureVisionProvider, hydrateOcrCredential, hydrateProviderCredentials, loadWorkspaceSettingsSnapshot, saveWorkspaceSettingsSnapshot } from "./lib/credentials";
 import { filterPapersByCollection } from "./lib/collectionTree";
-import { hasPersistedWorkspaceSettings, useWorkspace } from "./store";
+import { isPlaceholderProvider } from "./lib/providerConfig";
+import { CURRENT_ONBOARDING_VERSION, hasPersistedWorkspaceSettings, useWorkspace } from "./store";
 
 export function App() {
   const workspace = useWorkspace();
@@ -30,6 +33,8 @@ export function App() {
   const [settingsRecovered, setSettingsRecovered] = useState(!nativeRuntime);
   const [suggestedRoot, setSuggestedRoot] = useState("");
   const [librarySetupBusy, setLibrarySetupBusy] = useState(false);
+  const [dropActive, setDropActive] = useState(false);
+  const [dropNotice, setDropNotice] = useState("");
   const root = workspace.root || (!nativeRuntime ? "D:/Research/Papers2Innovations-Library" : "");
   const papersQuery = useQuery({
     queryKey: ["papers", root],
@@ -80,9 +85,17 @@ export function App() {
         if (snapshot && !hasPersistedWorkspaceSettings) workspace.restoreWorkspaceSettings(snapshot);
       })
       .then(async () => {
-        const providers = useWorkspace.getState().providers;
+        const state = useWorkspace.getState();
+        const providers = state.providers;
         await hydrateOcrCredential().catch(() => undefined);
-        await hydrateProviderCredentials(providers).catch(() => undefined);
+        const summaries = await hydrateProviderCredentials(providers).catch(() => []);
+        const configured = new Set(summaries.filter((item) => item.configured).map((item) => item.credentialId));
+        for (const model of state.customModels) {
+          const provider = state.providers.find((item) => item.id === model.providerId);
+          if (provider && isPlaceholderProvider(provider) && !configured.has(provider.credentialId)) {
+            useWorkspace.getState().removeCustomModel(model.id);
+          }
+        }
       })
       .finally(() => setSettingsRecovered(true));
   }, []);
@@ -90,10 +103,12 @@ export function App() {
   useEffect(() => {
     if (!nativeRuntime || !settingsRecovered) return;
     void saveWorkspaceSettingsSnapshot({
-      version: 2,
+      version: 3,
       root: workspace.root,
       providers: workspace.providers,
       customModels: workspace.customModels,
+      defaultTextModelId: workspace.defaultTextModelId,
+      onboardingVersion: workspace.onboardingVersion,
       contextCompressionModelId: workspace.contextCompressionModelId,
       markdownFormattingModelId: workspace.markdownFormattingModelId,
       autoFormatMarkdown: workspace.autoFormatMarkdown,
@@ -108,7 +123,32 @@ export function App() {
       readerTranslationView: workspace.readerTranslationView,
       readerAnnotationsVisible: workspace.readerAnnotationsVisible,
     }).catch(() => undefined);
-  }, [settingsRecovered, workspace.root, workspace.providers, workspace.customModels, workspace.contextCompressionModelId, workspace.markdownFormattingModelId, workspace.autoFormatMarkdown, workspace.fullPageOcrModelId, workspace.visionAnalysisModelId, workspace.ocrConsent, workspace.fontSize, workspace.readerZoom, workspace.readerTheme, workspace.readerBackgroundColor, workspace.readerTextColor, workspace.readerTranslationView, workspace.readerAnnotationsVisible]);
+  }, [settingsRecovered, workspace.root, workspace.providers, workspace.customModels, workspace.defaultTextModelId, workspace.onboardingVersion, workspace.contextCompressionModelId, workspace.markdownFormattingModelId, workspace.autoFormatMarkdown, workspace.fullPageOcrModelId, workspace.visionAnalysisModelId, workspace.ocrConsent, workspace.fontSize, workspace.readerZoom, workspace.readerTheme, workspace.readerBackgroundColor, workspace.readerTextColor, workspace.readerTranslationView, workspace.readerAnnotationsVisible]);
+
+  useEffect(() => {
+    if (!nativeRuntime) return;
+    let cleanup: () => void = () => {};
+    void getCurrentWindow().onDragDropEvent((event) => {
+      if (event.payload.type === "over") {
+        setDropActive(true);
+        return;
+      }
+      setDropActive(false);
+      if (event.payload.type !== "drop") return;
+      if (!root) {
+        setDropNotice("请先创建或选择本地论文库，再拖入 PDF。");
+        return;
+      }
+      const paths = event.payload.paths;
+      if (!paths.length || paths.some((path) => !path.toLowerCase().endsWith(".pdf"))) {
+        setDropNotice("只能导入 PDF 文件；文件夹和其他格式不会进入论文库。");
+        return;
+      }
+      setDropNotice("");
+      workspace.openPaperImport(paths);
+    }).then((unlisten) => { cleanup = unlisten; });
+    return () => cleanup();
+  }, [root]);
 
   useEffect(() => {
     if (!nativeRuntime || !settingsRecovered) return;
@@ -160,12 +200,13 @@ export function App() {
   };
 
   const createSuggestedLibrary = async () => {
-    if (!suggestedRoot || librarySetupBusy) return;
+    const target = suggestedRoot || (!nativeRuntime ? "D:/Research/Papers2Innovations-Library" : "");
+    if (!target || librarySetupBusy) return;
     setLibrarySetupBusy(true);
     try {
-      await initializeLibrary(suggestedRoot);
-      workspace.setRoot(suggestedRoot);
-      await scanLibrary(suggestedRoot);
+      await initializeLibrary(target);
+      workspace.setRoot(target);
+      await scanLibrary(target);
       await queryClient.invalidateQueries({ queryKey: ["papers"] });
     } finally {
       setLibrarySetupBusy(false);
@@ -240,17 +281,10 @@ export function App() {
     <LibraryWorkspace papers={papers} allPapers={allPapers} collections={collectionsQuery.data ?? []} selected={papers.find((paper) => paper.id === workspace.selectedPaperId) ?? papers[0]} scanning={scanMutation.isPending} onScan={() => scanMutation.mutate()} onChooseLibrary={choose} />
   );
 
-  if (!root) {
-    return (
-      <div className="setup-screen">
-        <div className="setup-mark"><FolderOpen size={24} /></div>
-        <h1>创建你的论文工作区</h1>
-        <p>Papers2Innovations 会在独立目录中管理 PDF、结构化文档与本地索引，不会修改 Zotero 原库。</p>
-        {suggestedRoot && <code className="setup-path">{suggestedRoot}</code>}
-        <div className="setup-actions"><button className="primary-button" disabled={!suggestedRoot || librarySetupBusy} onClick={() => void createSuggestedLibrary()}><FolderOpen size={17} /> {librarySetupBusy ? "正在创建" : "使用推荐位置"}</button><button className="secondary-button" disabled={librarySetupBusy} onClick={() => void choose()}><FolderOpen size={17} /> 选择其他位置</button></div>
-        <small>稍后可在论文库中更换位置。已有论文库请选择其根目录。</small>
-      </div>
-    );
+  const forceOnboardingPreview = !nativeRuntime && new URLSearchParams(window.location.search).has("onboarding");
+  if (!settingsRecovered) return <LibraryStartup onRetry={() => window.location.reload()} />;
+  if (!root || workspace.onboardingVersion < CURRENT_ONBOARDING_VERSION || forceOnboardingPreview) {
+    return <FirstRunOnboarding root={forceOnboardingPreview ? workspace.root : root} suggestedRoot={suggestedRoot || (!nativeRuntime ? "D:/Research/Papers2Innovations-Library" : "")} libraryBusy={librarySetupBusy} onCreateLibrary={createSuggestedLibrary} onChooseLibrary={choose} />;
   }
 
   return (
@@ -264,6 +298,20 @@ export function App() {
       </div>
       <AppUpdater />
       <ModelActivityCenter />
+      <PaperImportDialog
+        root={root}
+        open={workspace.importDialogOpen}
+        pendingPaths={workspace.pendingImportPaths}
+        onClose={workspace.closePaperImport}
+        onImported={() => {
+          scanMutation.mutate();
+          window.setTimeout(() => void queryClient.invalidateQueries({ queryKey: ["papers", root] }), 1_000);
+        }}
+        onOpenZotero={() => workspace.setView("import")}
+        onOpenActivity={() => workspace.setView("jobs")}
+      />
+      {dropActive && <div className="native-drop-overlay"><FolderOpen size={30} /><strong>松开即可导入 PDF</strong><span>文件会复制到本地论文库</span></div>}
+      {dropNotice && <div className="native-drop-notice" role="alert"><span>{dropNotice}</span><button onClick={() => setDropNotice("")}>知道了</button></div>}
     </div>
   );
 }

@@ -18,7 +18,7 @@ Papers2Innovations is not another “store PDFs and generate a summary” tool. 
 
 It reconstructs PDFs as section-based documents linked back to source pages, then brings bilingual reading, paper-scoped context, figure analysis, citation relationships, and staged innovation work into one recoverable local workspace.
 
-> Current release: Windows x64 `v0.1.25`. The project is still evolving rapidly in `0.1.x`; keep backups of irreplaceable source PDFs.
+> Current release: Windows x64 `v0.1.27`. The project is still evolving rapidly in `0.1.x`; keep backups of irreplaceable source PDFs.
 
 ## Highlights
 
@@ -55,7 +55,7 @@ Collections are data, not decorative tags. Nodes, hierarchy, and paper assignmen
 
 ### Read-only Zotero import
 
-First launch can create a recommended library under Documents or open an existing one. Zotero is discovered from its profile; if discovery fails, select the directory containing `zotero.sqlite`. Preview collections, papers, page estimates, and files before import. PDFs are SHA-256 verified and atomically copied while Zotero remains untouched.
+First launch guides users through creating a local library, assigning text and vision models, and adding local PDFs. Local import is always the primary path; Zotero is an optional source inside Add Papers. Zotero is discovered from its profile; if discovery fails, select the directory containing `zotero.sqlite`. Preview collections, papers, page estimates, and files before import. PDFs are SHA-256 verified and atomically copied while Zotero remains untouched.
 
 ![Papers2Innovations Zotero import wizard](docs/images/zotero-import.png)
 
@@ -90,10 +90,10 @@ The graph uses a stable concentric layout around the current paper, separating d
 ## Quick start
 
 1. Download the latest Windows x64 installer from [GitHub Releases](https://github.com/cutcutjust/papers2innovations/releases/latest).
-2. On first launch, accept the recommended library location or select an independent existing directory.
-3. Use **Add PDF**, place files under `Papers/`, or close Zotero and open **Import Zotero**.
-4. Track hash, layout, OCR, image, table, and indexing stages under Activity; retry from a failed stage.
-5. Add your endpoint and key under Models & Processing, then assign translation, chat, cleanup, OCR, or figure-analysis models.
+2. Follow first-run setup to create the recommended library or select an independent existing directory.
+3. Assign at least one text model and one vision model. A multimodal model may serve both roles, and setup can be deferred.
+4. Use **Add Papers** to select or drop local PDFs; open the optional Zotero wizard from the same panel when needed.
+5. Track hash, layout, OCR, image, table, and indexing stages under Activity; retry from a failed stage.
 6. Read by section, translate and ask questions in Immersive Reading, then move selected evidence into Innovate for cross-paper work.
 
 Local import and fallback parsing need no model key. Translation, explanation, Markdown cleanup, OCR, figure analysis, chat, and innovation workflows call only user-configured models.

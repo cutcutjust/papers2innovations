@@ -35,9 +35,21 @@ describe("workspace settings snapshot", () => {
     expect(isWorkspaceSettingsSnapshot(valid)).toBe(true);
   });
 
+  it("accepts a v3 new-user snapshot with an empty model registry", () => {
+    expect(isWorkspaceSettingsSnapshot({
+      ...valid,
+      version: 3,
+      providers: [],
+      customModels: [],
+      defaultTextModelId: "",
+      onboardingVersion: 0,
+    })).toBe(true);
+  });
+
   it("rejects incomplete or unsupported snapshots", () => {
     expect(isWorkspaceSettingsSnapshot({ ...valid, providers: [] })).toBe(false);
     expect(isWorkspaceSettingsSnapshot({ ...valid, fontSize: "huge" })).toBe(false);
     expect(isWorkspaceSettingsSnapshot({ ...valid, readerAnnotationsVisible: "yes" })).toBe(false);
+    expect(isWorkspaceSettingsSnapshot({ ...valid, version: 3, onboardingVersion: -1 })).toBe(false);
   });
 });

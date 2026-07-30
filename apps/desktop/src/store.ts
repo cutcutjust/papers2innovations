@@ -1,12 +1,15 @@
 import { create } from "zustand";
-import type { ApiFormat, ModelConfig, ProviderConfig } from "@p2i/contracts";
+import { isTauri } from "@tauri-apps/api/core";
+import type { ApiFormat, ModelCapability, ModelConfig, ProviderConfig } from "@p2i/contracts";
 import { sanitizeProviderConfig } from "./lib/providerConfig";
 import { normalizeFontSize, type FontSize } from "./lib/fontSize";
 import type { WorkspaceSettingsSnapshot } from "./lib/settingsSnapshot";
+import { modelHasCapability } from "./lib/modelCapabilities";
 
 export type View = "library" | "reader" | "agents" | "context" | "graph" | "innovate" | "jobs" | "import" | "settings" | "security";
 type ReaderMode = "markdown" | "pdf" | "figures";
 export type ModelApiFormat = ApiFormat;
+export const CURRENT_ONBOARDING_VERSION = 1;
 
 export const defaultProviders: ProviderConfig[] = [
   { id: "provider-openai-demo", name: "OpenAI-compatible", format: "openai", baseUrl: "https://api.example.com/v1", credentialId: "provider-openai-demo", timeoutSeconds: 90 },
@@ -14,11 +17,16 @@ export const defaultProviders: ProviderConfig[] = [
 ];
 
 export const defaultCustomModels: ModelConfig[] = [
-  { id: "custom-fast-model", providerId: "provider-openai-demo", displayName: "Fast", model: "custom-fast-model", maxContextTokens: 128000, maxOutputTokens: 4096 },
-  { id: "custom-chat-model", providerId: "provider-openai-demo", displayName: "Chat", model: "custom-chat-model", maxContextTokens: 128000, maxOutputTokens: 4096 },
-  { id: "custom-long-context-model", providerId: "provider-anthropic-demo", displayName: "Long context", model: "custom-long-context-model", maxContextTokens: 200000, maxOutputTokens: 8192 },
-  { id: "custom-reasoning-model", providerId: "provider-openai-demo", displayName: "Reasoning", model: "custom-reasoning-model", maxContextTokens: 128000, maxOutputTokens: 8192 },
+  { id: "custom-fast-model", providerId: "provider-openai-demo", displayName: "Fast", model: "custom-fast-model", maxContextTokens: 128000, maxOutputTokens: 4096, capabilities: ["text"] },
+  { id: "custom-chat-model", providerId: "provider-openai-demo", displayName: "Chat", model: "custom-chat-model", maxContextTokens: 128000, maxOutputTokens: 4096, capabilities: ["text"] },
+  { id: "custom-long-context-model", providerId: "provider-anthropic-demo", displayName: "Long context", model: "custom-long-context-model", maxContextTokens: 200000, maxOutputTokens: 8192, capabilities: ["text"] },
+  { id: "custom-reasoning-model", providerId: "provider-openai-demo", displayName: "Reasoning", model: "custom-reasoning-model", maxContextTokens: 128000, maxOutputTokens: 8192, capabilities: ["text"] },
 ];
+
+const withCapability = (model: ModelConfig, capability: ModelCapability): ModelConfig => ({
+  ...model,
+  capabilities: Array.from(new Set([...(model.capabilities ?? ["text"]), capability])),
+});
 
 export interface WorkspaceState {
   root: string;
@@ -32,6 +40,7 @@ export interface WorkspaceState {
   pdfPage: number;
   providers: ProviderConfig[];
   customModels: ModelConfig[];
+  defaultTextModelId: string;
   contextCompressionModelId: string;
   markdownFormattingModelId: string;
   autoFormatMarkdown: boolean;
@@ -45,6 +54,9 @@ export interface WorkspaceState {
   readerTextColor: string;
   readerTranslationView: "original" | "translated";
   readerAnnotationsVisible: boolean;
+  onboardingVersion: number;
+  importDialogOpen: boolean;
+  pendingImportPaths: string[];
   setRoot: (root: string) => void;
   selectPaper: (paperId: string) => void;
   openReader: (paperId?: string) => void;
@@ -56,9 +68,10 @@ export interface WorkspaceState {
   setReaderFocusMode: (enabled: boolean) => void;
   openPdfAt: (page: number) => void;
   addCustomModel: (provider: ProviderConfig, model: ModelConfig) => void;
-  updateCustomModel: (modelId: string, patch: Partial<Pick<ModelConfig, "displayName" | "maxContextTokens" | "maxOutputTokens">>) => void;
+  updateCustomModel: (modelId: string, patch: Partial<Pick<ModelConfig, "displayName" | "maxContextTokens" | "maxOutputTokens" | "capabilities">>) => void;
   removeCustomModel: (modelId: string) => void;
   setContextCompressionModelId: (modelId: string) => void;
+  setDefaultTextModelId: (modelId: string) => void;
   setMarkdownFormattingModelId: (modelId: string) => void;
   setAutoFormatMarkdown: (enabled: boolean) => void;
   setFullPageOcrModelId: (modelId: string) => void;
@@ -70,10 +83,14 @@ export interface WorkspaceState {
   setReaderColors: (background: string, text: string) => void;
   setReaderTranslationView: (view: WorkspaceState["readerTranslationView"]) => void;
   setReaderAnnotationsVisible: (visible: boolean) => void;
+  setOnboardingVersion: (version: number) => void;
+  openPaperImport: (paths?: string[]) => void;
+  closePaperImport: () => void;
   restoreWorkspaceSettings: (snapshot: WorkspaceSettingsSnapshot) => void;
 }
 
 const savedRoot = localStorage.getItem("p2i.libraryRoot") ?? "";
+const savedOnboardingVersion = localStorage.getItem("p2i.onboardingVersion");
 export const hasPersistedWorkspaceSettings = Boolean(
   localStorage.getItem("p2i.providers") || localStorage.getItem("p2i.models") || localStorage.getItem("p2i.libraryRoot"),
 );
@@ -90,6 +107,7 @@ const loadModelRegistry = (): { providers: ProviderConfig[]; models: ModelConfig
         ...model,
         maxContextTokens: Number.isFinite(model.maxContextTokens) && model.maxContextTokens >= 4096 ? model.maxContextTokens : 128000,
         maxOutputTokens: Number.isFinite(model.maxOutputTokens) && model.maxOutputTokens >= 256 ? model.maxOutputTokens : 4096,
+        capabilities: model.capabilities?.length ? model.capabilities : ["text"] as ModelCapability[],
       }));
       return { providers: safeProviders, models: safeModels };
     }
@@ -110,13 +128,14 @@ const loadModelRegistry = (): { providers: ProviderConfig[]; models: ModelConfig
         displayName: item.name || item.id,
         maxContextTokens: 128000,
         maxOutputTokens: 4096,
+        capabilities: ["text"] as ModelCapability[],
       }));
       return { providers: migratedProviders, models: migratedModels };
     }
   } catch {
     // Fall through to non-secret defaults.
   }
-  return { providers: defaultProviders, models: defaultCustomModels };
+  return isTauri() ? { providers: [], models: [] } : { providers: defaultProviders, models: defaultCustomModels };
 };
 
 const initialRegistry = loadModelRegistry();
@@ -137,6 +156,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   pdfPage: 1,
   providers: initialRegistry.providers,
   customModels: initialRegistry.models,
+  defaultTextModelId: localStorage.getItem("p2i.defaultTextModelId") ?? initialRegistry.models.find((model) => modelHasCapability(model, "text"))?.id ?? "",
   contextCompressionModelId: localStorage.getItem("p2i.contextCompressionModelId") ?? initialRegistry.models[0]?.id ?? "",
   markdownFormattingModelId: localStorage.getItem("p2i.markdownFormattingModelId") ?? initialRegistry.models[0]?.id ?? "",
   autoFormatMarkdown: localStorage.getItem("p2i.autoFormatMarkdown") === "true",
@@ -150,6 +170,11 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   readerTextColor: localStorage.getItem("p2i.readerTextColor") || "#20242c",
   readerTranslationView: localStorage.getItem("p2i.readerTranslationView") === "translated" ? "translated" : "original",
   readerAnnotationsVisible: localStorage.getItem("p2i.readerAnnotationsVisible") !== "false",
+  onboardingVersion: savedOnboardingVersion === null
+    ? (isTauri() && !savedRoot ? 0 : CURRENT_ONBOARDING_VERSION)
+    : Math.max(0, Number(savedOnboardingVersion) || 0),
+  importDialogOpen: false,
+  pendingImportPaths: [],
   setRoot: (root) => {
     localStorage.setItem("p2i.libraryRoot", root);
     set({ root });
@@ -166,9 +191,12 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   addCustomModel: (provider, model) => set((state) => {
     const safeProvider = sanitizeProviderConfig(provider);
     const providers = [...state.providers.filter((item) => item.id !== safeProvider.id), safeProvider];
-    const customModels = [...state.customModels.filter((item) => item.id !== model.id), model];
+    const normalizedModel = { ...model, capabilities: model.capabilities?.length ? model.capabilities : ["text"] as ModelCapability[] };
+    const customModels = [...state.customModels.filter((item) => item.id !== model.id), normalizedModel];
     persistModelRegistry(providers, customModels);
-    return { providers, customModels };
+    const defaultTextModelId = state.defaultTextModelId || (modelHasCapability(normalizedModel, "text") ? normalizedModel.id : "");
+    if (defaultTextModelId) localStorage.setItem("p2i.defaultTextModelId", defaultTextModelId);
+    return { providers, customModels, defaultTextModelId };
   }),
   updateCustomModel: (modelId, patch) => set((state) => {
     const customModels = state.customModels.map((model) => model.id === modelId ? { ...model, ...patch } : model);
@@ -181,17 +209,27 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
     const providers = state.providers.filter((provider) => usedProviders.has(provider.id));
     persistModelRegistry(providers, customModels);
     const markdownFormattingModelId = state.markdownFormattingModelId === modelId ? customModels[0]?.id ?? "" : state.markdownFormattingModelId;
+    const defaultTextModelId = state.defaultTextModelId === modelId ? customModels.find((model) => modelHasCapability(model, "text"))?.id ?? "" : state.defaultTextModelId;
+    const contextCompressionModelId = state.contextCompressionModelId === modelId ? defaultTextModelId : state.contextCompressionModelId;
     const fullPageOcrModelId = state.fullPageOcrModelId === modelId ? "" : state.fullPageOcrModelId;
     const visionAnalysisModelId = state.visionAnalysisModelId === modelId ? "" : state.visionAnalysisModelId;
     localStorage.setItem("p2i.markdownFormattingModelId", markdownFormattingModelId);
+    localStorage.setItem("p2i.defaultTextModelId", defaultTextModelId);
+    localStorage.setItem("p2i.contextCompressionModelId", contextCompressionModelId);
     localStorage.setItem("p2i.fullPageOcrModelId", fullPageOcrModelId);
     localStorage.setItem("p2i.visionAnalysisModelId", visionAnalysisModelId);
-    return { providers, customModels, markdownFormattingModelId, fullPageOcrModelId, visionAnalysisModelId };
+    return { providers, customModels, defaultTextModelId, contextCompressionModelId, markdownFormattingModelId, fullPageOcrModelId, visionAnalysisModelId };
   }),
   setContextCompressionModelId: (contextCompressionModelId) => {
     localStorage.setItem("p2i.contextCompressionModelId", contextCompressionModelId);
     set({ contextCompressionModelId });
   },
+  setDefaultTextModelId: (defaultTextModelId) => set((state) => {
+    const customModels = state.customModels.map((model) => model.id === defaultTextModelId ? withCapability(model, "text") : model);
+    persistModelRegistry(state.providers, customModels);
+    localStorage.setItem("p2i.defaultTextModelId", defaultTextModelId);
+    return { defaultTextModelId, customModels };
+  }),
   setMarkdownFormattingModelId: (markdownFormattingModelId) => {
     localStorage.setItem("p2i.markdownFormattingModelId", markdownFormattingModelId);
     set({ markdownFormattingModelId });
@@ -204,10 +242,12 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
     localStorage.setItem("p2i.fullPageOcrModelId", fullPageOcrModelId);
     set({ fullPageOcrModelId });
   },
-  setVisionAnalysisModelId: (visionAnalysisModelId) => {
+  setVisionAnalysisModelId: (visionAnalysisModelId) => set((state) => {
+    const customModels = state.customModels.map((model) => model.id === visionAnalysisModelId ? withCapability(model, "vision") : model);
+    persistModelRegistry(state.providers, customModels);
     localStorage.setItem("p2i.visionAnalysisModelId", visionAnalysisModelId);
-    set({ visionAnalysisModelId });
-  },
+    return { visionAnalysisModelId, customModels };
+  }),
   setOcrConsent: (ocrConsent) => {
     localStorage.setItem("p2i.ocrConsent", String(ocrConsent));
     set({ ocrConsent });
@@ -238,12 +278,25 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
     localStorage.setItem("p2i.readerAnnotationsVisible", String(readerAnnotationsVisible));
     set({ readerAnnotationsVisible });
   },
+  setOnboardingVersion: (onboardingVersion) => {
+    localStorage.setItem("p2i.onboardingVersion", String(onboardingVersion));
+    set({ onboardingVersion });
+  },
+  openPaperImport: (pendingImportPaths = []) => set({ importDialogOpen: true, pendingImportPaths }),
+  closePaperImport: () => set({ importDialogOpen: false, pendingImportPaths: [] }),
   restoreWorkspaceSettings: (snapshot) => {
     const providers = snapshot.providers.map(sanitizeProviderConfig);
-    const customModels = snapshot.customModels;
+    const customModels = snapshot.customModels.map((model) => ({ ...model, capabilities: model.capabilities?.length ? model.capabilities : ["text"] as ModelCapability[] }));
+    const defaultTextModelId = snapshot.defaultTextModelId
+      ?? customModels.find((model) => model.id === snapshot.contextCompressionModelId)?.id
+      ?? customModels.find((model) => modelHasCapability(model, "text"))?.id
+      ?? "";
+    const onboardingVersion = snapshot.onboardingVersion ?? (snapshot.root ? CURRENT_ONBOARDING_VERSION : 0);
     persistModelRegistry(providers, customModels);
     localStorage.setItem("p2i.libraryRoot", snapshot.root);
     localStorage.setItem("p2i.contextCompressionModelId", snapshot.contextCompressionModelId);
+    localStorage.setItem("p2i.defaultTextModelId", defaultTextModelId);
+    localStorage.setItem("p2i.onboardingVersion", String(onboardingVersion));
     localStorage.setItem("p2i.markdownFormattingModelId", snapshot.markdownFormattingModelId);
     localStorage.setItem("p2i.autoFormatMarkdown", String(snapshot.autoFormatMarkdown));
     localStorage.setItem("p2i.fullPageOcrModelId", snapshot.fullPageOcrModelId);
@@ -260,6 +313,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
       root: snapshot.root,
       providers,
       customModels,
+      defaultTextModelId,
       contextCompressionModelId: snapshot.contextCompressionModelId,
       markdownFormattingModelId: snapshot.markdownFormattingModelId,
       autoFormatMarkdown: snapshot.autoFormatMarkdown,
@@ -273,6 +327,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
       readerTextColor: snapshot.readerTextColor ?? "#20242c",
       readerTranslationView: snapshot.readerTranslationView ?? "original",
       readerAnnotationsVisible: snapshot.readerAnnotationsVisible ?? true,
+      onboardingVersion,
     });
   },
 }));
