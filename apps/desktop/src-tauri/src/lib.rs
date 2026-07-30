@@ -404,7 +404,8 @@ impl Engine {
                     && message.get("id").is_some()
                 {
                     let host_engine = reader_engine.clone();
-                    std::thread::spawn(move || host_engine.handle_host_request(message));
+                    let host_app = reader_app.clone();
+                    std::thread::spawn(move || host_engine.handle_host_request(message, host_app));
                     continue;
                 }
                 if message.get("method").is_some() {
@@ -465,22 +466,61 @@ impl Engine {
             .map_err(|error| format!("failed to write to paper engine: {error}"))
     }
 
-    fn handle_host_request(&self, message: Value) {
+    fn handle_host_request(&self, message: Value, app: AppHandle) {
         let id = message.get("id").cloned().unwrap_or(Value::Null);
         let method = message
             .get("method")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        let activity_id = format!("host-{}-{}", method.replace('.', "-"), id);
         let response = if method == "host.ocr_page" {
             match serde_json::from_value::<OcrRequest>(
                 message.get("params").cloned().unwrap_or_default(),
             ) {
-                Ok(request) => match self.ocr_page(request) {
-                    Ok(result) => json!({"jsonrpc":"2.0", "id":id, "result":result}),
-                    Err(error) => {
-                        json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32010,"message":error}})
+                Ok(request) => {
+                    let model_name = request.model.clone();
+                    emit_host_activity(
+                        &app,
+                        &activity_id,
+                        "ocr",
+                        "全文 OCR",
+                        &model_name,
+                        "sending",
+                        None,
+                        None,
+                        None,
+                    );
+                    match self.ocr_page(request, Some((&app, &activity_id, &model_name))) {
+                        Ok(result) => {
+                            emit_host_activity(
+                                &app,
+                                &activity_id,
+                                "ocr",
+                                "全文 OCR",
+                                &model_name,
+                                "completed",
+                                result.pointer("/usage/durationMs").and_then(Value::as_u64),
+                                result.get("usage").cloned(),
+                                None,
+                            );
+                            json!({"jsonrpc":"2.0", "id":id, "result":result})
+                        }
+                        Err(error) => {
+                            emit_host_activity(
+                                &app,
+                                &activity_id,
+                                "ocr",
+                                "全文 OCR",
+                                &model_name,
+                                "error",
+                                None,
+                                None,
+                                Some(error.clone()),
+                            );
+                            json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32010,"message":error}})
+                        }
                     }
-                },
+                }
                 Err(error) => {
                     json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32602,"message":error.to_string()}})
                 }
@@ -496,12 +536,58 @@ impl Engine {
             match serde_json::from_value::<VisionRequest>(
                 message.get("params").cloned().unwrap_or_default(),
             ) {
-                Ok(request) => match self.vision_analyze(request) {
-                    Ok(result) => json!({"jsonrpc":"2.0", "id":id, "result":result}),
-                    Err(error) => {
-                        json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32012,"message":error}})
+                Ok(request) => {
+                    let model_name = self
+                        .0
+                        .vision
+                        .lock()
+                        .ok()
+                        .and_then(|config| {
+                            config.as_ref().map(|item| item.model.display_name.clone())
+                        })
+                        .unwrap_or_else(|| "图片解读模型".into());
+                    emit_host_activity(
+                        &app,
+                        &activity_id,
+                        "vision",
+                        "论文图片分析",
+                        &model_name,
+                        "sending",
+                        None,
+                        None,
+                        None,
+                    );
+                    match self.vision_analyze(request, Some((&app, &activity_id, &model_name))) {
+                        Ok(result) => {
+                            emit_host_activity(
+                                &app,
+                                &activity_id,
+                                "vision",
+                                "论文图片分析",
+                                &model_name,
+                                "completed",
+                                result.pointer("/usage/durationMs").and_then(Value::as_u64),
+                                result.get("usage").cloned(),
+                                None,
+                            );
+                            json!({"jsonrpc":"2.0", "id":id, "result":result})
+                        }
+                        Err(error) => {
+                            emit_host_activity(
+                                &app,
+                                &activity_id,
+                                "vision",
+                                "论文图片分析",
+                                &model_name,
+                                "error",
+                                None,
+                                None,
+                                Some(error.clone()),
+                            );
+                            json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32012,"message":error}})
+                        }
                     }
-                },
+                }
                 Err(error) => {
                     json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32602,"message":error.to_string()}})
                 }
@@ -528,7 +614,11 @@ impl Engine {
         }))
     }
 
-    fn vision_analyze(&self, request: VisionRequest) -> Result<Value, String> {
+    fn vision_analyze(
+        &self,
+        request: VisionRequest,
+        activity: Option<(&AppHandle, &str, &str)>,
+    ) -> Result<Value, String> {
         let config = self
             .0
             .vision
@@ -619,6 +709,19 @@ impl Engine {
         if !status.is_success() {
             return Err(format!("图片解读接口返回 HTTP {status}"));
         }
+        if let Some((app, request_id, model_name)) = activity {
+            emit_host_activity(
+                app,
+                request_id,
+                "vision",
+                "论文图片分析",
+                model_name,
+                "connected",
+                None,
+                None,
+                None,
+            );
+        }
         let payload: Value = response.json().map_err(|error| error.to_string())?;
         let description = payload
             .pointer(description_pointer)
@@ -636,7 +739,11 @@ impl Engine {
         }))
     }
 
-    fn ocr_page(&self, request: OcrRequest) -> Result<Value, String> {
+    fn ocr_page(
+        &self,
+        request: OcrRequest,
+        activity: Option<(&AppHandle, &str, &str)>,
+    ) -> Result<Value, String> {
         let config = self
             .0
             .ocr
@@ -682,6 +789,7 @@ impl Engine {
             .build()
             .map_err(|error| error.to_string())?;
         let _permit = self.0.ocr_limiter.acquire()?;
+        let started = std::time::Instant::now();
         let mut last_error = String::new();
         for (attempt, delay) in [0_u64, 2, 4, 8].into_iter().enumerate() {
             if delay > 0 {
@@ -697,6 +805,19 @@ impl Engine {
                 .send();
             match response {
                 Ok(response) if response.status().is_success() => {
+                    if let Some((app, request_id, model_name)) = activity {
+                        emit_host_activity(
+                            app,
+                            request_id,
+                            "ocr",
+                            "全文 OCR",
+                            model_name,
+                            "connected",
+                            None,
+                            None,
+                            None,
+                        );
+                    }
                     let payload: Value = response.json().map_err(|error| error.to_string())?;
                     let markdown = payload
                         .pointer("/choices/0/message/content")
@@ -707,7 +828,8 @@ impl Engine {
                         "alignmentConfidence": 0.0,
                         "usage": {
                             "inputTokens": payload.pointer("/usage/prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
-                            "outputTokens": payload.pointer("/usage/completion_tokens").and_then(Value::as_u64).unwrap_or(0)
+                            "outputTokens": payload.pointer("/usage/completion_tokens").and_then(Value::as_u64).unwrap_or(0),
+                            "durationMs": started.elapsed().as_millis() as u64
                         }
                     }));
                 }
@@ -1430,6 +1552,37 @@ fn emit_model_event(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_host_activity(
+    app: &AppHandle,
+    request_id: &str,
+    source: &str,
+    label: &str,
+    model_name: &str,
+    phase: &str,
+    duration_ms: Option<u64>,
+    usage: Option<Value>,
+    error: Option<String>,
+) {
+    let mut payload = json!({
+        "requestId": request_id,
+        "source": source,
+        "label": label,
+        "modelName": model_name,
+        "phase": phase,
+    });
+    if let Some(duration_ms) = duration_ms {
+        payload["durationMs"] = json!(duration_ms);
+    }
+    if let Some(usage) = usage {
+        payload["usage"] = usage;
+    }
+    if let Some(error) = error {
+        payload["error"] = json!(error);
+    }
+    let _ = app.emit("model-host-activity", payload);
+}
+
 #[derive(Default)]
 struct ToolCallAccumulator {
     id: String,
@@ -1565,6 +1718,7 @@ async fn run_model_stream(
             input.model.max_output_tokens.clamp(1, 65_536),
         )
         .await?;
+        emit_model_event(&app, &input.request_id, "connected", None, None, None, None);
         consume_model_stream(response, &input.provider.format, &cancelled, |delta| {
             emit_model_event(
                 &app,

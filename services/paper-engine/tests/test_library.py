@@ -565,6 +565,16 @@ def test_reader_analysis_and_chat_are_revisioned_and_persisted(tmp_path: Path) -
     assert second["revision"] == 2
     assert Library(tmp_path).list_reader_analyses(paper["id"])[0]["revision"] == 2
 
+    grammar = library.save_reader_analysis({
+        **analysis_payload,
+        "blockId": "method:block-grammar",
+        "analysisType": "grammar",
+        "sourceText": "The proposed model improves accuracy.",
+        "resultText": "句子主干为 model improves accuracy。",
+        "promptVersion": "reader-analysis-v2",
+    })
+    assert grammar["analysisType"] == "grammar"
+
     snapshot = {"id": "reader-chat-context", "items": []}
     turn = library.save_reader_chat_turn({
         "paperId": paper["id"],

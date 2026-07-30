@@ -17,6 +17,7 @@ import { LibraryWorkspace } from "./components/LibraryWorkspace";
 import { PromptLibrary } from "./components/PromptLibrary";
 import { ContextWorkspace } from "./components/ContextWorkspace";
 import { CitationGraph } from "./components/CitationGraph";
+import { ModelActivityCenter } from "./components/ModelActivityCenter";
 import { chooseLibrary, initializeLibrary, listCollections, listJobs, listPapers, nativeRuntime, onEngineProgress, scanLibrary, startLibraryWatcher } from "./lib/bridge";
 import { clearVisionProvider, configureVisionProvider, hydrateOcrCredential, hydrateProviderCredentials, loadWorkspaceSettingsSnapshot, saveWorkspaceSettingsSnapshot } from "./lib/credentials";
 import { filterPapersByCollection } from "./lib/collectionTree";
@@ -262,6 +263,7 @@ export function App() {
         </div>
       </div>
       <AppUpdater />
+      <ModelActivityCenter />
     </div>
   );
 }

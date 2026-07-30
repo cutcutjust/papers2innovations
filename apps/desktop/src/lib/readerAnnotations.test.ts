@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ReaderAnnotation } from "@p2i/contracts";
-import { createReaderAnnotationPlugin, readerTranslationKey } from "./readerAnnotations";
+import { createReaderAnnotationPlugin, readerTranslationKey, sentenceRangeAtOffset } from "./readerAnnotations";
 
 describe("reader annotation renderer", () => {
   it("splits source text into independently addressable translation and chat runs", () => {
@@ -61,5 +61,11 @@ describe("reader annotation renderer", () => {
     createReaderAnnotationPlugin({ source, annotationsVisible: false, activeTranslationKeys: new Set(["record:first"]), translations: [{ recordId: "record", segmentId: "first", sourceStart: 0, sourceEnd: source.length, sourceText: source, translatedText: "Translated.", terms: [] }], annotations: [] })()(tree);
     expect(tree.children[0].children).toHaveLength(1);
     expect(tree.children[0].children[0].value).toBe(source);
+  });
+
+  it("finds a complete sentence around a right-click source offset", () => {
+    const source = "First result. The proposed model improves accuracy. Final note.";
+    expect(sentenceRangeAtOffset(source, source.indexOf("model"))?.text).toBe("The proposed model improves accuracy.");
+    expect(sentenceRangeAtOffset(source, source.indexOf("Final"))?.start).toBe(source.indexOf("Final"));
   });
 });

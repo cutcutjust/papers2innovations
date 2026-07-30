@@ -235,11 +235,46 @@ export interface ModelStreamRequest {
 
 export interface ModelStreamEvent {
   requestId: string;
-  kind: "started" | "delta" | "tool_calls" | "done" | "cancelled" | "error";
+  kind: "started" | "connected" | "delta" | "tool_calls" | "done" | "cancelled" | "error";
   text?: string;
   toolCalls?: ModelToolCall[];
   error?: string;
   usage?: { inputTokens: number; outputTokens: number };
+}
+
+export type ModelActivityPhase = "preparing" | "sending" | "connected" | "streaming" | "saving" | "completed" | "cancelled" | "error";
+
+export interface ModelActivityMeta {
+  source: string;
+  label: string;
+  modelName: string;
+  groupKey?: string;
+  totalItems?: number;
+  deferCompletion?: boolean;
+}
+
+export interface ModelActivityState extends ModelActivityMeta {
+  requestId: string;
+  phase: ModelActivityPhase;
+  startedAt: number;
+  connectedAt?: number;
+  firstTokenAt?: number;
+  completedAt?: number;
+  receivedCharacters: number;
+  completedItems?: number;
+  usage?: { inputTokens: number; outputTokens: number };
+  error?: string;
+}
+
+export interface ModelHostActivityEvent {
+  requestId: string;
+  source: "ocr" | "vision";
+  label: string;
+  modelName: string;
+  phase: "sending" | "connected" | "completed" | "error";
+  durationMs?: number;
+  usage?: { inputTokens: number; outputTokens: number };
+  error?: string;
 }
 
 export interface TranslationRecord {
@@ -282,6 +317,10 @@ export interface TranslationTerm {
   contextMeaning?: string;
   translatedStart?: number;
   translatedEnd?: number;
+  category?: "domain_term" | "method" | "model" | "dataset" | "acronym" | "technical_phrase";
+  domain?: string;
+  specialtyScore?: number;
+  selectionReason?: string;
 }
 
 export type ReaderAnnotationTarget = "translation" | "chat_turn" | "analysis" | "conversation";
@@ -303,7 +342,7 @@ export interface ReaderAnnotation {
   updatedAt: string;
 }
 
-export type ReaderAnalysisType = "formula" | "theorem";
+export type ReaderAnalysisType = "formula" | "theorem" | "grammar";
 
 export interface ReaderAnalysisRecord {
   id: string;

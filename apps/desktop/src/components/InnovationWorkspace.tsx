@@ -244,7 +244,7 @@ export function InnovationWorkspace({ papers }: { papers: LibraryPaper[] }) {
           { role: "system", content: "你是科研创新流水线中的一个阶段。请默认使用中文，只使用提供的证据，保留来源锚点，绝不虚构搜索、引用、结果或元数据。" },
           { role: "user", content: stageInstruction(stage, run.promptText, contextText, outputs) },
         ],
-      }, onEvent).then((handle) => {
+      }, onEvent, { source: "innovation", label: `${routes.find((route) => route.id === stage)?.label ?? stage} · 创新工作台`, groupKey: `innovation:${run.id}` }).then((handle) => {
         if (terminal) handle.dispose();
         else streamHandle.current = handle;
       }).catch((error) => void finish("failed", { requestId: `${run.id}:${stage}`, kind: "error", error: error instanceof Error ? error.message : String(error) }));

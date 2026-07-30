@@ -4,6 +4,7 @@ import { Stronghold, type Client } from "@tauri-apps/plugin-stronghold";
 import type { CredentialSummary, ModelConfig, ProviderConfig } from "@p2i/contracts";
 import { nativeRuntime } from "./bridge";
 import { sanitizeProviderConfig } from "./providerConfig";
+import { applyModelStreamEvent, beginModelActivity, completeModelActivity, failModelActivity } from "./modelActivity";
 import { isWorkspaceSettingsSnapshot, type WorkspaceSettingsSnapshot } from "./settingsSnapshot";
 
 const encoder = new TextEncoder();
@@ -123,7 +124,18 @@ export async function testQwenConnection(): Promise<{
   requiresWorkspace: boolean;
 }> {
   if (!nativeRuntime) return { ok: true, status: 200, requiresWorkspace: false };
-  return invoke("qwen_test_connection");
+  const requestId = crypto.randomUUID();
+  beginModelActivity(requestId, { source: "connection-test", label: "测试全文 OCR 接口", modelName: "全文 OCR" });
+  applyModelStreamEvent({ requestId, kind: "started" });
+  try {
+    const result = await invoke<{ ok: boolean; status: number; requiresWorkspace: boolean }>("qwen_test_connection");
+    if (result.ok) completeModelActivity(requestId);
+    else failModelActivity(requestId, `OCR 接口返回 HTTP ${result.status}`);
+    return result;
+  } catch (error) {
+    failModelActivity(requestId, error instanceof Error ? error.message : String(error));
+    throw error;
+  }
 }
 
 export async function configureOcrProvider(provider: ProviderConfig, model: ModelConfig, consent: boolean): Promise<void> {
@@ -291,7 +303,18 @@ export async function deleteProviderCredential(credentialId: string): Promise<vo
 
 export async function testProviderConnection(provider: ProviderConfig, model: ModelConfig): Promise<{ ok: boolean; status: number }> {
   if (!nativeRuntime) return { ok: true, status: 200 };
-  return invoke("provider_test_connection", { input: { provider: sanitizeProviderConfig(provider), model } });
+  const requestId = crypto.randomUUID();
+  beginModelActivity(requestId, { source: "connection-test", label: `测试 ${model.displayName}`, modelName: model.displayName });
+  applyModelStreamEvent({ requestId, kind: "started" });
+  try {
+    const result = await invoke<{ ok: boolean; status: number }>("provider_test_connection", { input: { provider: sanitizeProviderConfig(provider), model } });
+    if (result.ok) completeModelActivity(requestId);
+    else failModelActivity(requestId, `${model.displayName} 返回 HTTP ${result.status}`);
+    return result;
+  } catch (error) {
+    failModelActivity(requestId, error instanceof Error ? error.message : String(error));
+    throw error;
+  }
 }
 
 export async function loadWorkspaceSettingsSnapshot(): Promise<WorkspaceSettingsSnapshot | null> {

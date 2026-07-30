@@ -1959,8 +1959,8 @@ class Library:
         if missing:
             raise ValueError("Missing reader analysis fields: " + ", ".join(missing))
         analysis_type = str(payload["analysisType"])
-        if analysis_type not in {"formula", "theorem"}:
-            raise ValueError("Reader analysis type must be formula or theorem")
+        if analysis_type not in {"formula", "theorem", "grammar"}:
+            raise ValueError("Reader analysis type must be formula, theorem, or grammar")
         paper_id = str(payload["paperId"])
         result_text = str(payload["resultText"])
         if len(result_text) > 1_000_000:

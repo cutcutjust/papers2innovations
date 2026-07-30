@@ -1,8 +1,9 @@
-import type { AgentProfile, AgentPromptTemplate, AgentRun, AgentToolCallRecord, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, FigureAnalysis, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryCollection, LibraryPaper, ModelStreamEvent, ModelStreamRequest, ModelToolDefinition, PaperDocument, PreprocessQualityReport, ProgressNotification, PromptTemplate, PromptTemplateCategory, ReaderAnalysisRecord, ReaderAnalysisType, ReaderAnnotation, ReaderChatTurn, ReaderConversation, ScopedContextItem, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
+import type { AgentProfile, AgentPromptTemplate, AgentRun, AgentToolCallRecord, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, FigureAnalysis, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryCollection, LibraryPaper, ModelActivityMeta, ModelStreamEvent, ModelStreamRequest, ModelToolDefinition, PaperDocument, PreprocessQualityReport, ProgressNotification, PromptTemplate, PromptTemplateCategory, ReaderAnalysisRecord, ReaderAnalysisType, ReaderAnnotation, ReaderChatTurn, ReaderConversation, ScopedContextItem, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { demoMarkdown, demoPapers } from "../demo";
 import { sanitizeProviderConfig } from "./providerConfig";
+import { applyModelStreamEvent, beginModelActivity, failModelActivity } from "./modelActivity";
 import { DEFAULT_PROMPT_TEMPLATES } from "./promptTemplates";
 
 export const nativeRuntime = isTauri();
@@ -987,13 +988,26 @@ export interface ModelStreamHandle {
   dispose: () => void;
 }
 
-export async function startModelStream(input: ModelStreamRequest, onEvent: (event: ModelStreamEvent) => void): Promise<ModelStreamHandle> {
+export async function startModelStream(input: ModelStreamRequest, onEvent: (event: ModelStreamEvent) => void, activity?: Partial<ModelActivityMeta>): Promise<ModelStreamHandle> {
   const safeInput = { ...input, provider: sanitizeProviderConfig(input.provider) };
+  beginModelActivity(safeInput.requestId, {
+    source: activity?.source ?? "model",
+    label: activity?.label ?? "AI 模型调用",
+    modelName: activity?.modelName ?? safeInput.model.displayName,
+    groupKey: activity?.groupKey,
+    totalItems: activity?.totalItems,
+    deferCompletion: activity?.deferCompletion,
+  });
+  const emit = (event: ModelStreamEvent) => {
+    applyModelStreamEvent(event);
+    onEvent(event);
+  };
   if (!nativeRuntime) {
-    onEvent({ requestId: safeInput.requestId, kind: "started" });
+    emit({ requestId: safeInput.requestId, kind: "started" });
+    emit({ requestId: safeInput.requestId, kind: "connected" });
     const tool = safeInput.messages.some((message) => message.role === "tool") ? undefined : safeInput.tools?.find((candidate) => candidate.name === "find_evidence");
     if (tool) {
-      onEvent({ requestId: safeInput.requestId, kind: "tool_calls", toolCalls: [{ id: crypto.randomUUID(), name: tool.name, arguments: { query: "evidence" } }], usage: { inputTokens: 0, outputTokens: 0 } });
+      emit({ requestId: safeInput.requestId, kind: "tool_calls", toolCalls: [{ id: crypto.randomUUID(), name: tool.name, arguments: { query: "evidence" } }], usage: { inputTokens: 0, outputTokens: 0 } });
       return { cancel: async () => undefined, dispose: () => undefined };
     }
     const lastMessage = safeInput.messages.at(-1)?.content ?? "";
@@ -1010,17 +1024,18 @@ export async function startModelStream(input: ModelStreamRequest, onEvent: (even
         // Keep the generic preview response when the last message is not a translation payload.
       }
     }
-    onEvent({ requestId: safeInput.requestId, kind: "delta", text: previewText });
-    onEvent({ requestId: safeInput.requestId, kind: "done", usage: { inputTokens: 0, outputTokens: 0 } });
+    emit({ requestId: safeInput.requestId, kind: "delta", text: previewText });
+    emit({ requestId: safeInput.requestId, kind: "done", usage: { inputTokens: 0, outputTokens: 0 } });
     return { cancel: async () => undefined, dispose: () => undefined };
   }
   const unlisten = await listen<ModelStreamEvent>("model-stream", (event) => {
-    if (event.payload.requestId === safeInput.requestId) onEvent(event.payload);
+    if (event.payload.requestId === safeInput.requestId) emit(event.payload);
   });
   try {
     await invoke("model_stream_start", { input: safeInput });
   } catch (error) {
     unlisten();
+    failModelActivity(safeInput.requestId, error instanceof Error ? error.message : String(error));
     throw error;
   }
   return {

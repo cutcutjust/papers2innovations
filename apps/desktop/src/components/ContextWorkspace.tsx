@@ -258,7 +258,7 @@ export function ContextWorkspace({ papers, root }: { papers: LibraryPaper[]; roo
         model: selectedModel,
         temperature: 0.1,
         messages: contextCompressionMessages(source),
-      }, onEvent);
+      }, onEvent, { source: "context-compression", label: `压缩上下文：${capturedItem.title || "论文原文"}`, groupKey: `context:${capturedItem.paperId}` });
       if (terminalItems.current.has(item.id)) handle.dispose();
       else streamHandles.current.set(item.id, handle);
     } catch (cause) {

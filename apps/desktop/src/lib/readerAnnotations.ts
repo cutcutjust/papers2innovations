@@ -150,6 +150,68 @@ function textOffsetWithin(element: HTMLElement, container: Node, offset: number)
   }
 }
 
+function domPointForSourceOffset(root: HTMLElement, sourceOffset: number, edge: "start" | "end"): { node: Node; offset: number } | undefined {
+  const elements = Array.from(root.querySelectorAll<HTMLElement>("[data-source-start][data-source-end]"));
+  const element = elements.find((candidate) => {
+    const start = Number(candidate.dataset.sourceStart);
+    const end = Number(candidate.dataset.sourceEnd);
+    return Number.isFinite(start) && Number.isFinite(end) && (edge === "start" ? sourceOffset >= start && sourceOffset < end : sourceOffset > start && sourceOffset <= end);
+  }) ?? elements.find((candidate) => Number(candidate.dataset.sourceStart) === sourceOffset || Number(candidate.dataset.sourceEnd) === sourceOffset);
+  if (!element) return undefined;
+  const start = Number(element.dataset.sourceStart);
+  const end = Number(element.dataset.sourceEnd);
+  if (element.dataset.sourceExact !== "true") return { node: element, offset: edge === "start" ? 0 : element.childNodes.length };
+  const target = Math.max(0, Math.min(end - start, sourceOffset - start));
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  let remaining = target;
+  let node = walker.nextNode();
+  while (node) {
+    const length = node.textContent?.length ?? 0;
+    if (remaining <= length) return { node, offset: remaining };
+    remaining -= length;
+    node = walker.nextNode();
+  }
+  return { node: element, offset: element.childNodes.length };
+}
+
+export function domRangeFromSourceRange(root: HTMLElement, start: number, end: number): Range | undefined {
+  const startPoint = domPointForSourceOffset(root, start, "start");
+  const endPoint = domPointForSourceOffset(root, end, "end");
+  if (!startPoint || !endPoint) return undefined;
+  const range = document.createRange();
+  try {
+    range.setStart(startPoint.node, startPoint.offset);
+    range.setEnd(endPoint.node, endPoint.offset);
+    return range;
+  } catch {
+    return undefined;
+  }
+}
+
+export function sourceOffsetFromDomPoint(container: Node, offset: number): number | undefined {
+  const element = sourceElement(container);
+  if (!element) return undefined;
+  const start = Number(element.dataset.sourceStart);
+  const end = Number(element.dataset.sourceEnd);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return undefined;
+  if (element.dataset.sourceExact !== "true") return start;
+  return Math.min(end, start + textOffsetWithin(element, container, offset));
+}
+
+export function sentenceRangeAtOffset(source: string, offset: number): { start: number; end: number; text: string } | undefined {
+  if (!source.trim()) return undefined;
+  const normalizedOffset = Math.min(Math.max(0, offset), Math.max(0, source.length - 1));
+  let start = normalizedOffset;
+  let end = normalizedOffset;
+  while (start > 0 && !/[.!?。！？\n]/.test(source[start - 1])) start -= 1;
+  while (end < source.length && !/[.!?。！？\n]/.test(source[end])) end += 1;
+  if (end < source.length && /[.!?。！？]/.test(source[end])) end += 1;
+  while (start < end && /\s/.test(source[start])) start += 1;
+  while (end > start && /\s/.test(source[end - 1])) end -= 1;
+  if (end <= start) return undefined;
+  return { start, end, text: source.slice(start, end) };
+}
+
 export function sourceRangeFromDomRange(range: Range, source: string): { start: number; end: number; text: string } | undefined {
   const startElement = sourceElement(range.startContainer);
   const endElement = sourceElement(range.endContainer);
