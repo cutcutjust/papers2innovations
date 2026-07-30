@@ -15,6 +15,9 @@ describe("model activity", () => {
     expect(useModelActivity.getState().activities.request.phase).toBe("sending");
     store.applyStreamEvent({ requestId: "request", kind: "connected" });
     expect(useModelActivity.getState().activities.request.connectedAt).toBeTypeOf("number");
+    store.applyStreamEvent({ requestId: "request", kind: "thinking", reasoningCharacters: 24 });
+    expect(useModelActivity.getState().activities.request.phase).toBe("thinking");
+    expect(useModelActivity.getState().activities.request.reasoningCharacters).toBe(24);
     store.applyStreamEvent({ requestId: "request", kind: "delta", text: "response" });
     expect(useModelActivity.getState().activities.request.phase).toBe("streaming");
     expect(useModelActivity.getState().activities.request.receivedCharacters).toBe(8);

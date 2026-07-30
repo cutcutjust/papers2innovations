@@ -18,7 +18,7 @@ Papers2Innovations is not another “store PDFs and generate a summary” tool. 
 
 It reconstructs PDFs as section-based documents linked back to source pages, then brings bilingual reading, paper-scoped context, figure analysis, citation relationships, and staged innovation work into one recoverable local workspace.
 
-> Current release: Windows x64 `v0.1.27`. The project is still evolving rapidly in `0.1.x`; keep backups of irreplaceable source PDFs.
+> Current release: Windows x64 `v0.1.28`. The project is still evolving rapidly in `0.1.x`; keep backups of irreplaceable source PDFs.
 
 ## Highlights
 

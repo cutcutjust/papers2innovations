@@ -990,6 +990,12 @@ export interface ModelStreamHandle {
   dispose: () => void;
 }
 
+const modelActivityCancels = new Map<string, () => Promise<void>>();
+
+export async function cancelModelActivity(requestId: string): Promise<void> {
+  await modelActivityCancels.get(requestId)?.();
+}
+
 export async function startModelStream(input: ModelStreamRequest, onEvent: (event: ModelStreamEvent) => void, activity?: Partial<ModelActivityMeta>): Promise<ModelStreamHandle> {
   const safeInput = { ...input, provider: sanitizeProviderConfig(input.provider) };
   beginModelActivity(safeInput.requestId, {
@@ -1003,6 +1009,7 @@ export async function startModelStream(input: ModelStreamRequest, onEvent: (even
   const emit = (event: ModelStreamEvent) => {
     applyModelStreamEvent(event);
     onEvent(event);
+    if (["done", "tool_calls", "cancelled", "error"].includes(event.kind)) modelActivityCancels.delete(event.requestId);
   };
   if (!nativeRuntime) {
     emit({ requestId: safeInput.requestId, kind: "started" });
@@ -1040,9 +1047,14 @@ export async function startModelStream(input: ModelStreamRequest, onEvent: (even
     failModelActivity(safeInput.requestId, error instanceof Error ? error.message : String(error));
     throw error;
   }
+  const cancel = () => invoke<void>("model_stream_cancel", { requestId: safeInput.requestId });
+  modelActivityCancels.set(safeInput.requestId, cancel);
   return {
-    cancel: () => invoke<void>("model_stream_cancel", { requestId: safeInput.requestId }),
-    dispose: unlisten,
+    cancel,
+    dispose: () => {
+      modelActivityCancels.delete(safeInput.requestId);
+      unlisten();
+    },
   };
 }
 

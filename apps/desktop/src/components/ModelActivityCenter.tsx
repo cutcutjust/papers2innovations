@@ -3,13 +3,14 @@ import { CheckCircle2, ChevronDown, ChevronUp, CircleAlert, LoaderCircle, X } fr
 import type { ModelActivityPhase, ModelActivityState } from "@p2i/contracts";
 import { listen } from "@tauri-apps/api/event";
 import type { ModelHostActivityEvent } from "@p2i/contracts";
-import { nativeRuntime } from "../lib/bridge";
+import { cancelModelActivity, nativeRuntime } from "../lib/bridge";
 import { useModelActivity } from "../lib/modelActivity";
 
 const phaseLabels: Record<ModelActivityPhase, string> = {
   preparing: "正在准备请求",
   sending: "正在连接模型",
   connected: "模型接口已连接",
+  thinking: "模型正在推理，尚未生成正文",
   streaming: "已收到响应，正在生成",
   saving: "正在校验并保存",
   completed: "模型调用完成",
@@ -21,6 +22,7 @@ const phaseStep: Record<ModelActivityPhase, number> = {
   preparing: 0,
   sending: 1,
   connected: 2,
+  thinking: 3,
   streaming: 3,
   saving: 4,
   completed: 5,
@@ -33,12 +35,18 @@ function elapsed(activity: ModelActivityState, now: number) {
   return Math.max(0, (end - activity.startedAt) / 1000).toFixed(1);
 }
 
+function phaseElapsed(activity: ModelActivityState, now: number) {
+  const end = activity.completedAt ?? now;
+  return Math.max(0, (end - activity.phaseStartedAt) / 1000).toFixed(1);
+}
+
 export function ModelActivityCenter() {
   const activities = useModelActivity((state) => state.activities);
   const applyHostEvent = useModelActivity((state) => state.applyHostEvent);
   const dismiss = useModelActivity((state) => state.dismiss);
   const [collapsed, setCollapsed] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const [slowAcknowledged, setSlowAcknowledged] = useState<Set<string>>(() => new Set());
   const ordered = useMemo(() => {
     const groups = new Map<string, ModelActivityState[]>();
     for (const activity of Object.values(activities)) {
@@ -57,9 +65,11 @@ export function ModelActivityCenter() {
         requestId: `group:${key}`,
         memberIds: members.map((activity) => activity.requestId),
         phase: active ? active.phase : failed ? "error" as const : completedItems < totalItems ? "sending" as const : "completed" as const,
+        phaseStartedAt: active?.phaseStartedAt ?? latest.phaseStartedAt,
         startedAt: Math.min(...members.map((activity) => activity.startedAt)),
         completedAt: active ? undefined : Math.max(...members.map((activity) => activity.completedAt ?? activity.startedAt)),
         receivedCharacters: members.reduce((total, activity) => total + activity.receivedCharacters, 0),
+        reasoningCharacters: members.reduce((total, activity) => total + activity.reasoningCharacters, 0),
         completedItems,
         totalItems,
         usage: members.reduce((usage, activity) => ({ inputTokens: usage.inputTokens + (activity.usage?.inputTokens ?? 0), outputTokens: usage.outputTokens + (activity.usage?.outputTokens ?? 0) }), { inputTokens: 0, outputTokens: 0 }),
@@ -99,15 +109,17 @@ export function ModelActivityCenter() {
     {!collapsed && <div className="model-activity-list">{ordered.map((activity) => {
       const terminal = ["completed", "cancelled", "error"].includes(activity.phase);
       const usage = activity.usage ? `${activity.usage.inputTokens.toLocaleString()} 输入 / ${activity.usage.outputTokens.toLocaleString()} 输出 tokens` : "";
+      const slow = !terminal && activity.receivedCharacters === 0 && now - activity.startedAt >= 90_000 && !slowAcknowledged.has(activity.requestId);
       return <article className={`model-activity-item ${activity.phase}`} key={activity.requestId}>
         <div className="model-activity-heading">
           <span className="model-activity-icon">{activity.phase === "completed" ? <CheckCircle2 size={15} /> : activity.phase === "error" ? <CircleAlert size={15} /> : <LoaderCircle className={terminal ? "" : "spin"} size={15} />}</span>
           <div><strong>{activity.label}</strong><small>{activity.modelName}</small></div>
           {terminal && <button className="icon-button" title="关闭" onClick={() => activity.memberIds.forEach(dismiss)}><X size={13} /></button>}
         </div>
-        <div className="model-activity-stage"><span>{phaseLabels[activity.phase]}</span><b>{elapsed(activity, now)} 秒</b></div>
+        <div className="model-activity-stage"><span>{phaseLabels[activity.phase]}</span><b>{elapsed(activity, now)} 秒 · 本阶段 {phaseElapsed(activity, now)} 秒</b></div>
         <div className="model-activity-progress" aria-label={phaseLabels[activity.phase]}>{[1, 2, 3, 4, 5].map((step) => <i className={step <= phaseStep[activity.phase] ? "done" : step === phaseStep[activity.phase] + 1 && !terminal ? "active" : ""} key={step} />)}</div>
-        {(activity.receivedCharacters > 0 || usage || activity.totalItems) && <footer><span>{activity.totalItems ? `已完成 ${activity.completedItems ?? 0} / ${activity.totalItems}` : activity.receivedCharacters > 0 ? `已接收 ${activity.receivedCharacters.toLocaleString()} 字符` : ""}</span><span>{usage}</span></footer>}
+        {(activity.receivedCharacters > 0 || activity.reasoningCharacters > 0 || usage || activity.totalItems) && <footer><span>{activity.totalItems ? `已完成 ${activity.completedItems ?? 0} / ${activity.totalItems}` : activity.receivedCharacters > 0 ? `已接收 ${activity.receivedCharacters.toLocaleString()} 字符` : activity.reasoningCharacters > 0 ? `已接收 ${activity.reasoningCharacters.toLocaleString()} 个推理字符` : ""}</span><span>{usage}</span></footer>}
+        {slow && <div className="model-activity-slow"><div><CircleAlert size={14} /><span><b>模型响应较慢</b><small>{activity.reasoningCharacters > 0 ? "模型仍在推理，但尚未生成可保存的正文。" : "接口已连接，但尚未返回可用正文。"}</small></span></div><footer><button onClick={() => setSlowAcknowledged((current) => new Set(current).add(activity.requestId))}>继续等待</button><button className="danger" onClick={() => void Promise.all(activity.memberIds.map(cancelModelActivity))}>停止</button></footer></div>}
         {activity.error && <p>{activity.error}</p>}
       </article>;
     })}</div>}

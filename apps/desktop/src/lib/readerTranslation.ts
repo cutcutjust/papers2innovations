@@ -4,6 +4,18 @@ export interface StructuredTranslation {
   translatedText: string;
   segments: TranslationSegment[];
   terms: TranslationTerm[];
+  structured: boolean;
+  missingSegmentIds: string[];
+  error?: string;
+}
+
+export type TranslationAnchorStatus = "exact" | "whitespace-remapped" | "stale";
+
+export interface TranslationAnchorProjection {
+  segmentId: string;
+  sourceStart: number;
+  sourceEnd: number;
+  status: TranslationAnchorStatus;
 }
 
 export interface TranslationTermPart {
@@ -70,9 +82,7 @@ export function splitTranslationSegments(source: string): TranslationSegment[] {
     const character = source[index];
     const next = source[index + 1] ?? "";
     if (/[.!?。！？]/.test(character) && (next === "" || /\s/.test(next))) {
-      let end = index + 1;
-      while (end < source.length && /\s/.test(source[end])) end += 1;
-      boundaries.push(end);
+      boundaries.push(index + 1);
     }
   }
   if (boundaries.at(-1) !== source.length) boundaries.push(source.length);
@@ -86,7 +96,11 @@ export function splitTranslationSegments(source: string): TranslationSegment[] {
       const protectedPart = protectedRanges.some(([protectedStart, protectedEnd]) => partStart >= protectedStart && partEnd <= protectedEnd);
       return protectedPart ? [] : [{ sourceStart: partStart, sourceEnd: partEnd }];
     });
-  }).filter(({ sourceStart, sourceEnd }) => source.slice(sourceStart, sourceEnd).trim());
+  }).map(({ sourceStart, sourceEnd }) => {
+    while (sourceStart < sourceEnd && /\s/.test(source[sourceStart])) sourceStart += 1;
+    while (sourceEnd > sourceStart && /\s/.test(source[sourceEnd - 1])) sourceEnd -= 1;
+    return { sourceStart, sourceEnd };
+  }).filter(({ sourceStart, sourceEnd }) => sourceEnd > sourceStart);
   return rawSegments.map(({ sourceStart, sourceEnd }, index) => ({
     id: `sentence-${index + 1}`,
     sourceStart,
@@ -94,6 +108,116 @@ export function splitTranslationSegments(source: string): TranslationSegment[] {
     sourceText: source.slice(sourceStart, sourceEnd),
     translatedText: "",
   }));
+}
+
+export function splitTranslationChunks(source: string, maxCharacters = 2500): Array<{ start: number; end: number; text: string }> {
+  const segments = splitTranslationSegments(source);
+  if (!segments.length) return source.trim() ? [{ start: 0, end: source.length, text: source }] : [];
+  const chunks: Array<{ start: number; end: number; text: string }> = [];
+  let start = segments[0].sourceStart;
+  let end = segments[0].sourceEnd;
+  for (const segment of segments.slice(1)) {
+    if (segment.sourceEnd - start > maxCharacters) {
+      chunks.push({ start, end, text: source.slice(start, end) });
+      start = segment.sourceStart;
+    }
+    end = segment.sourceEnd;
+  }
+  chunks.push({ start, end, text: source.slice(start, end) });
+  return chunks;
+}
+
+function normalizedWhitespace(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function normalizedTextMap(value: string): { text: string; starts: number[]; ends: number[] } {
+  let text = "";
+  const starts: number[] = [];
+  const ends: number[] = [];
+  for (let index = 0; index < value.length;) {
+    if (/\s/.test(value[index])) {
+      const start = index;
+      while (index < value.length && /\s/.test(value[index])) index += 1;
+      if (text && !text.endsWith(" ") && index < value.length) {
+        text += " ";
+        starts.push(start);
+        ends.push(index);
+      }
+      continue;
+    }
+    text += value[index];
+    starts.push(index);
+    ends.push(index + 1);
+    index += 1;
+  }
+  return { text, starts, ends };
+}
+
+function trimmedRange(source: string, start: number, end: number): { start: number; end: number } {
+  let nextStart = Math.max(0, start);
+  let nextEnd = Math.min(source.length, end);
+  while (nextStart < nextEnd && /\s/.test(source[nextStart])) nextStart += 1;
+  while (nextEnd > nextStart && /\s/.test(source[nextEnd - 1])) nextEnd -= 1;
+  return { start: nextStart, end: nextEnd };
+}
+
+function normalizedBoundaryIndex(value: string, offset: number): number {
+  let normalizedLength = 0;
+  let hasText = false;
+  for (let index = 0; index < Math.min(offset, value.length);) {
+    if (/\s/.test(value[index])) {
+      let end = index;
+      while (end < value.length && /\s/.test(value[end])) end += 1;
+      if (hasText && end <= offset && end < value.length) normalizedLength += 1;
+      index = Math.min(end, offset);
+      continue;
+    }
+    hasText = true;
+    normalizedLength += 1;
+    index += 1;
+  }
+  return normalizedLength;
+}
+
+export function projectTranslationSegments(recordSource: string, currentSource: string, segments: TranslationSegment[]): TranslationAnchorProjection[] {
+  const exact = recordSource === currentSource;
+  const recordMap = normalizedTextMap(recordSource);
+  const currentMap = normalizedTextMap(currentSource);
+  const whitespaceEquivalent = !exact && recordMap.text === currentMap.text;
+  let fallbackCursor = 0;
+
+  return segments.map((segment) => {
+    const range = trimmedRange(recordSource, segment.sourceStart, segment.sourceEnd);
+    const exactText = recordSource.slice(range.start, range.end);
+    if (!exactText) return { segmentId: segment.id, sourceStart: 0, sourceEnd: 0, status: "stale" };
+    if (exact && currentSource.slice(range.start, range.end) === exactText) {
+      return { segmentId: segment.id, sourceStart: range.start, sourceEnd: range.end, status: "exact" };
+    }
+
+    if (whitespaceEquivalent) {
+      const normalizedStart = normalizedBoundaryIndex(recordSource, range.start);
+      const normalizedEnd = normalizedBoundaryIndex(recordSource, range.end);
+      const sourceStart = currentMap.starts[normalizedStart];
+      const sourceEnd = currentMap.ends[normalizedEnd - 1];
+      if (sourceStart !== undefined && sourceEnd !== undefined && normalizedWhitespace(currentSource.slice(sourceStart, sourceEnd)) === normalizedWhitespace(exactText)) {
+        return { segmentId: segment.id, sourceStart, sourceEnd, status: "whitespace-remapped" };
+      }
+    }
+
+    const needle = normalizedWhitespace(exactText);
+    const found = needle ? currentMap.text.indexOf(needle, fallbackCursor) : -1;
+    const repeated = found >= 0 && currentMap.text.indexOf(needle, found + needle.length) >= 0;
+    if (found >= 0 && !repeated) {
+      fallbackCursor = found + needle.length;
+      const sourceStart = currentMap.starts[found];
+      const sourceEnd = currentMap.ends[found + needle.length - 1];
+      if (sourceStart !== undefined && sourceEnd !== undefined) {
+        return { segmentId: segment.id, sourceStart, sourceEnd, status: "whitespace-remapped" };
+      }
+    }
+    return { segmentId: segment.id, sourceStart: 0, sourceEnd: 0, status: "stale" };
+  });
 }
 
 export function structuredTranslationPrompt(source: string): string {
@@ -119,6 +243,7 @@ export function parseStructuredTranslation(source: string, response: string): St
   try {
     const parsed = JSON.parse(stripFence(response)) as { segments?: Array<{ id?: string; translatedText?: string }>; terms?: TranslationTerm[] };
     const values = new Map((parsed.segments ?? []).map((segment) => [segment.id, String(segment.translatedText ?? "").trim()]));
+    const missingSegmentIds = sourceSegments.filter((segment) => !values.get(segment.id)?.trim()).map((segment) => segment.id);
     const segments = sourceSegments.map((segment) => ({ ...segment, translatedText: values.get(segment.id) || segment.sourceText }));
     const terms = (parsed.terms ?? []).filter((term) => term && term.text && term.translation).map((term) => {
       const text = String(term.text);
@@ -162,12 +287,22 @@ export function parseStructuredTranslation(source: string, response: string): St
         selectionReason: String(term.selectionReason ?? "").trim() || undefined,
       };
     });
-    return { translatedText: segments.map((segment) => segment.translatedText).join(""), segments, terms };
-  } catch {
+    return {
+      translatedText: segments.map((segment) => segment.translatedText).join(""),
+      segments,
+      terms,
+      structured: missingSegmentIds.length === 0,
+      missingSegmentIds,
+      error: missingSegmentIds.length ? `模型返回缺少 ${missingSegmentIds.length} 个句段` : undefined,
+    };
+  } catch (error) {
     return {
       translatedText: response.trim(),
       segments: [{ id: "legacy", sourceStart: 0, sourceEnd: source.length, sourceText: source, translatedText: response.trim() }],
       terms: [],
+      structured: false,
+      missingSegmentIds: sourceSegments.map((segment) => segment.id),
+      error: error instanceof Error ? `模型返回的结构化译文无法解析：${error.message}` : "模型返回的结构化译文无法解析",
     };
   }
 }

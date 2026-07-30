@@ -41,7 +41,9 @@ export const useModelActivity = create<ModelActivityStore>((set, get) => ({
         requestId,
         phase: "preparing",
         startedAt: Date.now(),
+        phaseStartedAt: Date.now(),
         receivedCharacters: 0,
+        reasoningCharacters: 0,
       },
     },
   })),
@@ -50,13 +52,23 @@ export const useModelActivity = create<ModelActivityStore>((set, get) => ({
     if (!current) return;
     const now = Date.now();
     if (event.kind === "started") {
-      updateActivity(event.requestId, (activity) => ({ ...activity, phase: "sending" }));
+      updateActivity(event.requestId, (activity) => ({ ...activity, phase: "sending", phaseStartedAt: now }));
     } else if (event.kind === "connected") {
-      updateActivity(event.requestId, (activity) => ({ ...activity, phase: "connected", connectedAt: activity.connectedAt ?? now }));
+      updateActivity(event.requestId, (activity) => ({ ...activity, phase: "connected", phaseStartedAt: now, connectedAt: activity.connectedAt ?? now }));
+    } else if (event.kind === "thinking") {
+      updateActivity(event.requestId, (activity) => ({
+        ...activity,
+        phase: "thinking",
+        phaseStartedAt: activity.phase === "thinking" ? activity.phaseStartedAt : now,
+        connectedAt: activity.connectedAt ?? now,
+        firstTokenAt: activity.firstTokenAt ?? now,
+        reasoningCharacters: activity.reasoningCharacters + (event.reasoningCharacters ?? 0),
+      }));
     } else if (event.kind === "delta") {
       updateActivity(event.requestId, (activity) => ({
         ...activity,
         phase: "streaming",
+        phaseStartedAt: activity.phase === "streaming" ? activity.phaseStartedAt : now,
         connectedAt: activity.connectedAt ?? now,
         firstTokenAt: activity.firstTokenAt ?? now,
         receivedCharacters: activity.receivedCharacters + (event.text?.length ?? 0),
@@ -65,6 +77,7 @@ export const useModelActivity = create<ModelActivityStore>((set, get) => ({
       updateActivity(event.requestId, (activity) => ({
         ...activity,
         phase: activity.deferCompletion ? "saving" : "completed",
+        phaseStartedAt: now,
         connectedAt: activity.connectedAt ?? now,
         completedAt: activity.deferCompletion ? undefined : now,
         usage: event.usage ?? activity.usage,
@@ -74,15 +87,16 @@ export const useModelActivity = create<ModelActivityStore>((set, get) => ({
       updateActivity(event.requestId, (activity) => ({
         ...activity,
         phase: activity.deferCompletion ? "saving" : "completed",
+        phaseStartedAt: now,
         completedAt: activity.deferCompletion ? undefined : now,
         usage: event.usage ?? activity.usage,
       }));
       if (!current.deferCompletion) scheduleDismiss(event.requestId);
     } else if (event.kind === "cancelled") {
-      updateActivity(event.requestId, (activity) => ({ ...activity, phase: "cancelled", completedAt: now }));
+      updateActivity(event.requestId, (activity) => ({ ...activity, phase: "cancelled", phaseStartedAt: now, completedAt: now }));
       scheduleDismiss(event.requestId, 3500);
     } else if (event.kind === "error") {
-      updateActivity(event.requestId, (activity) => ({ ...activity, phase: "error", completedAt: now, error: event.error ?? "模型调用失败" }));
+      updateActivity(event.requestId, (activity) => ({ ...activity, phase: "error", phaseStartedAt: now, completedAt: now, error: event.error ?? "模型调用失败" }));
     }
   },
   applyHostEvent: (event) => {
@@ -113,13 +127,13 @@ export const useModelActivity = create<ModelActivityStore>((set, get) => ({
       if (updated?.phase === "completed") scheduleDismiss(activityId);
     }
   },
-  markSaving: (requestId) => updateActivity(requestId, (activity) => ({ ...activity, phase: "saving" })),
+  markSaving: (requestId) => updateActivity(requestId, (activity) => ({ ...activity, phase: "saving", phaseStartedAt: Date.now() })),
   complete: (requestId, usage) => {
     const activity = get().activities[requestId];
-    updateActivity(requestId, (activity) => ({ ...activity, phase: "completed", completedAt: Date.now(), usage: usage ?? activity.usage }));
+    updateActivity(requestId, (activity) => ({ ...activity, phase: "completed", phaseStartedAt: Date.now(), completedAt: Date.now(), usage: usage ?? activity.usage }));
     if (!activity?.totalItems || activity.totalItems <= 1) scheduleDismiss(requestId);
   },
-  fail: (requestId, error) => updateActivity(requestId, (activity) => ({ ...activity, phase: "error", completedAt: Date.now(), error })),
+  fail: (requestId, error) => updateActivity(requestId, (activity) => ({ ...activity, phase: "error", phaseStartedAt: Date.now(), completedAt: Date.now(), error })),
   dismiss: (requestId) => set((state) => {
     const activities = { ...state.activities };
     delete activities[requestId];

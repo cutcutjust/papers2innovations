@@ -233,18 +233,20 @@ export interface ModelStreamRequest {
   messages: ModelMessage[];
   tools?: ModelToolDefinition[];
   temperature?: number;
+  maxOutputTokens?: number;
 }
 
 export interface ModelStreamEvent {
   requestId: string;
-  kind: "started" | "connected" | "delta" | "tool_calls" | "done" | "cancelled" | "error";
+  kind: "started" | "connected" | "thinking" | "delta" | "tool_calls" | "done" | "cancelled" | "error";
   text?: string;
+  reasoningCharacters?: number;
   toolCalls?: ModelToolCall[];
   error?: string;
   usage?: { inputTokens: number; outputTokens: number };
 }
 
-export type ModelActivityPhase = "preparing" | "sending" | "connected" | "streaming" | "saving" | "completed" | "cancelled" | "error";
+export type ModelActivityPhase = "preparing" | "sending" | "connected" | "thinking" | "streaming" | "saving" | "completed" | "cancelled" | "error";
 
 export interface ModelActivityMeta {
   source: string;
@@ -259,10 +261,12 @@ export interface ModelActivityState extends ModelActivityMeta {
   requestId: string;
   phase: ModelActivityPhase;
   startedAt: number;
+  phaseStartedAt: number;
   connectedAt?: number;
   firstTokenAt?: number;
   completedAt?: number;
   receivedCharacters: number;
+  reasoningCharacters: number;
   completedItems?: number;
   usage?: { inputTokens: number; outputTokens: number };
   error?: string;

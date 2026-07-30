@@ -211,6 +211,8 @@ struct ModelStreamInput {
     tools: Vec<ModelToolDefinitionInput>,
     #[serde(default)]
     temperature: Option<f64>,
+    #[serde(default)]
+    max_output_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -226,6 +228,8 @@ struct ModelStreamEvent {
     kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_characters: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ModelToolCallInput>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1156,6 +1160,7 @@ async fn provider_test_connection(
         }],
         tools: Vec::new(),
         temperature: Some(0.0),
+        max_output_tokens: Some(1),
     };
     let response = send_model_request(&request, &api_key, false, 1).await?;
     Ok(json!({"ok": true, "status": response.status().as_u16()}))
@@ -1508,6 +1513,17 @@ fn stream_delta(format: &str, value: &Value) -> Option<String> {
     }
 }
 
+fn stream_reasoning_delta(format: &str, value: &Value) -> Option<String> {
+    if format != "openai" {
+        return None;
+    }
+    value
+        .pointer("/choices/0/delta/reasoning_content")
+        .or_else(|| value.pointer("/choices/0/delta/reasoning"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
 fn stream_usage(format: &str, value: &Value) -> Option<Value> {
     let (input, output) = if format == "anthropic" {
         (
@@ -1530,11 +1546,13 @@ fn stream_usage(format: &str, value: &Value) -> Option<Value> {
         .then(|| json!({"inputTokens": input.unwrap_or(0), "outputTokens": output.unwrap_or(0)}))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_model_event(
     app: &AppHandle,
     request_id: &str,
     kind: &str,
     text: Option<String>,
+    reasoning_characters: Option<usize>,
     tool_calls: Option<Vec<ModelToolCallInput>>,
     error: Option<String>,
     usage: Option<Value>,
@@ -1545,6 +1563,7 @@ fn emit_model_event(
             request_id: request_id.to_owned(),
             kind: kind.to_owned(),
             text,
+            reasoning_characters,
             tool_calls,
             error,
             usage,
@@ -1639,7 +1658,7 @@ async fn consume_model_stream<F>(
     mut on_delta: F,
 ) -> Result<(&'static str, Option<Value>, Vec<ModelToolCallInput>), String>
 where
-    F: FnMut(String),
+    F: FnMut(Option<String>, usize),
 {
     let mut bytes = response.bytes_stream();
     let mut pending = String::new();
@@ -1663,7 +1682,10 @@ where
             let value: Value = serde_json::from_str(data)
                 .map_err(|error| format!("Invalid provider stream event: {error}"))?;
             if let Some(delta) = stream_delta(format, &value) {
-                on_delta(delta);
+                on_delta(Some(delta), 0);
+            }
+            if let Some(reasoning) = stream_reasoning_delta(format, &value) {
+                on_delta(None, reasoning.chars().count());
             }
             if let Some(event_usage) = stream_usage(format, &value) {
                 usage = Some(event_usage);
@@ -1709,27 +1731,68 @@ async fn run_model_stream(
     api_key: String,
     cancelled: Arc<AtomicBool>,
 ) {
-    emit_model_event(&app, &input.request_id, "started", None, None, None, None);
+    emit_model_event(
+        &app,
+        &input.request_id,
+        "started",
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     let outcome = async {
         let response = send_model_request(
             &input,
             &api_key,
             true,
-            input.model.max_output_tokens.clamp(1, 65_536),
+            input
+                .max_output_tokens
+                .unwrap_or(input.model.max_output_tokens)
+                .min(input.model.max_output_tokens)
+                .clamp(1, 65_536),
         )
         .await?;
-        emit_model_event(&app, &input.request_id, "connected", None, None, None, None);
-        consume_model_stream(response, &input.provider.format, &cancelled, |delta| {
-            emit_model_event(
-                &app,
-                &input.request_id,
-                "delta",
-                Some(delta),
-                None,
-                None,
-                None,
-            )
-        })
+        emit_model_event(
+            &app,
+            &input.request_id,
+            "connected",
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        consume_model_stream(
+            response,
+            &input.provider.format,
+            &cancelled,
+            |delta, reasoning_characters| {
+                if let Some(delta) = delta {
+                    emit_model_event(
+                        &app,
+                        &input.request_id,
+                        "delta",
+                        Some(delta),
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
+                } else if reasoning_characters > 0 {
+                    emit_model_event(
+                        &app,
+                        &input.request_id,
+                        "thinking",
+                        None,
+                        Some(reasoning_characters),
+                        None,
+                        None,
+                        None,
+                    );
+                }
+            },
+        )
         .await
     }
     .await;
@@ -1739,6 +1802,7 @@ async fn run_model_stream(
             &input.request_id,
             kind,
             None,
+            None,
             (!tool_calls.is_empty()).then_some(tool_calls),
             None,
             usage,
@@ -1747,6 +1811,7 @@ async fn run_model_stream(
             &app,
             &input.request_id,
             "error",
+            None,
             None,
             None,
             Some(error),
@@ -2062,8 +2127,8 @@ pub fn run() {
 mod tests {
     use super::{
         consume_model_stream, import_pdf_sources, model_endpoint, model_headers,
-        send_model_request, stream_delta, validate_credential_id, Engine, ModelConfigInput,
-        ModelMessageInput, ModelStreamInput, OcrLimiter, ProviderConfigInput,
+        send_model_request, stream_delta, stream_reasoning_delta, validate_credential_id, Engine,
+        ModelConfigInput, ModelMessageInput, ModelStreamInput, OcrLimiter, ProviderConfigInput,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -2104,6 +2169,7 @@ mod tests {
             }],
             tools: Vec::new(),
             temperature: Some(0.0),
+            max_output_tokens: None,
         }
     }
 
@@ -2197,6 +2263,14 @@ mod tests {
             ),
             Some("world".into())
         );
+        assert_eq!(
+            stream_reasoning_delta(
+                "openai",
+                &json!({"choices":[{"delta":{"reasoning_content":"thinking"}}]})
+            ),
+            Some("thinking".into())
+        );
+        assert!(stream_reasoning_delta("anthropic", &json!({"delta":{"thinking":"x"}})).is_none());
     }
 
     #[test]
@@ -2229,6 +2303,7 @@ mod tests {
     fn local_mock_streams_normalize_openai_anthropic_and_cancellation() {
         tauri::async_runtime::block_on(async {
             let openai_body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hidden reasoning\"}}]}\n\n",
                 "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
                 "data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n",
                 "data: [DONE]\n\n"
@@ -2239,14 +2314,23 @@ mod tests {
                 .await
                 .expect("OpenAI mock request");
             let mut deltas = Vec::new();
-            let (kind, usage, tool_calls) =
-                consume_model_stream(response, "openai", &AtomicBool::new(false), |delta| {
-                    deltas.push(delta)
-                })
-                .await
-                .expect("OpenAI mock stream");
+            let mut reasoning_characters = 0;
+            let (kind, usage, tool_calls) = consume_model_stream(
+                response,
+                "openai",
+                &AtomicBool::new(false),
+                |delta, reasoning| {
+                    if let Some(delta) = delta {
+                        deltas.push(delta);
+                    }
+                    reasoning_characters += reasoning;
+                },
+            )
+            .await
+            .expect("OpenAI mock stream");
             assert_eq!(kind, "done");
             assert_eq!(deltas, ["hello"]);
+            assert_eq!(reasoning_characters, "hidden reasoning".chars().count());
             assert_eq!(usage.unwrap()["inputTokens"], 3);
             assert!(tool_calls.is_empty());
 
@@ -2261,7 +2345,7 @@ mod tests {
                 .expect("Anthropic mock request");
             let cancelled = AtomicBool::new(true);
             let (kind, usage, tool_calls) =
-                consume_model_stream(response, "anthropic", &cancelled, |_| {
+                consume_model_stream(response, "anthropic", &cancelled, |_, _| {
                     panic!("cancelled stream emitted a delta")
                 })
                 .await
@@ -2286,7 +2370,7 @@ mod tests {
                 .await
                 .unwrap();
             let (kind, _, calls) =
-                consume_model_stream(response, "openai", &AtomicBool::new(false), |_| {})
+                consume_model_stream(response, "openai", &AtomicBool::new(false), |_, _| {})
                     .await
                     .unwrap();
             assert_eq!(kind, "tool_calls");
@@ -2303,7 +2387,7 @@ mod tests {
                 .await
                 .unwrap();
             let (kind, _, calls) =
-                consume_model_stream(response, "anthropic", &AtomicBool::new(false), |_| {})
+                consume_model_stream(response, "anthropic", &AtomicBool::new(false), |_, _| {})
                     .await
                     .unwrap();
             assert_eq!(kind, "tool_calls");

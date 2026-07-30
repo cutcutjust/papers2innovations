@@ -1,4 +1,5 @@
 import type { ReaderAnnotation, TranslationTerm } from "@p2i/contracts";
+import type { TranslationAnchorStatus } from "./readerTranslation";
 
 export interface ReaderTranslationRange {
   recordId: string;
@@ -8,6 +9,7 @@ export interface ReaderTranslationRange {
   sourceText: string;
   translatedText: string;
   terms: TranslationTerm[];
+  anchorStatus?: TranslationAnchorStatus;
 }
 
 interface AstPosition {
