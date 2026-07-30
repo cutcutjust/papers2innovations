@@ -44,6 +44,7 @@ export interface WorkspaceState {
   readerBackgroundColor: string;
   readerTextColor: string;
   readerTranslationView: "original" | "translated";
+  readerAnnotationsVisible: boolean;
   setRoot: (root: string) => void;
   selectPaper: (paperId: string) => void;
   openReader: (paperId?: string) => void;
@@ -68,6 +69,7 @@ export interface WorkspaceState {
   setReaderTheme: (theme: WorkspaceState["readerTheme"]) => void;
   setReaderColors: (background: string, text: string) => void;
   setReaderTranslationView: (view: WorkspaceState["readerTranslationView"]) => void;
+  setReaderAnnotationsVisible: (visible: boolean) => void;
   restoreWorkspaceSettings: (snapshot: WorkspaceSettingsSnapshot) => void;
 }
 
@@ -147,6 +149,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   readerBackgroundColor: localStorage.getItem("p2i.readerBackgroundColor") || "#ffffff",
   readerTextColor: localStorage.getItem("p2i.readerTextColor") || "#20242c",
   readerTranslationView: localStorage.getItem("p2i.readerTranslationView") === "translated" ? "translated" : "original",
+  readerAnnotationsVisible: localStorage.getItem("p2i.readerAnnotationsVisible") !== "false",
   setRoot: (root) => {
     localStorage.setItem("p2i.libraryRoot", root);
     set({ root });
@@ -231,6 +234,10 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
     localStorage.setItem("p2i.readerTranslationView", readerTranslationView);
     set({ readerTranslationView });
   },
+  setReaderAnnotationsVisible: (readerAnnotationsVisible) => {
+    localStorage.setItem("p2i.readerAnnotationsVisible", String(readerAnnotationsVisible));
+    set({ readerAnnotationsVisible });
+  },
   restoreWorkspaceSettings: (snapshot) => {
     const providers = snapshot.providers.map(sanitizeProviderConfig);
     const customModels = snapshot.customModels;
@@ -248,6 +255,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
     localStorage.setItem("p2i.readerBackgroundColor", snapshot.readerBackgroundColor ?? "#ffffff");
     localStorage.setItem("p2i.readerTextColor", snapshot.readerTextColor ?? "#20242c");
     localStorage.setItem("p2i.readerTranslationView", snapshot.readerTranslationView ?? "original");
+    localStorage.setItem("p2i.readerAnnotationsVisible", String(snapshot.readerAnnotationsVisible ?? true));
     set({
       root: snapshot.root,
       providers,
@@ -264,6 +272,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
       readerBackgroundColor: snapshot.readerBackgroundColor ?? "#ffffff",
       readerTextColor: snapshot.readerTextColor ?? "#20242c",
       readerTranslationView: snapshot.readerTranslationView ?? "original",
+      readerAnnotationsVisible: snapshot.readerAnnotationsVisible ?? true,
     });
   },
 }));

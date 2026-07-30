@@ -105,8 +105,9 @@ export function App() {
       readerBackgroundColor: workspace.readerBackgroundColor,
       readerTextColor: workspace.readerTextColor,
       readerTranslationView: workspace.readerTranslationView,
+      readerAnnotationsVisible: workspace.readerAnnotationsVisible,
     }).catch(() => undefined);
-  }, [settingsRecovered, workspace.root, workspace.providers, workspace.customModels, workspace.contextCompressionModelId, workspace.markdownFormattingModelId, workspace.autoFormatMarkdown, workspace.fullPageOcrModelId, workspace.visionAnalysisModelId, workspace.ocrConsent, workspace.fontSize, workspace.readerZoom, workspace.readerTheme, workspace.readerBackgroundColor, workspace.readerTextColor, workspace.readerTranslationView]);
+  }, [settingsRecovered, workspace.root, workspace.providers, workspace.customModels, workspace.contextCompressionModelId, workspace.markdownFormattingModelId, workspace.autoFormatMarkdown, workspace.fullPageOcrModelId, workspace.visionAnalysisModelId, workspace.ocrConsent, workspace.fontSize, workspace.readerZoom, workspace.readerTheme, workspace.readerBackgroundColor, workspace.readerTextColor, workspace.readerTranslationView, workspace.readerAnnotationsVisible]);
 
   useEffect(() => {
     if (!nativeRuntime || !settingsRecovered) return;

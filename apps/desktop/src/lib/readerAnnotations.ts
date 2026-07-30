@@ -25,7 +25,10 @@ interface AstNode {
 
 export interface ReaderAnnotationPluginOptions {
   source: string;
-  view: "original" | "translated";
+  /** @deprecated Kept for older callers and migration tests. */
+  view?: "original" | "translated";
+  activeTranslationKeys?: ReadonlySet<string>;
+  annotationsVisible?: boolean;
   translations: ReaderTranslationRange[];
   annotations: ReaderAnnotation[];
 }
@@ -34,12 +37,20 @@ const ATOMIC_NODE_TYPES = new Set(["code", "inlineCode", "math", "inlineMath", "
 
 const overlaps = (start: number, end: number, rangeStart: number, rangeEnd: number) => start < rangeEnd && end > rangeStart;
 
+export const readerTranslationKey = (recordId: string, segmentId: string) => `${recordId}:${segmentId}`;
+
 function dataList(values: string[]): string {
   return [...new Set(values.filter(Boolean))].join(",");
 }
 
 export function createReaderAnnotationPlugin(options: ReaderAnnotationPluginOptions) {
+  const annotationsVisible = options.annotationsVisible !== false;
+  const translationIsActive = (range: ReaderTranslationRange) => annotationsVisible && (
+    options.activeTranslationKeys?.has(readerTranslationKey(range.recordId, range.segmentId))
+    ?? options.view === "translated"
+  );
   return () => (tree: AstNode) => {
+    if (!annotationsVisible) return;
     const walk = (node: AstNode) => {
       if (!node.children || ATOMIC_NODE_TYPES.has(node.type)) return;
       const nextChildren: AstNode[] = [];
@@ -60,19 +71,23 @@ export function createReaderAnnotationPlugin(options: ReaderAnnotationPluginOpti
           });
           continue;
         }
-        const relevantTranslations = options.translations.filter((range) => overlaps(start, end, range.sourceStart, range.sourceEnd));
-        const relevantAnnotations = options.annotations.filter((annotation) => overlaps(start, end, annotation.sourceStart, annotation.sourceEnd));
+        const relevantTranslations = annotationsVisible
+          ? options.translations.filter((range) => overlaps(start, end, range.sourceStart, range.sourceEnd))
+          : [];
+        const relevantAnnotations = annotationsVisible
+          ? options.annotations.filter((annotation) => overlaps(start, end, annotation.sourceStart, annotation.sourceEnd))
+          : [];
         const boundaries = new Set([start, end]);
         for (const range of relevantTranslations) {
           boundaries.add(Math.max(start, range.sourceStart));
           boundaries.add(Math.min(end, range.sourceEnd));
         }
         for (const annotation of relevantAnnotations) {
-          const insideTranslation = options.view === "translated" && relevantTranslations.some((range) => (
+          const insideTranslation = relevantTranslations.some((range) => translationIsActive(range) && (
             annotation.sourceStart > range.sourceStart && annotation.sourceStart < range.sourceEnd
           ));
           if (!insideTranslation) boundaries.add(Math.max(start, annotation.sourceStart));
-          const endInsideTranslation = options.view === "translated" && relevantTranslations.some((range) => (
+          const endInsideTranslation = relevantTranslations.some((range) => translationIsActive(range) && (
             annotation.sourceEnd > range.sourceStart && annotation.sourceEnd < range.sourceEnd
           ));
           if (!endInsideTranslation) boundaries.add(Math.min(end, annotation.sourceEnd));
@@ -85,7 +100,7 @@ export function createReaderAnnotationPlugin(options: ReaderAnnotationPluginOpti
           const translationMarker = translation ?? relevantTranslations.find((range) => overlaps(runStart, runEnd, range.sourceStart, range.sourceEnd));
           const chatAnnotations = relevantAnnotations.filter((annotation) => annotation.annotationType === "chat" && overlaps(runStart, runEnd, annotation.sourceStart, annotation.sourceEnd));
           const translationAnnotations = relevantAnnotations.filter((annotation) => annotation.annotationType === "translation" && overlaps(runStart, runEnd, annotation.sourceStart, annotation.sourceEnd));
-          const translated = options.view === "translated" && Boolean(translation?.translatedText);
+          const translated = Boolean(translation?.translatedText && translationIsActive(translation));
           const classes = [
             "reader-annotated-run",
             translated ? "translated-replacement" : "",
@@ -104,6 +119,8 @@ export function createReaderAnnotationPlugin(options: ReaderAnnotationPluginOpti
                 "data-source-exact": translated ? "false" : "true",
                 "data-translation-id": translationMarker?.recordId ?? translationAnnotations[0]?.relatedId ?? "",
                 "data-translation-segment-id": translationMarker?.segmentId ?? "",
+                "data-translation-key": translationMarker ? readerTranslationKey(translationMarker.recordId, translationMarker.segmentId) : "",
+                "data-translation-active": translated ? "true" : "false",
                 "data-chat-annotation-ids": dataList(chatAnnotations.map((annotation) => annotation.id)),
               },
             },

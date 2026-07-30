@@ -1,7 +1,8 @@
 import type { ContextDraftItem, ContextSnapshot, FigureAnalysis, LibraryPaper, ModelStreamEvent, PromptTemplateCategory, ReaderAnalysisRecord, ReaderAnalysisType, ReaderAnnotation, ReaderChatTurn, TranslationRecord, TranslationSegment, TranslationTerm } from "@p2i/contracts";
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpen, BookOpenText, Bot, Check, ChevronLeft, FileImage, FileText, Languages, Layers3, LoaderCircle, Maximize2, MessageSquareText, Minimize2, Minus, Palette, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus, RefreshCw, RotateCcw, Search, Send, Sparkles, Square, Trash2, TriangleAlert, Volume2, WandSparkles, X } from "lucide-react";
+import { BookOpen, BookOpenText, Bot, Check, ChevronLeft, Eye, EyeOff, FileImage, FileText, Languages, Layers3, LoaderCircle, Maximize2, MessageSquareText, Minimize2, Minus, Palette, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus, RefreshCw, RotateCcw, Search, Send, Sparkles, Square, Trash2, TriangleAlert, Volume2, WandSparkles, X } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
@@ -14,7 +15,7 @@ import { MARKDOWN_FORMAT_PROMPT_VERSION, prepareMarkdownForFormatting, restoreFo
 import { normalizeMarkdownMath } from "../lib/markdownMath";
 import { CONTEXT_COMPRESSION_PROMPT_VERSION, contextCompressionBudgetError, contextCompressionMessages } from "../lib/contextCompression";
 import { contrastRatio, parseStructuredTranslation, structuredTranslationPrompt } from "../lib/readerTranslation";
-import { createReaderAnnotationPlugin, sourceRangeFromDomRange, type ReaderTranslationRange } from "../lib/readerAnnotations";
+import { createReaderAnnotationPlugin, readerTranslationKey, sourceRangeFromDomRange, type ReaderTranslationRange } from "../lib/readerAnnotations";
 import { resolvePromptTemplate, selectedPromptId, selectPromptTemplate } from "../lib/promptTemplates";
 import { buildWordLookupMessages, isSingleEnglishWord } from "../lib/wordLookup";
 import { useWorkspace } from "../store";
@@ -47,6 +48,18 @@ type AnnotationInspectorState = {
   annotationIds: string[];
   left: number;
   top: number;
+};
+type TermPanelState = { term: TranslationTerm; sentence: string; left: number; top: number; pinned: boolean };
+type AnnotationRail = {
+  id: string;
+  kind: "translation" | "chat";
+  left: number;
+  top: number;
+  width: number;
+  translationKey?: string;
+  translationId?: string;
+  annotationIds: string[];
+  relatedId?: string;
 };
 
 const TRANSLATION_PROMPT_VERSION = "reader-translate-v2";
@@ -91,7 +104,31 @@ function MarkdownBlock({ value, markdownPath, figureAnalysisFor, onToggleFigure 
   >{normalizeMarkdownMath(value)}</ReactMarkdown>;
 }
 
-function BilingualBlock({ block, state, records, annotations, view, markdownPath, figureAnalysisFor, onToggleFigure, onOpenAnnotation }: { block: ReaderBlock; state?: TranslationState; records: TranslationRecord[]; annotations: ReaderAnnotation[]; view: "original" | "translated"; markdownPath?: string; figureAnalysisFor?: (source?: string) => FigureAnalysis | undefined; onToggleFigure?: (source?: string) => void; onOpenAnnotation: (kind: "translation" | "chat", relatedId: string | undefined, annotationIds: string[], rect: DOMRect) => void }) {
+function translatedTermParts(text: string, terms: TranslationTerm[]): Array<{ text: string; term?: TranslationTerm }> {
+  const ranges = terms.flatMap((term) => {
+    const start = Number(term.translatedStart);
+    const end = Number(term.translatedEnd);
+    if (Number.isInteger(start) && Number.isInteger(end) && start >= 0 && end > start && end <= text.length && text.slice(start, end) === term.translation) return [{ start, end, term }];
+    const needle = term.translation.trim();
+    if (!needle) return [];
+    const found = text.indexOf(needle);
+    return found >= 0 && text.indexOf(needle, found + needle.length) < 0 ? [{ start: found, end: found + needle.length, term }] : [];
+  }).sort((left, right) => left.start - right.start || left.end - right.end);
+  const parts: Array<{ text: string; term?: TranslationTerm }> = [];
+  let cursor = 0;
+  for (const range of ranges) {
+    if (range.start < cursor) continue;
+    if (range.start > cursor) parts.push({ text: text.slice(cursor, range.start) });
+    parts.push({ text: text.slice(range.start, range.end), term: range.term });
+    cursor = range.end;
+  }
+  if (cursor < text.length) parts.push({ text: text.slice(cursor) });
+  return parts.length ? parts : [{ text }];
+}
+
+function BilingualBlock({ block, state, records, annotations, activeTranslationKeys, annotationsVisible, markdownPath, figureAnalysisFor, onToggleFigure, onToggleTranslation, onOpenAnnotation, onOpenTerm, onLeaveTerm }: { block: ReaderBlock; state?: TranslationState; records: TranslationRecord[]; annotations: ReaderAnnotation[]; activeTranslationKeys: ReadonlySet<string>; annotationsVisible: boolean; markdownPath?: string; figureAnalysisFor?: (source?: string) => FigureAnalysis | undefined; onToggleFigure?: (source?: string) => void; onToggleTranslation: (key: string) => void; onOpenAnnotation: (kind: "translation" | "chat", relatedId: string | undefined, annotationIds: string[], rect: DOMRect) => void; onOpenTerm: (term: TranslationTerm, sentence: string, rect: DOMRect, pinned: boolean) => void; onLeaveTerm: () => void }) {
+  const sourceRef = useRef<HTMLDivElement | null>(null);
+  const [rails, setRails] = useState<AnnotationRail[]>([]);
   const translationRanges = useMemo<ReaderTranslationRange[]>(() => {
     const persisted = records.flatMap((record) => record.segments.flatMap((segment) => {
       let sourceStart = segment.sourceStart;
@@ -106,20 +143,73 @@ function BilingualBlock({ block, state, records, annotations, view, markdownPath
     const draft = state?.text && state.segments?.length && !state.record ? state.segments.map((segment) => ({ recordId: `draft:${block.id}`, segmentId: segment.id, sourceStart: segment.sourceStart, sourceEnd: segment.sourceEnd, sourceText: segment.sourceText, translatedText: segment.translatedText, terms: state.terms?.filter((term) => !term.segmentId || term.segmentId === segment.id) ?? [] })) : [];
     return [...persisted, ...draft].sort((left, right) => left.sourceStart - right.sourceStart);
   }, [block.id, block.text, records, state]);
-  const annotationPlugin = useMemo(() => createReaderAnnotationPlugin({ source: block.text, view, translations: translationRanges, annotations }), [annotations, block.text, translationRanges, view]);
-  return <div className="reader-source range-annotated-source"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath, annotationPlugin]} rehypePlugins={[rehypeKatex]} components={{
+  const annotationPlugin = useMemo(() => createReaderAnnotationPlugin({ source: block.text, activeTranslationKeys, annotationsVisible, translations: translationRanges, annotations }), [activeTranslationKeys, annotations, annotationsVisible, block.text, translationRanges]);
+  useLayoutEffect(() => {
+    const root = sourceRef.current;
+    if (!root || !annotationsVisible) {
+      setRails([]);
+      return;
+    }
+    let frame = 0;
+    const measure = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const rootRect = root.getBoundingClientRect();
+        const next: AnnotationRail[] = [];
+        root.querySelectorAll<HTMLElement>("[data-translation-key], [data-chat-annotation-ids]").forEach((element, elementIndex) => {
+          const translationKey = element.dataset.translationKey;
+          const translationId = element.dataset.translationId;
+          const annotationIds = (element.dataset.chatAnnotationIds ?? "").split(",").filter(Boolean);
+          if (!translationKey && !annotationIds.length) return;
+          const range = document.createRange();
+          range.selectNodeContents(element);
+          const lineRects = Array.from(range.getClientRects()).filter((rect) => rect.width > 2 && rect.height > 0).sort((left, right) => left.top - right.top || left.left - right.left).reduce<Array<{ left: number; right: number; top: number; bottom: number }>>((merged, rect) => {
+            const current = merged.at(-1);
+            if (current && Math.abs(current.top - rect.top) < 2 && rect.left <= current.right + 2) {
+              current.left = Math.min(current.left, rect.left);
+              current.right = Math.max(current.right, rect.right);
+              current.bottom = Math.max(current.bottom, rect.bottom);
+            } else {
+              merged.push({ left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom });
+            }
+            return merged;
+          }, []);
+          lineRects.forEach((rect, rectIndex) => {
+            const baseTop = rect.bottom - rootRect.top - 4;
+            if (translationKey) next.push({ id: `translation:${elementIndex}:${rectIndex}:${translationKey}`, kind: "translation", left: rect.left - rootRect.left, top: baseTop - (annotationIds.length ? 4 : 0), width: rect.right - rect.left, translationKey, translationId, annotationIds: [] });
+            if (annotationIds.length) {
+              const chatAnnotation = annotations.find((annotation) => annotationIds.includes(annotation.id));
+              next.push({ id: `chat:${elementIndex}:${rectIndex}:${annotationIds.join(":")}`, kind: "chat", left: rect.left - rootRect.left, top: baseTop + (translationKey ? 4 : 0), width: rect.right - rect.left, annotationIds, relatedId: chatAnnotation?.relatedId });
+            }
+          });
+        });
+        setRails(next);
+      });
+    };
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(measure);
+    observer?.observe(root);
+    window.addEventListener("resize", measure);
+    void document.fonts?.ready.then(measure);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [activeTranslationKeys, annotations, annotationsVisible, annotationPlugin]);
+  return <div ref={sourceRef} className="reader-source range-annotated-source"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath, annotationPlugin]} rehypePlugins={[rehypeKatex]} components={{
     span: ({ children, ...props }) => {
       const attributes = props as Record<string, unknown>;
       const translationId = String(attributes["data-translation-id"] ?? "");
       const segmentId = String(attributes["data-translation-segment-id"] ?? "");
-      const annotationIds = String(attributes["data-chat-annotation-ids"] ?? "").split(",").filter(Boolean);
-      const chatAnnotation = annotations.find((annotation) => annotationIds.includes(annotation.id));
-      const terms = translationRanges.find((range) => range.recordId === translationId && range.segmentId === segmentId)?.terms ?? [];
-      return <span {...props}>{children}
-        {translationId && <button type="button" className="reader-marker reader-marker-translation" title="查看译文与术语" aria-label="查看译文与术语" onMouseDown={(event) => event.preventDefault()} onClick={(event) => { event.stopPropagation(); onOpenAnnotation("translation", translationId, [], event.currentTarget.getBoundingClientRect()); }} />}
-        {annotationIds.length > 0 && <button type="button" className="reader-marker reader-marker-chat" title="查看对话或解释" aria-label="查看对话或解释" onMouseDown={(event) => event.preventDefault()} onClick={(event) => { event.stopPropagation(); onOpenAnnotation("chat", chatAnnotation?.relatedId, annotationIds, event.currentTarget.getBoundingClientRect()); }} />}
-        {terms.length > 0 && <span className="translation-term-popover" role="tooltip"><strong>固定搭配与专业术语</strong>{terms.map((term, index) => <span key={`${term.text}:${index}`}><b>{term.text}</b><i>{term.translation}</i>{term.literalMeaning && <small>直译：{term.literalMeaning}</small>}<small>{term.contextMeaning || term.explanation}</small></span>)}</span>}
-      </span>;
+      const translation = translationRanges.find((range) => range.recordId === translationId && range.segmentId === segmentId);
+      const translated = String(attributes["data-translation-active"] ?? "") === "true" && Boolean(translation);
+      const content: ReactNode = translated && translation
+        ? translatedTermParts(translation.translatedText, translation.terms).map((part, index) => part.term
+          ? <button key={`${part.term.text}:${index}`} type="button" className={`translation-term-highlight ${part.term.kind}`} onPointerEnter={(event) => onOpenTerm(part.term!, translation.sourceText, event.currentTarget.getBoundingClientRect(), false)} onPointerLeave={onLeaveTerm} onFocus={(event) => onOpenTerm(part.term!, translation.sourceText, event.currentTarget.getBoundingClientRect(), false)} onBlur={onLeaveTerm} onClick={(event) => { event.stopPropagation(); onOpenTerm(part.term!, translation.sourceText, event.currentTarget.getBoundingClientRect(), true); }}>{part.text}</button>
+          : <span key={`translation-text:${index}`}>{part.text}</span>)
+        : children;
+      return <span {...props}>{content}</span>;
     },
     img: ({ src, alt }) => {
       const resolved = resolveMarkdownAssetPath(markdownPath, src);
@@ -127,11 +217,11 @@ function BilingualBlock({ block, state, records, annotations, view, markdownPath
       const analysis = figureAnalysisFor?.(src);
       return <span className="markdown-figure-inline"><img className="markdown-paper-figure" src={rendered} alt={alt ?? "Extracted paper figure"} loading="lazy" />{onToggleFigure && <button className={`figure-ai-button ${analysis?.status ?? "pending"}`} onClick={() => onToggleFigure(src)}><Sparkles size={13} /> {analysis?.status === "completed" ? "AI 图解" : analysis?.status === "failed" ? "重试图解" : "图解待处理"}</button>}{analysis?.description && analysis.id.endsWith(":expanded") && <div className="figure-ai-description"><MarkdownBlock value={analysis.description} /></div>}</span>;
     },
-  }}>{normalizeMarkdownMath(block.text)}</ReactMarkdown></div>;
+  }}>{normalizeMarkdownMath(block.text)}</ReactMarkdown>{annotationsVisible && rails.length > 0 && <div className="reader-annotation-rails" aria-label="正文标注">{rails.map((rail) => <button key={rail.id} type="button" className={`reader-annotation-rail ${rail.kind}`} style={{ left: rail.left, top: rail.top, width: rail.width }} title={rail.kind === "translation" ? "点击切换中英文；右键管理译文" : "点击查看论文问答或解释"} aria-label={rail.kind === "translation" ? "切换该句中英文" : "查看该处论文问答或解释"} onMouseDown={(event) => event.preventDefault()} onContextMenu={(event) => { if (rail.kind !== "translation") return; event.preventDefault(); onOpenAnnotation("translation", rail.translationId, [], event.currentTarget.getBoundingClientRect()); }} onClick={(event) => { event.stopPropagation(); if (rail.kind === "translation" && rail.translationKey) onToggleTranslation(rail.translationKey); else onOpenAnnotation("chat", rail.relatedId, rail.annotationIds, event.currentTarget.getBoundingClientRect()); }} />)}</div>}</div>;
 }
 
 export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) {
-  const { setView, customModels, providers, contextCompressionModelId, markdownFormattingModelId, autoFormatMarkdown, readerFocusMode, setReaderFocusMode, fontSize, readerZoom, setReaderZoom, readerTheme, setReaderTheme, readerBackgroundColor, readerTextColor, setReaderColors, readerTranslationView, setReaderTranslationView } = useWorkspace();
+  const { setView, customModels, providers, contextCompressionModelId, markdownFormattingModelId, autoFormatMarkdown, readerFocusMode, setReaderFocusMode, fontSize, readerZoom, setReaderZoom, readerTheme, setReaderTheme, readerBackgroundColor, readerTextColor, setReaderColors, readerAnnotationsVisible, setReaderAnnotationsVisible } = useWorkspace();
   const queryClient = useQueryClient();
   const [mode, setMode] = useState<ReaderMode>("integrated");
   const [selection, setSelection] = useState<SelectionSource | null>(null);
@@ -140,6 +230,8 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const [analysisStates, setAnalysisStates] = useState<Record<string, AnalysisState>>({});
   const [activeAnalysis, setActiveAnalysis] = useState<{ blockId: string; type: ReaderAnalysisType } | null>(null);
   const [annotationInspector, setAnnotationInspector] = useState<AnnotationInspectorState | null>(null);
+  const [activeTranslationKeys, setActiveTranslationKeys] = useState<Set<string>>(() => new Set());
+  const [termPanel, setTermPanel] = useState<TermPanelState | null>(null);
   const [editingTurn, setEditingTurn] = useState<{ turnId: string; question: string } | null>(null);
   const [activeBlock, setActiveBlock] = useState("");
   const [activeSection, setActiveSection] = useState("");
@@ -182,6 +274,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const chatHandle = useRef<ModelStreamHandle | null>(null);
   const formattingHandle = useRef<ModelStreamHandle | null>(null);
   const autoFormattingKey = useRef("");
+  const termPanelCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selectionToolbar = useRef<HTMLDivElement | null>(null);
   const readerCanvas = useRef<HTMLElement | null>(null);
   const outlineDrag = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
@@ -283,6 +376,8 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     setActiveSection("");
     setActiveAnalysis(null);
     setAnnotationInspector(null);
+    setActiveTranslationKeys(new Set());
+    setTermPanel(null);
     setEditingTurn(null);
     setChatInput("");
     setChatLive("");
@@ -358,6 +453,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   }, [mode, sections]);
 
   useEffect(() => () => {
+    if (termPanelCloseTimer.current) clearTimeout(termPanelCloseTimer.current);
     for (const handle of streamHandles.current.values()) {
       handle.dispose();
       void handle.cancel();
@@ -390,7 +486,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   useEffect(() => {
     if (!annotationInspector) return;
     const dismiss = (event: PointerEvent) => {
-      if ((event.target as HTMLElement).closest(".reader-annotation-inspector, .reader-marker")) return;
+      if ((event.target as HTMLElement).closest(".reader-annotation-inspector, .reader-annotation-rail")) return;
       setAnnotationInspector(null);
       setEditingTurn(null);
     };
@@ -407,6 +503,23 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       window.removeEventListener("keydown", dismissOnEscape);
     };
   }, [annotationInspector]);
+
+  useEffect(() => {
+    if (!termPanel?.pinned) return;
+    const dismiss = (event: PointerEvent) => {
+      if ((event.target as HTMLElement).closest(".reader-term-panel, .translation-term-highlight")) return;
+      setTermPanel(null);
+    };
+    const dismissOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setTermPanel(null);
+    };
+    document.addEventListener("pointerdown", dismiss, true);
+    window.addEventListener("keydown", dismissOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss, true);
+      window.removeEventListener("keydown", dismissOnEscape);
+    };
+  }, [termPanel?.pinned]);
 
   useEffect(() => {
     const document = documentQuery.data;
@@ -498,7 +611,6 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     }
     setActiveBlock(block.id);
     setActiveAnalysis(null);
-    if (kind === "passage") setReaderTranslationView("translated");
     setTranslations((current) => ({ ...current, [block.id]: { status: "streaming", text: "", kind } }));
     const requestId = crypto.randomUUID();
     let rawBuffer = "";
@@ -603,6 +715,13 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         promptVersion: `${state.kind === "word" ? WORD_LOOKUP_PROMPT_VERSION : TRANSLATION_PROMPT_VERSION}:${translationPrompt?.id ?? "default"}`,
       });
       setTranslations((current) => ({ ...current, [block.id]: { status: "saved", text: record.translatedText, segments: record.segments, terms: record.terms, record } }));
+      if (state.kind !== "word") {
+        setActiveTranslationKeys((current) => {
+          const next = new Set(current);
+          record.segments.forEach((segment) => next.add(readerTranslationKey(record.id, segment.id)));
+          return next;
+        });
+      }
       await translationQuery.refetch();
       await annotationQuery.refetch();
     } catch (error) {
@@ -617,13 +736,17 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       setContextNotice("当前翻译模型缺少密钥，请先在“模型与处理”中恢复或重新保存 API Key。");
       return;
     }
-    setReaderTranslationView("translated");
     setTranslationBatchBusy(true);
     try {
       for (const block of section.blocks) {
         const saved = (translationQuery.data ?? []).some((record) => record.blockId === block.id && !record.promptVersion.startsWith(WORD_LOOKUP_PROMPT_VERSION));
         if (!saved && block.text.trim()) await translate(block);
       }
+      setActiveTranslationKeys((current) => {
+        const next = new Set(current);
+        (translationQuery.data ?? []).filter((record) => section.blocks.some((block) => block.id === record.blockId) && !record.promptVersion.startsWith(WORD_LOOKUP_PROMPT_VERSION)).forEach((record) => record.segments.forEach((segment) => next.add(readerTranslationKey(record.id, segment.id))));
+        return next;
+      });
       setContextNotice(`“${section.title}”已完成逐段翻译。`);
     } finally {
       setTranslationBatchBusy(false);
@@ -1249,6 +1372,30 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       top: Math.min(window.innerHeight - 120, rect.bottom + 8),
     });
   };
+  const toggleInlineTranslation = (key: string) => {
+    setActiveTranslationKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+    setTermPanel(null);
+  };
+  const openTermPanel = (term: TranslationTerm, sentence: string, rect: DOMRect, pinned: boolean) => {
+    if (termPanelCloseTimer.current) clearTimeout(termPanelCloseTimer.current);
+    const panelWidth = Math.min(420, window.innerWidth - 24);
+    const left = Math.max(12, Math.min(window.innerWidth - panelWidth - 12, rect.left));
+    const below = rect.bottom + 10;
+    const top = below + 300 <= window.innerHeight ? below : Math.max(12, rect.top - 310);
+    setTermPanel((current) => pinned && current?.pinned && current.term.text === term.text && current.term.translation === term.translation
+      ? null
+      : { term, sentence, left, top, pinned });
+  };
+  const scheduleTermPanelClose = () => {
+    if (termPanel?.pinned) return;
+    if (termPanelCloseTimer.current) clearTimeout(termPanelCloseTimer.current);
+    termPanelCloseTimer.current = setTimeout(() => setTermPanel((current) => current?.pinned ? current : null), 180);
+  };
   const inspectorTranslation = annotationInspector?.kind === "translation"
     ? translationQuery.data?.find((record) => record.id === annotationInspector.relatedId)
     : undefined;
@@ -1342,6 +1489,12 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       <div className="selection-popover-actions"><button title={selection.kind === "word" ? "结合全文语境查词" : "翻译选中文本"} onClick={() => void translate(selection)}><Languages size={14} /> {selection.kind === "word" ? "查词" : "翻译"}</button><button title="在本篇论文的统一对话中提问" onClick={() => void askAboutSelection(selection)}><MessageSquareText size={14} /> 提问</button><button title="解释选中文本" onClick={() => void explain("theorem", selection)}><Sparkles size={14} /> 解释</button>{selection.kind === "word" && <button title="朗读单词" onClick={() => speakWord(selection.text)}><Volume2 size={14} /> 读音</button>}<button className="icon-button" title="关闭" onClick={() => setSelection(null)}><X size={14} /></button></div>
       {selectionTranslation && <TranslationPanel block={selection} state={selectionTranslation} compact onSave={() => void persistTranslation(selection, selectionTranslation)} onRetry={() => void translate(selection)} onCancel={() => void cancelTranslation(selection.id)} onSpeak={selection.kind === "word" ? () => speakWord(selection.text) : undefined} onAddContext={() => void addContext(selection.sectionId, `ai-translation:${selection.id}`, `原文：\n${selection.text}\n\nAI ${selection.kind === "word" ? "论文语境词义" : "翻译"}：\n${selectionTranslation.text}`)} inContext={Boolean(contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.blockId === `ai-translation:${selection.id}`))} />}
     </div>}
+    {termPanel && createPortal(<div className={`reader-term-panel ${termPanel.pinned ? "pinned" : "preview"}`} style={{ left: termPanel.left, top: termPanel.top }} role="dialog" aria-label="论文术语释义" onPointerEnter={() => { if (termPanelCloseTimer.current) clearTimeout(termPanelCloseTimer.current); }} onPointerLeave={scheduleTermPanelClose}>
+      <header><div><span className={`term-kind ${termPanel.term.kind}`}>{termPanel.term.kind === "phrase" ? "固定搭配" : "专业术语"}</span><strong>{termPanel.term.translation}</strong></div><button type="button" className="icon-button" title="关闭" onClick={() => setTermPanel(null)}><X size={14} /></button></header>
+      <div className="reader-term-original">{termPanel.term.text}</div>
+      <dl>{termPanel.term.literalMeaning && <><dt>直译</dt><dd>{termPanel.term.literalMeaning}</dd></>}<dt>论文语境</dt><dd>{termPanel.term.contextMeaning || termPanel.term.explanation || termPanel.term.translation}</dd><dt>所在句子</dt><dd className="term-source-sentence">{termPanel.sentence}</dd></dl>
+      {!termPanel.pinned && <footer>点击术语可固定此卡片</footer>}
+    </div>, document.body)}
     {annotationInspector && <div className="reader-annotation-inspector" style={{ left: annotationInspector.left, top: annotationInspector.top }} role="dialog" aria-label={annotationInspector.kind === "translation" ? "译文详情" : "对话详情"}>
       <header><div><span className={`annotation-kind ${annotationInspector.kind}`}>{annotationInspector.kind === "translation" ? "译文" : inspectorAnalysis ? (inspectorAnalysis.analysisType === "formula" ? "公式解释" : "论述解释") : "论文对话"}</span>{(inspectorTranslation || inspectorAnalysis || inspectorTurn) && <small>已保存</small>}{inspectorDraftTranslation && <small>待保存</small>}</div><button className="icon-button" title="关闭" onClick={() => setAnnotationInspector(null)}><X size={14} /></button></header>
       {inspectorTranslation && <div className="annotation-inspector-content"><p className="annotation-source">{inspectorTranslationSource}</p><div className="annotation-answer"><MarkdownBlock value={inspectorTranslation.translatedText} /></div>{inspectorTranslation.terms.length > 0 && <div className="annotation-terms">{inspectorTranslation.terms.map((term, index) => <div key={`${term.text}:${index}`}><b>{term.text}</b><span>{term.translation}</span><small>{term.contextMeaning || term.explanation}</small></div>)}</div>}</div>}
@@ -1372,7 +1525,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
           <strong>阅读配色</strong><div className="reader-theme-presets">{Object.entries(READER_THEME_COLORS).map(([id, colors]) => <button key={id} className={readerTheme === id ? "active" : ""} title={id === "white" ? "白纸" : id === "warm" ? "暖纸" : id === "green" ? "柔绿" : "深色"} style={{ background: colors.background, color: colors.text }} onClick={() => setReaderTheme(id as keyof typeof READER_THEME_COLORS)}>{id === "white" ? "白" : id === "warm" ? "暖" : id === "green" ? "绿" : "暗"}</button>)}</div>
           <label><span>背景</span><input type="color" value={readerBackgroundColor} onChange={(event) => updateCustomReaderColor("background", event.target.value)} /></label><label><span>文字</span><input type="color" value={readerTextColor} onChange={(event) => updateCustomReaderColor("text", event.target.value)} /></label>
         </div>}</div>
-        <div className="reader-language-switch"><button className={readerTranslationView === "original" ? "active" : ""} onClick={() => setReaderTranslationView("original")}>原文</button><button className={readerTranslationView === "translated" ? "active" : ""} onClick={() => { setReaderTranslationView("translated"); if (!hasPassageTranslations) setContextNotice("当前论文还没有译文，可从下方入口翻译当前章节，或选中文字进行局部翻译。"); }}>译文</button></div>
+        <button className={`reader-annotations-toggle ${readerAnnotationsVisible ? "active" : ""}`} title={readerAnnotationsVisible ? "隐藏译文、问答和术语标注，显示清爽原文" : "显示译文、问答和术语标注"} onClick={() => { setReaderAnnotationsVisible(!readerAnnotationsVisible); setAnnotationInspector(null); setTermPanel(null); }}>{readerAnnotationsVisible ? <EyeOff size={13} /> : <Eye size={13} />}{readerAnnotationsVisible ? "隐藏标注" : "显示标注"}</button>
       </div>}
       <button className="reader-focus-button" onClick={() => void toggleFocusMode(true)} title="只保留目录、Markdown 正文和论文阅读助手"><Maximize2 size={13} /> 纯享阅读</button>
       <button><Search size={13} /> 查找</button>
@@ -1395,7 +1548,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         {mode === "integrated" && <article className="integrated-paper">
           <header className="paper-reading-header"><span className="tag tag-primary">MD 章节阅读</span><h1>{paper.title}</h1><p>本地文档 · {paper.pageCount || "—"} 页 · 更新于 {new Date(paper.updatedAt).toLocaleDateString("zh-CN")}</p></header>
           {formattingStatus === "error" && <div className="formatting-notice error"><TriangleAlert size={13} /> {formattingError}</div>}
-          {readerTranslationView === "translated" && !hasPassageTranslations && <div className="reader-translation-empty"><div><Languages size={18} /><span><strong>当前还没有中文译文</strong><small>原始 Markdown 始终保持英文不变。翻译会按句覆盖显示，并自动保存术语与原文锚点。</small></span></div><button className="primary-button compact" disabled={translationBatchBusy || !credentialReady} onClick={() => void translateCurrentSection()}>{translationBatchBusy ? <LoaderCircle className="spin" size={14} /> : <Languages size={14} />} {credentialReady ? (translationBatchBusy ? "正在翻译本章" : "翻译当前章节") : "先恢复模型密钥"}</button></div>}
+          {readerAnnotationsVisible && !hasPassageTranslations && <div className="reader-translation-empty"><div><Languages size={18} /><span><strong>当前还没有中文译文</strong><small>原始 Markdown 始终保持英文不变。翻译完成后，点击蓝色下划线即可在原位置切换中英文。</small></span></div><button className="primary-button compact" disabled={translationBatchBusy || !credentialReady} onClick={() => void translateCurrentSection()}>{translationBatchBusy ? <LoaderCircle className="spin" size={14} /> : <Languages size={14} />} {credentialReady ? (translationBatchBusy ? "正在翻译本章" : "翻译当前章节") : "先恢复模型密钥"}</button></div>}
           {markdownQuery.isLoading || documentQuery.isLoading ? <div className="document-loading">Loading structured document…</div> : sections.map((section, sectionIndex) => {
             const displayBlocks = section.blocks;
             return <section id={`reader-section-${section.id}`} data-section-id={section.id} className={`reading-section ${activeSection === section.id ? "active" : ""}`} key={section.id}>
@@ -1408,7 +1561,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
               const blockTranslations = (translationQuery.data ?? []).filter((record) => record.blockId === block.id && !record.promptVersion.startsWith(WORD_LOOKUP_PROMPT_VERSION));
               const blockAnnotations = (annotationQuery.data ?? []).filter((annotation) => annotation.blockId === block.id);
               return <div className={`paragraph-card ${block.compacted ? "compacted" : ""} ${activeBlock === block.id ? "active" : ""}`} key={block.id} onClick={(event) => { if (!(event.target as HTMLElement).closest("button, a")) setActiveBlock((current) => current === block.id ? "" : block.id); }} onMouseUp={(event) => captureSelection(block, event)}>
-                <div className="paragraph-main"><div className="paragraph-markdown"><BilingualBlock block={block} state={state} records={blockTranslations} annotations={blockAnnotations} view={readerTranslationView} markdownPath={paper.markdownPath} figureAnalysisFor={figureAnalysisFor} onToggleFigure={(source) => void toggleFigureAnalysis(source)} onOpenAnnotation={openAnnotationInspector} /></div></div>
+                <div className="paragraph-main"><div className="paragraph-markdown"><BilingualBlock block={block} state={state} records={blockTranslations} annotations={blockAnnotations} activeTranslationKeys={activeTranslationKeys} annotationsVisible={readerAnnotationsVisible} markdownPath={paper.markdownPath} figureAnalysisFor={figureAnalysisFor} onToggleFigure={(source) => void toggleFigureAnalysis(source)} onToggleTranslation={toggleInlineTranslation} onOpenAnnotation={openAnnotationInspector} onOpenTerm={openTermPanel} onLeaveTerm={scheduleTermPanelClose} /></div></div>
                 <div className="paragraph-actions"><button className={state?.text ? "active" : ""} title={state?.status === "streaming" ? "停止翻译" : "翻译本段"} aria-label="翻译本段" onClick={() => void (state?.status === "streaming" ? cancelTranslation(block.id) : translate(block))}>{state?.status === "streaming" ? <LoaderCircle className="spin" size={14} /> : <Languages size={14} />}</button>{state?.status === "unsaved" && <span className="paragraph-save-state"><LoaderCircle className="spin" size={11} /> 保存中</span>}<button title={hasFormula ? "解释公式" : "解释段落"} aria-label={hasFormula ? "解释公式" : "解释段落"} onClick={() => void (explanation?.status === "streaming" ? streamHandles.current.get(`analysis:${analysisKey(block.id, explanationType)}`)?.cancel() : explain(hasFormula ? "formula" : "theorem", block))}>{explanation?.status === "streaming" ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}</button><button className={contextDraftQuery.data?.items.some((item) => item.paperId === paper.id && item.blockId === block.id) ? "active" : ""} title="加入论文上下文" aria-label="加入论文上下文" disabled={contextBusy === block.id} onClick={() => void addContext(block.sectionId, block.id, block.text)}><Layers3 size={14} /></button></div>
                 {state?.error && <p className="paragraph-translation-error"><TriangleAlert size={12} /> {state.error}</p>}
                 {explanation?.status === "error" && <p className="paragraph-translation-error"><TriangleAlert size={12} /> {explanation.error}</p>}

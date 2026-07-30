@@ -55,7 +55,8 @@ export function structuredTranslationPrompt(source: string): string {
   return [
     "请按句翻译下面的学术文本。公式、引用、数字、Markdown 链接和图片标记必须原样保留。",
     "只返回 JSON，不要使用 Markdown 代码围栏。格式：",
-    '{"segments":[{"id":"sentence-1","translatedText":"..."}],"terms":[{"text":"...","translation":"...","sourceStart":0,"sourceEnd":8,"literalMeaning":"...","contextMeaning":"...","explanation":"...","kind":"phrase|term","segmentId":"sentence-1"}]}',
+    '{"segments":[{"id":"sentence-1","translatedText":"..."}],"terms":[{"text":"...","translation":"...","sourceStart":0,"sourceEnd":8,"translatedStart":0,"translatedEnd":4,"literalMeaning":"...","contextMeaning":"...","explanation":"...","kind":"phrase|term","segmentId":"sentence-1"}]}',
+    "translatedStart/translatedEnd 使用对应 translatedText 内的字符偏移，必须准确覆盖术语的中文译法。",
     "segments 必须逐一返回且 id 不得改变；terms 只收录重要固定搭配和专业术语，sourceStart/sourceEnd 使用给定原文的绝对字符偏移。",
     JSON.stringify({ segments: segments.map(({ id, sourceStart, sourceEnd, sourceText }) => ({ id, sourceStart, sourceEnd, sourceText })) }),
   ].join("\n\n");
@@ -83,9 +84,21 @@ export function parseStructuredTranslation(source: string, response: string): St
       const sourceEnd = sourceStart === undefined ? undefined : (
         Number.isInteger(proposedEnd) && proposedEnd >= sourceStart && proposedEnd <= source.length ? proposedEnd : sourceStart + text.length
       );
+      const translation = String(term.translation);
+      const translatedSegment = segments.find((candidate) => candidate.id === term.segmentId)?.translatedText ?? "";
+      const proposedTranslatedStart = Number(term.translatedStart);
+      const proposedTranslatedEnd = Number(term.translatedEnd);
+      const validTranslatedRange = Number.isInteger(proposedTranslatedStart)
+        && Number.isInteger(proposedTranslatedEnd)
+        && proposedTranslatedStart >= 0
+        && proposedTranslatedEnd > proposedTranslatedStart
+        && proposedTranslatedEnd <= translatedSegment.length
+        && translatedSegment.slice(proposedTranslatedStart, proposedTranslatedEnd) === translation;
+      const locatedTranslation = translatedSegment.indexOf(translation);
+      const uniqueTranslation = locatedTranslation >= 0 && translatedSegment.indexOf(translation, locatedTranslation + translation.length) < 0;
       return {
         text,
-        translation: String(term.translation),
+        translation,
         explanation: String(term.explanation ?? ""),
         kind: term.kind === "phrase" ? "phrase" as const : "term" as const,
         segmentId: term.segmentId ? String(term.segmentId) : undefined,
@@ -93,6 +106,8 @@ export function parseStructuredTranslation(source: string, response: string): St
         sourceEnd,
         literalMeaning: String(term.literalMeaning ?? term.translation ?? ""),
         contextMeaning: String(term.contextMeaning ?? term.explanation ?? ""),
+        translatedStart: validTranslatedRange ? proposedTranslatedStart : uniqueTranslation ? locatedTranslation : undefined,
+        translatedEnd: validTranslatedRange ? proposedTranslatedEnd : uniqueTranslation ? locatedTranslation + translation.length : undefined,
       };
     });
     return { translatedText: segments.map((segment) => segment.translatedText).join(""), segments, terms };

@@ -18,6 +18,7 @@ export interface WorkspaceSettingsSnapshot {
   readerBackgroundColor?: string;
   readerTextColor?: string;
   readerTranslationView?: "original" | "translated";
+  readerAnnotationsVisible?: boolean;
 }
 
 export function isWorkspaceSettingsSnapshot(value: unknown): value is WorkspaceSettingsSnapshot {
@@ -34,5 +35,6 @@ export function isWorkspaceSettingsSnapshot(value: unknown): value is WorkspaceS
     && typeof item.autoFormatMarkdown === "boolean"
     && typeof item.fullPageOcrModelId === "string"
     && typeof item.ocrConsent === "boolean"
+    && (item.readerAnnotationsVisible === undefined || typeof item.readerAnnotationsVisible === "boolean")
     && ["small", "medium", "large"].includes(item.fontSize ?? "");
 }

@@ -30,6 +30,7 @@ describe("workspace settings snapshot", () => {
       readerBackgroundColor: "#edf5ee",
       readerTextColor: "#203027",
       readerTranslationView: "translated",
+      readerAnnotationsVisible: false,
     })).toBe(true);
     expect(isWorkspaceSettingsSnapshot(valid)).toBe(true);
   });
@@ -37,5 +38,6 @@ describe("workspace settings snapshot", () => {
   it("rejects incomplete or unsupported snapshots", () => {
     expect(isWorkspaceSettingsSnapshot({ ...valid, providers: [] })).toBe(false);
     expect(isWorkspaceSettingsSnapshot({ ...valid, fontSize: "huge" })).toBe(false);
+    expect(isWorkspaceSettingsSnapshot({ ...valid, readerAnnotationsVisible: "yes" })).toBe(false);
   });
 });

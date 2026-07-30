@@ -26,4 +26,14 @@ describe("reader translation", () => {
   it("checks custom reading color contrast", () => {
     expect(contrastRatio("#ffffff", "#111111")).toBeGreaterThan(7);
   });
+
+  it("validates translated term offsets and falls back to a unique translated phrase", () => {
+    const source = "Graph neural network improves results.";
+    const parsed = parseStructuredTranslation(source, JSON.stringify({
+      segments: [{ id: "sentence-1", translatedText: "图神经网络改善了结果。" }],
+      terms: [{ text: "Graph neural network", translation: "图神经网络", kind: "term", segmentId: "sentence-1", translatedStart: 99, translatedEnd: 100 }],
+    }));
+    expect(parsed.terms[0].translatedStart).toBe(0);
+    expect(parsed.terms[0].translatedEnd).toBe(5);
+  });
 });

@@ -280,6 +280,8 @@ export interface TranslationTerm {
   sourceEnd?: number;
   literalMeaning?: string;
   contextMeaning?: string;
+  translatedStart?: number;
+  translatedEnd?: number;
 }
 
 export type ReaderAnnotationTarget = "translation" | "chat_turn" | "analysis" | "conversation";

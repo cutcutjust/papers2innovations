@@ -1,6 +1,6 @@
 [package]
 name = "papers2innovations"
-version = "0.1.24"
+version = "0.1.25"
 description = "Local-first scientific paper workspace"
 authors = ["Papers2Innovations contributors"]
 edition = "2021"
