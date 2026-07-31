@@ -146,6 +146,15 @@ class RpcServer:
             return self.library(params["root"]).reparse_paper(
                 params["paperId"], self.notify_progress, request_id
             )
+        if method == "paper.reprocess_preview":
+            return self.library(params["root"]).reprocess_preview(params.get("paperIds", []))
+        if method == "paper.reprocess_batch":
+            return self.library(params["root"]).reprocess_batch(
+                params.get("paperIds", []), bool(params.get("visionConfirmed", False)),
+                self.notify_progress, request_id,
+            )
+        if method == "paper.uncertainty_list":
+            return self.library(params["root"]).list_uncertainties(params["paperId"])
         if method == "paper.read_markdown":
             return {
                 "markdown": self.library(params["root"]).read_markdown(params["paperId"])

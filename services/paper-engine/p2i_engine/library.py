@@ -236,8 +236,13 @@ class Library:
         return {
             JobStatus.HASHING: "hash",
             JobStatus.QUEUED: "hash",
+            JobStatus.RENDERING: "render",
             JobStatus.PARSING_LAYOUT: "layout",
+            JobStatus.RECOGNIZING_TEXT: "vision_text",
             JobStatus.EXTRACTING_FIGURES: "figures",
+            JobStatus.CHECKING_FORMULAS: "formulas",
+            JobStatus.CLEANING_DOCUMENT: "cleanup",
+            JobStatus.VERIFYING_DOCUMENT: "verification",
             JobStatus.PARSING_REFERENCES: "tables",
             JobStatus.RESOLVING_METADATA: "ocr",
             JobStatus.INDEXING: "index",
@@ -492,7 +497,7 @@ class Library:
                                     )
                         except Exception as error:  # noqa: BLE001
                             warnings.append(f"第 {page_number} 页公式修复失败：{error}")
-                    if repaired and confidence >= 0.8:
+                    if repaired and confidence >= 0.85:
                         section.markdown = section.markdown.replace(original, repaired, 1)
                         repaired_formulas += 1
         if model_config and self.vision_analyze:
@@ -596,18 +601,44 @@ class Library:
         request_id: str | int | None,
     ) -> None:
         run_id = str(uuid.uuid4())
+        revision_id = str(uuid.uuid4())
         started = utc_now()
+        import_options_path = self.internal_dir / "import-options" / f"{sha256}.json"
+        processing_mode = "vision"
+        if import_options_path.is_file():
+            try:
+                processing_mode = str(json.loads(import_options_path.read_text(encoding="utf-8")).get("processingMode") or "vision")
+            except (OSError, json.JSONDecodeError):
+                processing_mode = "vision"
+        vision_model_id: str | None = None
+        if processing_mode == "vision":
+            try:
+                vision_model_id = str((self.vision_config() if self.vision_config else {}).get("modelId") or "") or None
+            except Exception:  # A missing visual model falls back to local parsing without losing the PDF.
+                vision_model_id = None
+        output_dir = self.generated_dir / paper_id / "revisions" / revision_id
         with self.db.connect() as connection:
+            previous = connection.execute(
+                "SELECT id FROM document_revisions WHERE paper_id = ? AND status IN ('completed', 'partial') "
+                "ORDER BY created_at DESC LIMIT 1", (paper_id,),
+            ).fetchone()
             connection.execute(
                 "INSERT INTO parse_runs(id, paper_id, job_id, parser_name, parser_version, status, started_at) "
                 "VALUES (?, ?, ?, 'pending', 'pending', ?, ?)",
                 (run_id, paper_id, job_id, JobStatus.QUEUED.value, started),
             )
+            connection.execute(
+                "INSERT INTO document_revisions(id, paper_id, source_hash, pipeline_version, processing_mode, "
+                "status, previous_revision_id, created_at) VALUES (?, ?, ?, 'visual-document-v1', ?, 'running', ?, ?)",
+                (revision_id, paper_id, sha256, "vision" if vision_model_id else "local", previous["id"] if previous else None, started),
+            )
         try:
             self._progress(callback, job_id, paper_id, JobStatus.HASHING, 0.12, "SHA-256 verified", request_id)
             self._progress(callback, job_id, paper_id, JobStatus.QUEUED, 0.2, "Parse job queued", request_id)
-            self._progress(callback, job_id, paper_id, JobStatus.PARSING_LAYOUT, 0.35, "Parsing document layout", request_id)
-            output_dir = self.generated_dir / paper_id
+            self._progress(callback, job_id, paper_id, JobStatus.RENDERING, 0.26, "Rendering PDF pages at 200 DPI", request_id)
+            self._progress(callback, job_id, paper_id, JobStatus.PARSING_LAYOUT, 0.32, "Parsing Docling layout and coordinates", request_id)
+            if vision_model_id:
+                self._progress(callback, job_id, paper_id, JobStatus.RECOGNIZING_TEXT, 0.4, "Reconstructing page Markdown with the vision model", request_id)
             result = parse_pdf(
                 path,
                 output_dir,
@@ -615,7 +646,10 @@ class Library:
                 sha256,
                 cache_dir=self.internal_dir / "cache" / "ocr" / sha256,
                 ocr_page=self.ocr_page,
+                vision_page=self.vision_analyze,
+                vision_model_id=vision_model_id,
             )
+            self._progress(callback, job_id, paper_id, JobStatus.CHECKING_FORMULAS, 0.62, "Checking formulas and visual artifacts", request_id)
             quality = self._preprocess_visual_artifacts(
                 paper_id, sha256, result.document.title, path, output_dir, result.document
             )
@@ -623,6 +657,7 @@ class Library:
                 result.document.warnings.extend(quality["warnings"])
                 result.document.partial = True
             self._progress(callback, job_id, paper_id, JobStatus.EXTRACTING_FIGURES, 0.68, "Extracting figures", request_id)
+            self._progress(callback, job_id, paper_id, JobStatus.CLEANING_DOCUMENT, 0.72, "Cleaning headings, line breaks and page margins", request_id)
             markdown_path = output_dir / "paper.md"
             document_path = output_dir / "document.json"
             metadata_path = output_dir / "metadata.json"
@@ -657,10 +692,41 @@ class Library:
                 request_id,
             )
             self._progress(callback, job_id, paper_id, JobStatus.RESOLVING_METADATA, 0.84, "Embedded metadata saved", request_id)
+            self._progress(callback, job_id, paper_id, JobStatus.VERIFYING_DOCUMENT, 0.88, "Verifying uncertain regions against the PDF", request_id)
             self._progress(callback, job_id, paper_id, JobStatus.INDEXING, 0.92, "Indexing sections", request_id)
             now = utc_now()
             final_status = JobStatus.PARTIAL if result.document.partial else JobStatus.READY
             with self.db.connect() as connection:
+                connection.executemany(
+                    "INSERT INTO page_recognitions(id, revision_id, paper_id, page, task, model_id, "
+                    "prompt_version, cache_key, status, artifact_path, confidence, input_tokens, output_tokens, "
+                    "duration_ms, error, created_at, updated_at) VALUES (?, ?, ?, ?, 'page_transcribe', ?, "
+                    "'page-reconstruction-v1', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (
+                            str(uuid.uuid4()), revision_id, paper_id, item["page"], item["model_id"],
+                            item["cache_key"], "failed" if item["failed"] else "completed",
+                            item.get("artifact_path") or None, item.get("confidence"),
+                            item.get("input_tokens", 0), item.get("output_tokens", 0),
+                            item.get("duration_ms", 0), item.get("error"), now, now,
+                        )
+                        for item in result.page_recognitions
+                    ],
+                )
+                connection.executemany(
+                    "INSERT INTO document_uncertainties(id, revision_id, paper_id, page, kind, bbox_json, "
+                    "source_text, candidate_text, confidence, resolution_status, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (
+                            str(uuid.uuid4()), revision_id, paper_id, item["page"], item["kind"],
+                            json.dumps(item.get("bbox")) if item.get("bbox") else None,
+                            item.get("sourceText", ""), item.get("candidateText", ""),
+                            item.get("confidence", 0), item.get("resolutionStatus", "unresolved"), now, now,
+                        )
+                        for item in result.uncertainties
+                    ],
+                )
                 connection.execute("DELETE FROM sections WHERE paper_id = ?", (paper_id,))
                 connection.execute("DELETE FROM figures WHERE paper_id = ?", (paper_id,))
                 connection.execute("DELETE FROM tables WHERE paper_id = ?", (paper_id,))
@@ -768,6 +834,31 @@ class Library:
                         paper_id,
                     ),
                 )
+                revision_status = "partial" if final_status is JobStatus.PARTIAL else "completed"
+                connection.execute(
+                    "UPDATE document_revisions SET status = ?, markdown_path = ?, document_path = ?, "
+                    "artifact_manifest_json = ?, completed_at = ? WHERE id = ?",
+                    (
+                        revision_status, str(markdown_path), str(document_path),
+                        json.dumps({
+                            "metadataPath": str(metadata_path), "referencesPath": str(references_path),
+                            "pageRecognitions": len(result.page_recognitions),
+                            "uncertainties": len(result.uncertainties),
+                        }), now, revision_id,
+                    ),
+                )
+                stats = result.quality_stats
+                connection.execute(
+                    "UPDATE preprocess_quality SET recognized_page_count = ?, cached_page_count = ?, "
+                    "failed_page_count = ?, uncertain_region_count = ?, removed_header_footer_count = ?, "
+                    "input_tokens = ?, output_tokens = ?, duration_ms = ? WHERE paper_id = ?",
+                    (
+                        stats.get("recognizedPageCount", 0), stats.get("cachedPageCount", 0),
+                        stats.get("failedPageCount", 0), stats.get("uncertainRegionCount", 0),
+                        stats.get("removedHeaderFooterCount", 0), stats.get("inputTokens", 0),
+                        stats.get("outputTokens", 0), stats.get("durationMs", 0), paper_id,
+                    ),
+                )
                 connection.execute(
                     "UPDATE parse_runs SET parser_name = ?, parser_version = ?, status = ?, finished_at = ? WHERE id = ?",
                     (
@@ -822,6 +913,10 @@ class Library:
                     (JobStatus.CANCELLED.value, now, run_id),
                 )
                 connection.execute(
+                    "UPDATE document_revisions SET status = 'cancelled', completed_at = ? WHERE id = ?",
+                    (now, revision_id),
+                )
+                connection.execute(
                     "UPDATE job_stages SET status = ?, error = 'Cancelled', finished_at = ?, updated_at = ? "
                     "WHERE job_id = ? AND finished_at IS NULL",
                     (JobStatus.CANCELLED.value, now, now, job_id),
@@ -841,6 +936,10 @@ class Library:
                 connection.execute(
                     "UPDATE parse_runs SET status = ?, error = ?, finished_at = ? WHERE id = ?",
                     (JobStatus.FAILED.value, message, now, run_id),
+                )
+                connection.execute(
+                    "UPDATE document_revisions SET status = 'failed', error = ?, completed_at = ? WHERE id = ?",
+                    (message, now, revision_id),
                 )
                 connection.execute(
                     "UPDATE job_stages SET status = ?, error = ?, finished_at = ?, updated_at = ? "
@@ -1340,6 +1439,70 @@ class Library:
             raise KeyError(f"No parse job exists for paper: {paper_id}")
         return self.retry_job(row["id"], callback, request_id)
 
+    def reprocess_preview(self, paper_ids: list[str]) -> dict[str, Any]:
+        self.initialize()
+        normalized = list(dict.fromkeys(str(item) for item in paper_ids if str(item).strip()))
+        if not normalized:
+            return {"paperCount": 0, "pageCount": 0, "estimatedVisionCalls": 0, "visionReady": False}
+        placeholders = ",".join("?" for _ in normalized)
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                f"SELECT id, title, page_count FROM papers WHERE id IN ({placeholders}) ORDER BY title",
+                normalized,
+            ).fetchall()
+        try:
+            config = self.vision_config() if self.vision_config else None
+        except Exception:
+            config = None
+        page_count = sum(max(0, int(row["page_count"] or 0)) for row in rows)
+        return {
+            "paperCount": len(rows), "pageCount": page_count,
+            "estimatedVisionCalls": page_count, "visionReady": bool(config),
+            "visionModelId": config.get("modelId") if config else None,
+            "papers": [{"id": row["id"], "title": row["title"], "pageCount": row["page_count"] or 0} for row in rows],
+        }
+
+    def reprocess_batch(
+        self, paper_ids: list[str], vision_confirmed: bool,
+        callback: ProgressCallback | None = None, request_id: str | int | None = None,
+    ) -> list[dict[str, str]]:
+        preview = self.reprocess_preview(paper_ids)
+        if preview["visionReady"] and not vision_confirmed:
+            raise ValueError("必须确认预计视觉调用量后才能批量重解析")
+        if vision_confirmed:
+            options_dir = self.internal_dir / "import-options"
+            options_dir.mkdir(parents=True, exist_ok=True)
+            with self.db.connect() as connection:
+                for item in preview["papers"]:
+                    row = connection.execute("SELECT canonical_sha256 FROM papers WHERE id = ?", (item["id"],)).fetchone()
+                    if row:
+                        target = options_dir / f"{row['canonical_sha256']}.json"
+                        temporary = target.with_suffix(".tmp")
+                        temporary.write_text(json.dumps({"processingMode": "vision", "visionConfirmed": True}), encoding="utf-8")
+                        temporary.replace(target)
+        return [self.reparse_paper(item["id"], callback, request_id) for item in preview["papers"]]
+
+    def list_uncertainties(self, paper_id: str) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.db.connect() as connection:
+            revision = connection.execute(
+                "SELECT id FROM document_revisions WHERE paper_id = ? AND status IN ('completed', 'partial') "
+                "ORDER BY created_at DESC LIMIT 1", (paper_id,),
+            ).fetchone()
+            if not revision:
+                return []
+            rows = connection.execute(
+                "SELECT * FROM document_uncertainties WHERE revision_id = ? ORDER BY page, created_at",
+                (revision["id"],),
+            ).fetchall()
+        return [{
+            "id": row["id"], "revisionId": row["revision_id"], "paperId": row["paper_id"],
+            "page": row["page"], "kind": row["kind"],
+            "bbox": json.loads(row["bbox_json"]) if row["bbox_json"] else None,
+            "sourceText": row["source_text"], "candidateText": row["candidate_text"],
+            "confidence": row["confidence"], "resolutionStatus": row["resolution_status"],
+        } for row in rows]
+
     def apply_file_events(
         self,
         events: list[dict],
@@ -1643,7 +1806,10 @@ class Library:
             return {
                 "paperId": paper_id, "sourceHash": "", "formulaIssueCount": 0,
                 "repairedFormulaCount": 0, "figureCount": 0, "analyzedFigureCount": 0,
-                "failedFigureCount": 0, "warnings": [], "updatedAt": None,
+                "failedFigureCount": 0, "recognizedPageCount": 0, "cachedPageCount": 0,
+                "failedPageCount": 0, "uncertainRegionCount": 0, "removedHeaderFooterCount": 0,
+                "usage": {"inputTokens": 0, "outputTokens": 0, "durationMs": 0},
+                "warnings": [], "updatedAt": None,
             }
         return {
             "paperId": row["paper_id"], "sourceHash": row["source_hash"],
@@ -1651,6 +1817,12 @@ class Library:
             "repairedFormulaCount": row["repaired_formula_count"],
             "figureCount": row["figure_count"], "analyzedFigureCount": row["analyzed_figure_count"],
             "failedFigureCount": row["failed_figure_count"],
+            "recognizedPageCount": row["recognized_page_count"],
+            "cachedPageCount": row["cached_page_count"],
+            "failedPageCount": row["failed_page_count"],
+            "uncertainRegionCount": row["uncertain_region_count"],
+            "removedHeaderFooterCount": row["removed_header_footer_count"],
+            "usage": {"inputTokens": row["input_tokens"], "outputTokens": row["output_tokens"], "durationMs": row["duration_ms"]},
             "warnings": json.loads(row["warnings_json"] or "[]"), "updatedAt": row["updated_at"],
         }
 

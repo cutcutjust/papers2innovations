@@ -9,7 +9,7 @@ import re
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Any
 
@@ -22,9 +22,13 @@ from ..models import BoundingBox, EvidenceAnchor, OcrUsage, PaperDocument, Paper
 class ParseResult:
     document: PaperDocument
     markdown: str
+    page_recognitions: list[dict[str, Any]] = field(default_factory=list)
+    uncertainties: list[dict[str, Any]] = field(default_factory=list)
+    quality_stats: dict[str, int] = field(default_factory=dict)
 
 
 OcrPageCallback = Callable[[dict[str, Any]], dict[str, Any]]
+VisionPageCallback = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 def _thumbnail(image_bytes: bytes, target: Path) -> str | None:
@@ -662,6 +666,223 @@ def _render_page(source: Path, page_index: int, target: Path) -> tuple[int, int]
         return pixmap.width, pixmap.height
 
 
+def _crop_page_body(source: Path, target: Path) -> None:
+    """Create a tighter verification crop while retaining all likely paper content."""
+    from PIL import Image
+
+    with Image.open(source) as image:
+        width, height = image.size
+        left, right = int(width * 0.025), int(width * 0.975)
+        top, bottom = int(height * 0.035), int(height * 0.965)
+        image.crop((left, top, right, bottom)).convert("RGB").save(target, "JPEG", quality=94)
+
+
+def _parse_vision_page_response(response: dict[str, Any]) -> dict[str, Any]:
+    raw = str(response.get("description") or response.get("markdown") or "").strip()
+    cleaned = raw.removeprefix("```json").removeprefix("```markdown").removeprefix("```")
+    cleaned = cleaned.removesuffix("```").strip()
+    parsed: dict[str, Any]
+    try:
+        value = json.loads(cleaned)
+        parsed = value if isinstance(value, dict) else {"markdown": cleaned}
+    except json.JSONDecodeError:
+        parsed = {"markdown": cleaned, "confidence": 0.72, "uncertainties": []}
+    markdown = _normalize_extracted_text(str(parsed.get("markdown", ""))).strip()
+    confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0.72))))
+    uncertainties = parsed.get("uncertainties")
+    if not isinstance(uncertainties, list):
+        uncertainties = []
+    return {
+        "markdown": markdown,
+        "confidence": confidence,
+        "uncertainties": [item for item in uncertainties if isinstance(item, dict)],
+    }
+
+
+def _marginal_line_key(line: str) -> str:
+    value = re.sub(r"^#{1,6}\s+", "", line.strip()).casefold()
+    value = re.sub(r"\d+", "#", value)
+    return re.sub(r"\s+", " ", value)
+
+
+def _remove_repeated_marginal_lines(pages: list[tuple[int, str]]) -> tuple[list[tuple[int, str]], int]:
+    if len(pages) < 2:
+        return pages, 0
+    occurrences: dict[str, set[int]] = {}
+    candidates_by_page: dict[int, set[str]] = {}
+    for page, markdown in pages:
+        lines = [line for line in markdown.splitlines() if line.strip()]
+        candidates = lines[:2] + lines[-2:]
+        keys = {_marginal_line_key(line) for line in candidates if len(line.strip()) <= 160}
+        candidates_by_page[page] = keys
+        for key in keys:
+            if key:
+                occurrences.setdefault(key, set()).add(page)
+    threshold = max(2, int(len(pages) * 0.4 + 0.999))
+    repeated = {key for key, page_numbers in occurrences.items() if len(page_numbers) >= threshold}
+    removed = 0
+    cleaned_pages: list[tuple[int, str]] = []
+    for page, markdown in pages:
+        lines = markdown.splitlines()
+        nonempty = [index for index, line in enumerate(lines) if line.strip()]
+        marginal_indexes = set(nonempty[:2] + nonempty[-2:])
+        kept: list[str] = []
+        for index, line in enumerate(lines):
+            stripped = re.sub(r"^#{1,6}\s+", "", line.strip())
+            page_number = bool(re.fullmatch(r"(?:page\s*)?\d{1,4}", stripped, re.I))
+            if index in marginal_indexes and (_marginal_line_key(line) in repeated or page_number):
+                removed += 1
+                continue
+            if re.fullmatch(r"#{1,6}\s+\d{1,4}\s*", line.strip()):
+                kept.append(stripped)
+            else:
+                kept.append(line)
+        cleaned_pages.append((page, "\n".join(kept).strip()))
+    return cleaned_pages, removed
+
+
+def _apply_vision_reconstruction(
+    result: ParseResult,
+    source: Path,
+    cache_dir: Path,
+    paper_id: str,
+    sha256: str,
+    model_id: str,
+    vision_page: VisionPageCallback,
+) -> ParseResult:
+    started = time.monotonic()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    fallback_pages = _page_markdown_from_sections(result.document)
+    figures_by_page: dict[int, list[PaperFigure]] = {}
+    for figure in result.document.figures:
+        if figure.page is not None:
+            figures_by_page.setdefault(figure.page, []).append(figure)
+
+    prompt_version = "page-reconstruction-v1"
+
+    def recognize(page_number: int) -> dict[str, Any]:
+        cache_key = hashlib.sha256(
+            f"{sha256}:{page_number}:{model_id}:{prompt_version}:200dpi:4096".encode()
+        ).hexdigest()
+        response_path = cache_dir / f"{page_number:04d}-{cache_key[:16]}.json"
+        image_path = cache_dir / f"{page_number:04d}-{cache_key[:16]}.jpg"
+        cache_hit = response_path.is_file()
+        try:
+            if cache_hit:
+                response = json.loads(response_path.read_text(encoding="utf-8"))
+            else:
+                width, height = _render_page(source, page_number - 1, image_path)
+                response = vision_page({
+                    "paperId": paper_id,
+                    "page": page_number,
+                    "imagePath": str(image_path.resolve()),
+                    "imageWidth": width,
+                    "imageHeight": height,
+                    "figureId": f"page:{page_number}",
+                    "paperTitle": result.document.title,
+                    "task": "page_transcribe",
+                    "sourceText": fallback_pages.get(page_number, "")[:30_000],
+                    "promptVersion": prompt_version,
+                })
+                temporary = response_path.with_suffix(".tmp")
+                temporary.write_text(json.dumps(response, ensure_ascii=False, indent=2), encoding="utf-8")
+                temporary.replace(response_path)
+            parsed = _parse_vision_page_response(response)
+            if not parsed["markdown"]:
+                raise ValueError("视觉模型没有返回页面 Markdown")
+            verified = False
+            if parsed["confidence"] < 0.85 or parsed["uncertainties"]:
+                if not image_path.is_file():
+                    _render_page(source, page_number - 1, image_path)
+                crop_path = cache_dir / f"{page_number:04d}-{cache_key[:16]}-verify.jpg"
+                _crop_page_body(image_path, crop_path)
+                verify_response = vision_page({
+                    "paperId": paper_id,
+                    "page": page_number,
+                    "imagePath": str(crop_path.resolve()),
+                    "figureId": f"page:{page_number}:verification",
+                    "paperTitle": result.document.title,
+                    "task": "region_verify",
+                    "sourceText": parsed["markdown"][:30_000],
+                    "promptVersion": "region-verification-v1",
+                })
+                verified_page = _parse_vision_page_response(verify_response)
+                if verified_page["markdown"] and verified_page["confidence"] >= parsed["confidence"]:
+                    parsed = verified_page
+                    verified = True
+            usage = response.get("usage") or {}
+            return {
+                **parsed,
+                "page": page_number,
+                "cache_key": cache_key,
+                "cache_hit": cache_hit,
+                "artifact_path": str(response_path),
+                "model_id": str(response.get("modelId") or model_id),
+                "input_tokens": int(usage.get("inputTokens", 0)),
+                "output_tokens": int(usage.get("outputTokens", 0)),
+                "duration_ms": int(usage.get("durationMs", 0)),
+                "verified": verified,
+                "failed": False,
+            }
+        except Exception as error:  # noqa: BLE001 - page failure must preserve the local fallback
+            return {
+                "page": page_number,
+                "markdown": fallback_pages.get(page_number, "_此页视觉识别失败，请对照 PDF。_"),
+                "confidence": 0.0,
+                "uncertainties": [{"kind": "text", "sourceText": "", "candidateText": ""}],
+                "cache_key": cache_key,
+                "cache_hit": False,
+                "artifact_path": "",
+                "model_id": model_id,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "duration_ms": 0,
+                "verified": False,
+                "failed": True,
+                "error": f"{type(error).__name__}: {error}",
+            }
+
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="vision-pages") as executor:
+        page_results = list(executor.map(recognize, range(1, result.document.page_count + 1)))
+
+    page_markdown = [
+        (item["page"], _embed_figures(item["markdown"], figures_by_page.get(item["page"], [])))
+        for item in page_results
+    ]
+    page_markdown, removed = _remove_repeated_marginal_lines(page_markdown)
+    result.document.sections = _semantic_sections(page_markdown, paper_id)
+    result.markdown = "\n\n".join(section.markdown for section in result.document.sections)
+    result.page_recognitions = page_results
+    for item in page_results:
+        for uncertainty in item["uncertainties"]:
+            result.uncertainties.append({
+                "page": item["page"],
+                "kind": str(uncertainty.get("kind", "text")),
+                "bbox": uncertainty.get("bbox"),
+                "sourceText": str(uncertainty.get("sourceText", "")),
+                "candidateText": str(uncertainty.get("candidateText", "")),
+                "confidence": float(uncertainty.get("confidence", item["confidence"])),
+                "resolutionStatus": "unresolved" if item["confidence"] < 0.85 else "resolved",
+            })
+    failed_pages = [item["page"] for item in page_results if item["failed"]]
+    unresolved = [item for item in result.uncertainties if item["resolutionStatus"] == "unresolved"]
+    if failed_pages or unresolved:
+        result.document.partial = True
+    if failed_pages:
+        result.document.warnings.append(f"视觉识别失败页面：{', '.join(map(str, failed_pages))}")
+    result.quality_stats = {
+        "recognizedPageCount": len(page_results) - len(failed_pages),
+        "cachedPageCount": sum(1 for item in page_results if item["cache_hit"]),
+        "failedPageCount": len(failed_pages),
+        "uncertainRegionCount": len(unresolved),
+        "removedHeaderFooterCount": removed,
+        "inputTokens": sum(item["input_tokens"] for item in page_results),
+        "outputTokens": sum(item["output_tokens"] for item in page_results),
+        "durationMs": int((time.monotonic() - started) * 1000),
+    }
+    return result
+
+
 def _apply_qwen_ocr(
     result: ParseResult,
     source: Path,
@@ -787,6 +1008,8 @@ def parse_pdf(
     sha256: str,
     cache_dir: Path | None = None,
     ocr_page: OcrPageCallback | None = None,
+    vision_page: VisionPageCallback | None = None,
+    vision_model_id: str | None = None,
 ) -> ParseResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     docling_disabled = os.environ.get("P2I_DISABLE_DOCLING") == "1"
@@ -799,6 +1022,15 @@ def parse_pdf(
         result.document.partial = True
         reason = "Docling disabled; pypdf fallback was used" if docling_disabled else "Docling unavailable; pypdf fallback was used"
         result.document.warnings.append(reason)
+        if vision_page and vision_model_id and cache_dir:
+            try:
+                return _apply_vision_reconstruction(
+                    result, source, cache_dir.parent / "vision", paper_id, sha256,
+                    vision_model_id, vision_page,
+                )
+            except Exception as error:
+                result.document.partial = True
+                result.document.warnings.append(f"视觉文档重建不可用: {type(error).__name__}: {error}")
         if ocr_page and cache_dir:
             try:
                 return _apply_qwen_ocr(result, source, cache_dir, paper_id, sha256, ocr_page)
@@ -812,6 +1044,15 @@ def parse_pdf(
         result = _parse_with_pypdf(source, output_dir, paper_id, sha256)
         result.document.partial = True
         result.document.warnings.append("Docling failed; pypdf fallback was used")
+    if vision_page and vision_model_id and cache_dir:
+        try:
+            return _apply_vision_reconstruction(
+                result, source, cache_dir.parent / "vision", paper_id, sha256,
+                vision_model_id, vision_page,
+            )
+        except Exception as error:
+            result.document.partial = True
+            result.document.warnings.append(f"视觉文档重建不可用: {type(error).__name__}: {error}")
     if ocr_page and cache_dir:
         try:
             result = _apply_qwen_ocr(result, source, cache_dir, paper_id, sha256, ocr_page)

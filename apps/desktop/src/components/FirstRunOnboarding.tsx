@@ -93,6 +93,6 @@ export function FirstRunOnboarding({ root, suggestedRoot, libraryBusy, onCreateL
         <div className="first-run-footer-actions"><button className="text-button" onClick={() => setStep(2)}><ChevronLeft size={14} /> 返回配置 AI</button><button className="secondary-button" onClick={() => finish()}>暂时跳过，进入论文库</button></div>
       </div>}
     </section>
-    {root && <PaperImportDialog root={root} open={workspace.importDialogOpen} pendingPaths={workspace.pendingImportPaths} onClose={() => { workspace.closePaperImport(); finish(); }} onImported={() => { window.setTimeout(() => void queryClient.invalidateQueries({ queryKey: ["papers", root] }), 800); }} onOpenZotero={() => finish("import")} onOpenActivity={() => { finish(); workspace.setView("jobs"); }} />}
+    {root && <PaperImportDialog root={root} open={workspace.importDialogOpen} pendingPaths={workspace.pendingImportPaths} onClose={() => { workspace.closePaperImport(); finish(); }} onImported={() => { window.setTimeout(() => void queryClient.invalidateQueries({ queryKey: ["papers", root] }), 800); }} onOpenZotero={() => finish("import")} onOpenActivity={() => { finish(); workspace.setView("jobs"); }} onOpenSettings={() => { workspace.closePaperImport(); setStep(2); }} />}
   </main>;
 }

@@ -103,11 +103,12 @@ export function App() {
   useEffect(() => {
     if (!nativeRuntime || !settingsRecovered) return;
     void saveWorkspaceSettingsSnapshot({
-      version: 3,
+      version: 4,
       root: workspace.root,
       providers: workspace.providers,
       customModels: workspace.customModels,
       defaultTextModelId: workspace.defaultTextModelId,
+      translationModelId: workspace.translationModelId,
       onboardingVersion: workspace.onboardingVersion,
       contextCompressionModelId: workspace.contextCompressionModelId,
       markdownFormattingModelId: workspace.markdownFormattingModelId,
@@ -123,7 +124,7 @@ export function App() {
       readerTranslationView: workspace.readerTranslationView,
       readerAnnotationsVisible: workspace.readerAnnotationsVisible,
     }).catch(() => undefined);
-  }, [settingsRecovered, workspace.root, workspace.providers, workspace.customModels, workspace.defaultTextModelId, workspace.onboardingVersion, workspace.contextCompressionModelId, workspace.markdownFormattingModelId, workspace.autoFormatMarkdown, workspace.fullPageOcrModelId, workspace.visionAnalysisModelId, workspace.ocrConsent, workspace.fontSize, workspace.readerZoom, workspace.readerTheme, workspace.readerBackgroundColor, workspace.readerTextColor, workspace.readerTranslationView, workspace.readerAnnotationsVisible]);
+  }, [settingsRecovered, workspace.root, workspace.providers, workspace.customModels, workspace.defaultTextModelId, workspace.translationModelId, workspace.onboardingVersion, workspace.contextCompressionModelId, workspace.markdownFormattingModelId, workspace.autoFormatMarkdown, workspace.fullPageOcrModelId, workspace.visionAnalysisModelId, workspace.ocrConsent, workspace.fontSize, workspace.readerZoom, workspace.readerTheme, workspace.readerBackgroundColor, workspace.readerTextColor, workspace.readerTranslationView, workspace.readerAnnotationsVisible]);
 
   useEffect(() => {
     if (!nativeRuntime) return;
@@ -309,6 +310,7 @@ export function App() {
         }}
         onOpenZotero={() => workspace.setView("import")}
         onOpenActivity={() => workspace.setView("jobs")}
+        onOpenSettings={() => { workspace.closePaperImport(); workspace.setView("settings"); }}
       />
       {dropActive && <div className="native-drop-overlay"><FolderOpen size={30} /><strong>松开即可导入 PDF</strong><span>文件会复制到本地论文库</span></div>}
       {dropNotice && <div className="native-drop-notice" role="alert"><span>{dropNotice}</span><button onClick={() => setDropNotice("")}>知道了</button></div>}

@@ -213,6 +213,8 @@ struct ModelStreamInput {
     temperature: Option<f64>,
     #[serde(default)]
     max_output_tokens: Option<u64>,
+    #[serde(default)]
+    reasoning_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -287,6 +289,10 @@ impl Engine {
             .map_err(|_| "Vision path lock poisoned")?;
         if !vision_allowed.contains(&generated_root) {
             vision_allowed.push(generated_root);
+        }
+        let vision_cache_root = library_root.join(".p2i/cache/vision");
+        if !vision_allowed.contains(&vision_cache_root) {
+            vision_allowed.push(vision_cache_root);
         }
         Ok(())
     }
@@ -651,9 +657,24 @@ impl Engine {
             "webp" => "image/webp",
             _ => "image/png",
         };
-        let prompt = if request.task == "formula" {
+        let prompt = if request.task == "formula" || request.task == "formula_repair" {
             format!(
                 "请检查页面图片中与以下损坏文本对应的数学公式，并恢复为正确 LaTeX：{}。只返回 JSON：{{\"repairedLatex\":\"...\",\"confidence\":0.0}}。repairedLatex 必须包含原公式的行内或块级定界符；看不清时 confidence 低于 0.8，不得猜测。",
+                request.source_text
+            )
+        } else if request.task == "page_transcribe" {
+            format!(
+                "你是科研 PDF 页面重建器。请逐字阅读页面图片，并参考下方本地提取草稿校正阅读顺序。恢复标题层级、连续段落、列表、引用、LaTeX 公式和表格；删除页码、重复页眉页脚；不要总结、翻译或补写。孤立数字不得作为标题。只返回 JSON：{{\"markdown\":\"...\",\"confidence\":0.0,\"uncertainties\":[{{\"kind\":\"text|heading|formula|table|reading_order\",\"sourceText\":\"\",\"candidateText\":\"\",\"confidence\":0.0}}]}}。看不清时保留草稿并列入 uncertainties，不得猜测。\n\n本地草稿：\n{}",
+                request.source_text
+            )
+        } else if request.task == "region_verify" {
+            format!(
+                "请对照这张从科研 PDF 页面裁出的高分辨率区域，复核下面的候选 Markdown。纠正过度换行、标题误判、乱码公式和阅读顺序；不得总结、翻译或猜测。只返回 JSON：{{\"markdown\":\"...\",\"confidence\":0.0,\"uncertainties\":[]}}。\n\n候选 Markdown：\n{}",
+                request.source_text
+            )
+        } else if request.task == "table_reconstruct" {
+            format!(
+                "请把科研论文中的表格区域忠实重建为 Markdown 表格。保留数字、单位、脚注和缺失值，不得推测。只返回 JSON：{{\"markdown\":\"...\",\"confidence\":0.0,\"uncertainties\":[]}}。现有草稿：{}",
                 request.source_text
             )
         } else {
@@ -671,7 +692,7 @@ impl Engine {
         let (response, description_pointer) = if config.provider.format == "anthropic" {
             let body = json!({
                 "model": config.model.model,
-                "max_tokens": config.model.max_output_tokens.min(4096),
+                "max_tokens": config.model.max_output_tokens.min(8192),
                 "messages": [{"role":"user","content":[
                     {"type":"image","source":{"type":"base64","media_type":mime,"data":encoded}},
                     {"type":"text","text":prompt}
@@ -696,6 +717,7 @@ impl Engine {
                     {"type":"image_url","image_url":{"url":format!("data:{mime};base64,{encoded}")}}
                 ]}],
                 "temperature": 0,
+                "max_tokens": config.model.max_output_tokens.min(8192),
                 "stream": false
             });
             let response = client
@@ -1161,6 +1183,7 @@ async fn provider_test_connection(
         tools: Vec::new(),
         temperature: Some(0.0),
         max_output_tokens: Some(1),
+        reasoning_mode: None,
     };
     let response = send_model_request(&request, &api_key, false, 1).await?;
     Ok(json!({"ok": true, "status": response.status().as_u16()}))
@@ -1427,6 +1450,13 @@ fn model_request_body(input: &ModelStreamInput, stream: bool, max_tokens: u64) -
             "stream": stream,
             "tools": tools
         });
+        if input.reasoning_mode.as_deref() == Some("disabled")
+            && input.model.model.to_ascii_lowercase().contains("qwen")
+        {
+            body.as_object_mut()
+                .expect("model body")
+                .insert("enable_thinking".into(), Value::Bool(false));
+        }
         if tools.is_empty() {
             body.as_object_mut().expect("model body").remove("tools");
         }
@@ -1932,6 +1962,87 @@ struct PdfImportResult {
     destination: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PdfImportPreviewItem {
+    path: String,
+    filename: String,
+    page_count: usize,
+    size_bytes: u64,
+    encrypted: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PdfImportPreview {
+    items: Vec<PdfImportPreviewItem>,
+    file_count: usize,
+    page_count: usize,
+    estimated_vision_calls: usize,
+    vision_ready: bool,
+    vision_model_id: Option<String>,
+    vision_model_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PdfImportOptions {
+    #[serde(default)]
+    processing_mode: String,
+    #[serde(default)]
+    vision_confirmed: bool,
+}
+
+fn pdf_page_count(bytes: &[u8]) -> usize {
+    let needle = b"/Type /Page";
+    bytes
+        .windows(needle.len() + 1)
+        .filter(|window| &window[..needle.len()] == needle && window[needle.len()] != b's')
+        .count()
+        .max(1)
+}
+
+fn inspect_pdf_sources(
+    engine: &Engine,
+    selected: Vec<PathBuf>,
+) -> Result<PdfImportPreview, String> {
+    validate_pdf_sources(&selected)?;
+    let mut items = Vec::with_capacity(selected.len());
+    for source in &selected {
+        let bytes =
+            fs::read(source).map_err(|error| format!("无法读取 {}: {error}", source.display()))?;
+        items.push(PdfImportPreviewItem {
+            path: source.to_string_lossy().into_owned(),
+            filename: source
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("paper.pdf")
+                .into(),
+            page_count: pdf_page_count(&bytes),
+            size_bytes: bytes.len() as u64,
+            encrypted: bytes.windows(8).any(|window| window == b"/Encrypt"),
+        });
+    }
+    let vision = engine
+        .0
+        .vision
+        .lock()
+        .map_err(|_| "Vision config lock poisoned")?
+        .clone();
+    let page_count = items.iter().map(|item| item.page_count).sum();
+    Ok(PdfImportPreview {
+        file_count: items.len(),
+        page_count,
+        estimated_vision_calls: page_count,
+        vision_ready: vision.is_some(),
+        vision_model_id: vision.as_ref().map(|config| config.model.id.clone()),
+        vision_model_name: vision
+            .as_ref()
+            .map(|config| config.model.display_name.clone()),
+        items,
+    })
+}
+
 fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
     let mut file =
         fs::File::open(path).map_err(|error| format!("Cannot open {}: {error}", path.display()))?;
@@ -1962,7 +2073,38 @@ fn validate_pdf_sources(selected: &[PathBuf]) -> Result<(), String> {
     Ok(())
 }
 
-fn import_pdf_sources(root: &str, selected: Vec<PathBuf>) -> Result<PdfImportResult, String> {
+fn write_import_options(
+    root: &str,
+    source_hash: &[u8],
+    options: &PdfImportOptions,
+) -> Result<(), String> {
+    let directory = PathBuf::from(root).join(".p2i").join("import-options");
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("Cannot create import options: {error}"))?;
+    let hash = source_hash
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let target = directory.join(format!("{hash}.json"));
+    let temporary = target.with_extension("tmp");
+    fs::write(
+        &temporary,
+        serde_json::to_vec(&json!({
+            "processingMode": if options.processing_mode == "vision" { "vision" } else { "local" },
+            "visionConfirmed": options.vision_confirmed,
+        }))
+        .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("Cannot save import options: {error}"))?;
+    fs::rename(&temporary, &target)
+        .map_err(|error| format!("Cannot finish import options: {error}"))
+}
+
+fn import_pdf_sources(
+    root: &str,
+    selected: Vec<PathBuf>,
+    options: &PdfImportOptions,
+) -> Result<PdfImportResult, String> {
     validate_pdf_sources(&selected)?;
     let destination = PathBuf::from(root).join("Papers").join("Manual");
     fs::create_dir_all(&destination)
@@ -1973,6 +2115,7 @@ fn import_pdf_sources(root: &str, selected: Vec<PathBuf>) -> Result<PdfImportRes
         let file_name = source.file_name().ok_or("Selected PDF has no file name")?;
         let mut target = destination.join(file_name);
         let source_hash = sha256_file(source)?;
+        write_import_options(root, &source_hash, options)?;
         if target.is_file() && sha256_file(&target)? == source_hash {
             deduplicated += 1;
             continue;
@@ -2020,6 +2163,28 @@ fn import_pdf_sources(root: &str, selected: Vec<PathBuf>) -> Result<PdfImportRes
 }
 
 #[tauri::command]
+fn select_pdf_paths() -> Vec<String> {
+    rfd::FileDialog::new()
+        .set_title("选择要导入的 PDF 论文")
+        .add_filter("PDF 论文", &["pdf"])
+        .pick_files()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
+}
+
+#[tauri::command]
+fn preview_pdf_import(
+    engine: State<'_, Engine>,
+    root: String,
+    paths: Vec<String>,
+) -> Result<PdfImportPreview, String> {
+    engine.allow_library_root(&root)?;
+    inspect_pdf_sources(&engine, paths.into_iter().map(PathBuf::from).collect())
+}
+
+#[tauri::command]
 fn import_pdfs(engine: State<'_, Engine>, root: String) -> Result<PdfImportResult, String> {
     engine.allow_library_root(&root)?;
     let selected = rfd::FileDialog::new()
@@ -2027,7 +2192,7 @@ fn import_pdfs(engine: State<'_, Engine>, root: String) -> Result<PdfImportResul
         .add_filter("PDF 论文", &["pdf"])
         .pick_files()
         .unwrap_or_default();
-    import_pdf_sources(&root, selected)
+    import_pdf_sources(&root, selected, &PdfImportOptions::default())
 }
 
 #[tauri::command]
@@ -2035,9 +2200,29 @@ fn import_pdf_paths(
     engine: State<'_, Engine>,
     root: String,
     paths: Vec<String>,
+    options: Option<PdfImportOptions>,
 ) -> Result<PdfImportResult, String> {
     engine.allow_library_root(&root)?;
-    import_pdf_sources(&root, paths.into_iter().map(PathBuf::from).collect())
+    let options = options.unwrap_or_default();
+    if options.processing_mode == "vision" {
+        if !options.vision_confirmed {
+            return Err("请先确认预计视觉调用量。".into());
+        }
+        if engine
+            .0
+            .vision
+            .lock()
+            .map_err(|_| "Vision config lock poisoned")?
+            .is_none()
+        {
+            return Err("视觉模型尚未配置，请先配置或改用本地基础解析。".into());
+        }
+    }
+    import_pdf_sources(
+        &root,
+        paths.into_iter().map(PathBuf::from).collect(),
+        &options,
+    )
 }
 
 #[tauri::command]
@@ -2099,6 +2284,8 @@ pub fn run() {
             rpc_call,
             choose_library,
             choose_zotero_directory,
+            select_pdf_paths,
+            preview_pdf_import,
             import_pdfs,
             import_pdf_paths,
             credential_set,
@@ -2128,7 +2315,8 @@ mod tests {
     use super::{
         consume_model_stream, import_pdf_sources, model_endpoint, model_headers,
         send_model_request, stream_delta, stream_reasoning_delta, validate_credential_id, Engine,
-        ModelConfigInput, ModelMessageInput, ModelStreamInput, OcrLimiter, ProviderConfigInput,
+        ModelConfigInput, ModelMessageInput, ModelStreamInput, OcrLimiter, PdfImportOptions,
+        ProviderConfigInput,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -2170,6 +2358,7 @@ mod tests {
             tools: Vec::new(),
             temperature: Some(0.0),
             max_output_tokens: None,
+            reasoning_mode: None,
         }
     }
 
@@ -2474,22 +2663,39 @@ mod tests {
         let text = source_dir.join("notes.txt");
         fs::write(&text, b"not a paper").expect("text fixture");
 
-        let first =
-            import_pdf_sources(library.to_str().expect("library string"), vec![pdf.clone()])
-                .expect("first import");
+        let options = PdfImportOptions {
+            processing_mode: "vision".into(),
+            vision_confirmed: true,
+        };
+        let first = import_pdf_sources(
+            library.to_str().expect("library string"),
+            vec![pdf.clone()],
+            &options,
+        )
+        .expect("first import");
         assert_eq!(first.selected, 1);
         assert_eq!(first.copied, 1);
         assert_eq!(first.deduplicated, 0);
 
-        let second = import_pdf_sources(library.to_str().expect("library string"), vec![pdf])
-            .expect("duplicate import");
+        let second = import_pdf_sources(
+            library.to_str().expect("library string"),
+            vec![pdf],
+            &options,
+        )
+        .expect("duplicate import");
         assert_eq!(second.copied, 0);
         assert_eq!(second.deduplicated, 1);
-        assert!(
-            import_pdf_sources(library.to_str().expect("library string"), vec![text])
-                .expect_err("non-PDF must fail")
-                .contains("PDF")
-        );
+        assert!(import_pdf_sources(
+            library.to_str().expect("library string"),
+            vec![text],
+            &PdfImportOptions::default(),
+        )
+        .expect_err("non-PDF must fail")
+        .contains("PDF"));
+        let option_files = fs::read_dir(library.join(".p2i/import-options"))
+            .expect("import options")
+            .count();
+        assert_eq!(option_files, 1);
         fs::remove_dir_all(&base).expect("cleanup");
     }
 }

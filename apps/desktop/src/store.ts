@@ -41,6 +41,7 @@ export interface WorkspaceState {
   providers: ProviderConfig[];
   customModels: ModelConfig[];
   defaultTextModelId: string;
+  translationModelId: string;
   contextCompressionModelId: string;
   markdownFormattingModelId: string;
   autoFormatMarkdown: boolean;
@@ -72,6 +73,7 @@ export interface WorkspaceState {
   removeCustomModel: (modelId: string) => void;
   setContextCompressionModelId: (modelId: string) => void;
   setDefaultTextModelId: (modelId: string) => void;
+  setTranslationModelId: (modelId: string) => void;
   setMarkdownFormattingModelId: (modelId: string) => void;
   setAutoFormatMarkdown: (enabled: boolean) => void;
   setFullPageOcrModelId: (modelId: string) => void;
@@ -157,6 +159,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   providers: initialRegistry.providers,
   customModels: initialRegistry.models,
   defaultTextModelId: localStorage.getItem("p2i.defaultTextModelId") ?? initialRegistry.models.find((model) => modelHasCapability(model, "text"))?.id ?? "",
+  translationModelId: localStorage.getItem("p2i.translationModelId") ?? localStorage.getItem("p2i.defaultTextModelId") ?? initialRegistry.models.find((model) => modelHasCapability(model, "text"))?.id ?? "",
   contextCompressionModelId: localStorage.getItem("p2i.contextCompressionModelId") ?? initialRegistry.models[0]?.id ?? "",
   markdownFormattingModelId: localStorage.getItem("p2i.markdownFormattingModelId") ?? initialRegistry.models[0]?.id ?? "",
   autoFormatMarkdown: localStorage.getItem("p2i.autoFormatMarkdown") === "true",
@@ -196,7 +199,9 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
     persistModelRegistry(providers, customModels);
     const defaultTextModelId = state.defaultTextModelId || (modelHasCapability(normalizedModel, "text") ? normalizedModel.id : "");
     if (defaultTextModelId) localStorage.setItem("p2i.defaultTextModelId", defaultTextModelId);
-    return { providers, customModels, defaultTextModelId };
+    const translationModelId = state.translationModelId || defaultTextModelId;
+    if (translationModelId) localStorage.setItem("p2i.translationModelId", translationModelId);
+    return { providers, customModels, defaultTextModelId, translationModelId };
   }),
   updateCustomModel: (modelId, patch) => set((state) => {
     const customModels = state.customModels.map((model) => model.id === modelId ? { ...model, ...patch } : model);
@@ -210,15 +215,17 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
     persistModelRegistry(providers, customModels);
     const markdownFormattingModelId = state.markdownFormattingModelId === modelId ? customModels[0]?.id ?? "" : state.markdownFormattingModelId;
     const defaultTextModelId = state.defaultTextModelId === modelId ? customModels.find((model) => modelHasCapability(model, "text"))?.id ?? "" : state.defaultTextModelId;
+    const translationModelId = state.translationModelId === modelId ? defaultTextModelId : state.translationModelId;
     const contextCompressionModelId = state.contextCompressionModelId === modelId ? defaultTextModelId : state.contextCompressionModelId;
     const fullPageOcrModelId = state.fullPageOcrModelId === modelId ? "" : state.fullPageOcrModelId;
     const visionAnalysisModelId = state.visionAnalysisModelId === modelId ? "" : state.visionAnalysisModelId;
     localStorage.setItem("p2i.markdownFormattingModelId", markdownFormattingModelId);
     localStorage.setItem("p2i.defaultTextModelId", defaultTextModelId);
+    localStorage.setItem("p2i.translationModelId", translationModelId);
     localStorage.setItem("p2i.contextCompressionModelId", contextCompressionModelId);
     localStorage.setItem("p2i.fullPageOcrModelId", fullPageOcrModelId);
     localStorage.setItem("p2i.visionAnalysisModelId", visionAnalysisModelId);
-    return { providers, customModels, defaultTextModelId, contextCompressionModelId, markdownFormattingModelId, fullPageOcrModelId, visionAnalysisModelId };
+    return { providers, customModels, defaultTextModelId, translationModelId, contextCompressionModelId, markdownFormattingModelId, fullPageOcrModelId, visionAnalysisModelId };
   }),
   setContextCompressionModelId: (contextCompressionModelId) => {
     localStorage.setItem("p2i.contextCompressionModelId", contextCompressionModelId);
@@ -230,6 +237,10 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
     localStorage.setItem("p2i.defaultTextModelId", defaultTextModelId);
     return { defaultTextModelId, customModels };
   }),
+  setTranslationModelId: (translationModelId) => {
+    localStorage.setItem("p2i.translationModelId", translationModelId);
+    set({ translationModelId });
+  },
   setMarkdownFormattingModelId: (markdownFormattingModelId) => {
     localStorage.setItem("p2i.markdownFormattingModelId", markdownFormattingModelId);
     set({ markdownFormattingModelId });
@@ -291,11 +302,16 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
       ?? customModels.find((model) => model.id === snapshot.contextCompressionModelId)?.id
       ?? customModels.find((model) => modelHasCapability(model, "text"))?.id
       ?? "";
+    const translationModelId = snapshot.translationModelId
+      && customModels.some((model) => model.id === snapshot.translationModelId)
+      ? snapshot.translationModelId
+      : defaultTextModelId;
     const onboardingVersion = snapshot.onboardingVersion ?? (snapshot.root ? CURRENT_ONBOARDING_VERSION : 0);
     persistModelRegistry(providers, customModels);
     localStorage.setItem("p2i.libraryRoot", snapshot.root);
     localStorage.setItem("p2i.contextCompressionModelId", snapshot.contextCompressionModelId);
     localStorage.setItem("p2i.defaultTextModelId", defaultTextModelId);
+    localStorage.setItem("p2i.translationModelId", translationModelId);
     localStorage.setItem("p2i.onboardingVersion", String(onboardingVersion));
     localStorage.setItem("p2i.markdownFormattingModelId", snapshot.markdownFormattingModelId);
     localStorage.setItem("p2i.autoFormatMarkdown", String(snapshot.autoFormatMarkdown));
@@ -314,6 +330,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
       providers,
       customModels,
       defaultTextModelId,
+      translationModelId,
       contextCompressionModelId: snapshot.contextCompressionModelId,
       markdownFormattingModelId: snapshot.markdownFormattingModelId,
       autoFormatMarkdown: snapshot.autoFormatMarkdown,

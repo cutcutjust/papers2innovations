@@ -12,6 +12,7 @@ export function Activity({ papers, jobs, root, loading = false, error, onRetry }
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["jobs", root] }),
   });
   const paperById = new Map(papers.map((paper) => [paper.id, paper]));
+  const stageLabels: Record<string, string> = { hash: "文件校验", render: "页面渲染", layout: "版面分析", vision_text: "视觉识别", ocr: "文字识别", figures: "插图", tables: "表格", formulas: "公式", cleanup: "文档整理", verification: "原文复核", index: "建立索引" };
   return (
     <main className="activity-page">
       <div className="activity-header"><ActivityIcon size={21} /><div><h1>任务活动</h1><p>持久化的导入与解析状态</p></div></div>
@@ -31,7 +32,7 @@ export function Activity({ papers, jobs, root, loading = false, error, onRetry }
                 {["FAILED", "CANCELLED", "PARTIAL"].includes(job.status) && <button className="icon-button small" title="重试任务" onClick={() => action.mutate({ kind: "retry", id: job.id })}><RefreshCw size={14} /></button>}
               </div>
             </div>
-            <div className="stage-strip">{job.stages.map((stage) => <div className={`stage-chip ${stage.progress >= 1 ? "done" : ""}`} key={stage.id}><i /><span>{stage.stage}</span><small>{stage.progress >= 1 ? "完成" : `${Math.round(stage.progress * 100)}%`}</small></div>)}</div>
+            <div className="stage-strip">{job.stages.map((stage) => <div className={`stage-chip ${stage.progress >= 1 ? "done" : ""}`} key={stage.id}><i /><span>{stageLabels[stage.stage] ?? stage.stage}</span><small>{stage.progress >= 1 ? "完成" : `${Math.round(stage.progress * 100)}%`}</small></div>)}</div>
             {job.error && <p className="job-error">{job.error}</p>}
           </section>;
         })}

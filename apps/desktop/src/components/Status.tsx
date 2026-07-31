@@ -6,8 +6,13 @@ const labels: Partial<Record<JobStatus, string>> = {
   FAILED: "需要处理",
   MISSING: "文件缺失",
   CANCELLED: "已取消",
+  RENDERING: "渲染页面",
   PARSING_LAYOUT: "解析版面",
+  RECOGNIZING_TEXT: "视觉识别",
   EXTRACTING_FIGURES: "提取图表",
+  CHECKING_FORMULAS: "检查公式",
+  CLEANING_DOCUMENT: "整理文档",
+  VERIFYING_DOCUMENT: "对照原文",
   HASHING: "计算哈希",
   QUEUED: "等待处理",
 };

@@ -5,6 +5,7 @@ import {
   FileText,
   Image as ImageIcon,
   KeyRound,
+  Languages,
   LoaderCircle,
   Pencil,
   Plus,
@@ -39,16 +40,14 @@ export function Settings() {
     customModels,
     providers,
     defaultTextModelId,
-    markdownFormattingModelId,
-    autoFormatMarkdown,
+    translationModelId,
     fullPageOcrModelId,
     visionAnalysisModelId,
     ocrConsent,
     setView,
     removeCustomModel,
     setDefaultTextModelId,
-    setMarkdownFormattingModelId,
-    setAutoFormatMarkdown,
+    setTranslationModelId,
     setFullPageOcrModelId,
     setVisionAnalysisModelId,
     setOcrConsent,
@@ -70,6 +69,7 @@ export function Settings() {
     return Boolean(model && provider && providerSummaries[provider.credentialId]?.configured);
   };
   const textReady = roleReady(defaultTextModelId);
+  const translationReady = roleReady(translationModelId);
   const visionReady = roleReady(visionAnalysisModelId);
 
   const run = async (actionId: string, action: () => Promise<void>) => {
@@ -226,7 +226,7 @@ export function Settings() {
           const provider = providers.find((item) => item.id === model.providerId);
           const configured = Boolean(provider && providerSummaries[provider.credentialId]?.configured);
           const connection = connections[model.id] ?? "idle";
-          const roles = [model.id === defaultTextModelId ? "文本" : "", model.id === visionAnalysisModelId ? "视觉" : "", model.id === markdownFormattingModelId ? "Markdown" : "", model.id === fullPageOcrModelId ? "OCR" : ""].filter(Boolean);
+          const roles = [model.id === defaultTextModelId ? "文本" : "", model.id === translationModelId ? "翻译" : "", model.id === visionAnalysisModelId ? "视觉" : "", model.id === fullPageOcrModelId ? "OCR" : ""].filter(Boolean);
           return <article className="model-registry-row refined" key={model.id}>
             <span className={`model-health ${configured ? "ready" : "missing"}`} />
             <span className="model-format-badge">{provider?.format === "anthropic" ? "Anthropic" : "OpenAI"}</span>
@@ -244,9 +244,9 @@ export function Settings() {
 
     <section className="settings-section workflow-settings-section">
       <div className="settings-heading"><div><h2>文档处理</h2><p>为处理任务指定已配置的模型，无需重复保存密钥。</p></div><Bot size={18} /></div>
-      <div className="workflow-row"><span className="workflow-icon markdown"><FileText size={17} /></span><span className="workflow-copy"><strong>Markdown 整理</strong><small>保留引用与公式，整理解析文本的结构和换行</small></span><select aria-label="Markdown 整理模型" value={markdownFormattingModelId} onChange={(event) => setMarkdownFormattingModelId(event.target.value)}><option value="">未配置</option>{customModels.map((model) => <option key={model.id} value={model.id}>{model.displayName}</option>)}</select><label className="compact-switch"><input type="checkbox" checked={autoFormatMarkdown} onChange={(event) => setAutoFormatMarkdown(event.target.checked)} disabled={!markdownFormattingModelId} /><span /></label></div>
+      <div className="workflow-row"><span className="workflow-icon markdown"><Languages size={17} /></span><span className="workflow-copy"><strong>论文翻译</strong><small>建议选择直接输出、非深度推理的文本模型；失败句可以单独重试</small></span><select aria-label="论文翻译模型" value={translationModelId} onChange={(event) => setTranslationModelId(event.target.value)}><option value="">继承默认文本模型</option>{customModels.filter((model) => modelHasCapability(model, "text")).map((model) => <option key={model.id} value={model.id}>{model.displayName}</option>)}</select><span className={`workflow-state ${translationReady ? "ready" : "off"}`}>{translationReady ? "已就绪" : "待配置"}</span></div>
       <div className="workflow-row"><span className="workflow-icon ocr"><ScanText size={17} /></span><span className="workflow-copy"><strong>全文 OCR</strong><small>使用 OpenAI 兼容的视觉模型识别渲染页面</small></span><select aria-label="全文 OCR 模型" value={fullPageOcrModelId} onChange={(event) => void assignOcrModel(event.target.value)} disabled={busyAction === "assign-ocr"}><option value="">关闭</option>{ocrModels.map((model) => <option key={model.id} value={model.id}>{model.displayName}</option>)}</select><button className="icon-button" onClick={() => void testOcr()} title="测试全文 OCR" disabled={!fullPageOcrModelId || !ocrConsent || Boolean(busyAction)}>{busyAction === "test-ocr" ? <LoaderCircle className="spin" size={15} /> : <Wifi size={15} />}</button></div>
-      <div className="workflow-row"><span className="workflow-icon vision"><ImageIcon size={17} /></span><span className="workflow-copy"><strong>图片解读</strong><small>导入后自动分析插图，并修复质量检查发现的可疑公式</small></span><select aria-label="图片解读模型" value={visionAnalysisModelId} onChange={(event) => setVisionAnalysisModelId(event.target.value)}><option value="">未配置</option>{customModels.map((model) => <option key={model.id} value={model.id}>{model.displayName}</option>)}</select><span className={`workflow-state ${visionAnalysisModelId ? "ready" : "off"}`}>{visionAnalysisModelId ? "自动" : "关闭"}</span></div>
+      <div className="workflow-row"><span className="workflow-icon vision"><ImageIcon size={17} /></span><span className="workflow-copy"><strong>导入期视觉重建</strong><small>逐页生成 Markdown，并自动处理章节、换行、插图、表格和可疑公式</small></span><select aria-label="视觉重建模型" value={visionAnalysisModelId} onChange={(event) => setVisionAnalysisModelId(event.target.value)}><option value="">未配置</option>{customModels.map((model) => <option key={model.id} value={model.id}>{model.displayName}</option>)}</select><span className={`workflow-state ${visionAnalysisModelId ? "ready" : "off"}`}>{visionAnalysisModelId ? "导入时确认" : "关闭"}</span></div>
       <div className="ocr-consent-row"><ShieldCheck size={16} /><span><strong>发送 PDF 页面</strong><small>渲染页会在本地缓存，只有启用后才会发送给所选模型。</small></span><label className="compact-switch"><input type="checkbox" checked={ocrConsent} onChange={(event) => void changeOcrConsent(event.target.checked)} disabled={Boolean(busyAction)} /><span /></label></div>
     </section>
 

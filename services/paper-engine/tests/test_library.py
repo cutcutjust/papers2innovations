@@ -39,7 +39,9 @@ def test_initializes_versioned_library_layout(tmp_path: Path) -> None:
 
     with sqlite3.connect(result["database"]) as connection:
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-        assert version == 14
+        assert version == 15
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert {"document_revisions", "page_recognitions", "document_uncertainties"} <= tables
 
 
 def test_migration_0013_upgrades_existing_0012_context_without_data_loss(tmp_path: Path) -> None:
@@ -64,7 +66,7 @@ def test_migration_0013_upgrades_existing_0012_context_without_data_loss(tmp_pat
         )
     Database(database_path).migrate()
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 14
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 15
         assert connection.execute(
             "SELECT scope_id FROM context_scope_items WHERE context_item_id = 'context-1'"
         ).fetchone()[0] == "research:default"
@@ -201,7 +203,8 @@ def test_figure_analysis_uses_content_model_prompt_cache(tmp_path: Path) -> None
     )
     library._preprocess_visual_artifacts(paper["id"], source_hash, document.title, source, output, document)
     library._preprocess_visual_artifacts(paper["id"], source_hash, document.title, source, output, document)
-    assert len(calls) == 1
+    figure_calls = [call for call in calls if str(call.get("figureId", "")).endswith("figure-1")]
+    assert len(figure_calls) == 1
     analysis = library.list_figure_analyses(paper["id"])[0]
     assert analysis["status"] == "completed"
     assert analysis["usage"]["outputTokens"] == 8

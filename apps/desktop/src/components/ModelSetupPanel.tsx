@@ -41,11 +41,10 @@ export function ModelSetupPanel({ model, presetRole = "text", compact = false, o
   const [contextMode, setContextMode] = useState<ContextMode>(contextModeFor(model?.maxContextTokens ?? 128000));
   const [useForText, setUseForText] = useState(model ? model.id === workspace.defaultTextModelId || modelHasCapability(model, "text") : presetRole === "text");
   const [useForVision, setUseForVision] = useState(model ? model.id === workspace.visionAnalysisModelId || modelHasCapability(model, "vision") : presetRole === "vision");
-  const [useForMarkdown, setUseForMarkdown] = useState(Boolean(model && model.id === workspace.markdownFormattingModelId));
   const [useForOcr, setUseForOcr] = useState(Boolean(model && model.id === workspace.fullPageOcrModelId));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const roleSummary = useMemo(() => [useForText ? "文本" : "", useForVision ? "视觉" : "", useForMarkdown ? "Markdown" : "", useForOcr ? "OCR" : ""].filter(Boolean), [useForMarkdown, useForOcr, useForText, useForVision]);
+  const roleSummary = useMemo(() => [useForText ? "文本" : "", useForVision ? "视觉重建" : "", useForOcr ? "兼容 OCR" : ""].filter(Boolean), [useForOcr, useForText, useForVision]);
 
   const submit = async () => {
     if (busy) return;
@@ -105,13 +104,12 @@ export function ModelSetupPanel({ model, presetRole = "text", compact = false, o
       if (useForText) {
         workspace.setDefaultTextModelId(id);
         workspace.setContextCompressionModelId(id);
-        if (!workspace.markdownFormattingModelId) workspace.setMarkdownFormattingModelId(id);
+        if (!workspace.translationModelId) workspace.setTranslationModelId(id);
       } else if (workspace.defaultTextModelId === id) {
         workspace.setDefaultTextModelId("");
       }
       if (useForVision) workspace.setVisionAnalysisModelId(id);
       else if (workspace.visionAnalysisModelId === id) workspace.setVisionAnalysisModelId("");
-      if (useForMarkdown) workspace.setMarkdownFormattingModelId(id);
       if (useForOcr) {
         await configureOcrProvider(nextProvider, nextModel, workspace.ocrConsent);
         workspace.setFullPageOcrModelId(id);
@@ -143,8 +141,7 @@ export function ModelSetupPanel({ model, presetRole = "text", compact = false, o
     </div>
     <div className="model-role-grid">
       <label className={useForText ? "active" : ""}><input type="checkbox" checked={useForText} onChange={(event) => setUseForText(event.target.checked)} /><FileText size={15} /><span><strong>默认文本模型</strong><small>阅读、翻译、解释与研究推理</small></span></label>
-      <label className={useForVision ? "active" : ""}><input type="checkbox" checked={useForVision} onChange={(event) => setUseForVision(event.target.checked)} /><ImageIcon size={15} /><span><strong>图片解读模型</strong><small>插图分析与可疑公式修复</small></span></label>
-      <label className={useForMarkdown ? "active" : ""}><input type="checkbox" checked={useForMarkdown} onChange={(event) => setUseForMarkdown(event.target.checked)} /><FileText size={15} /><span><strong>Markdown 整理</strong><small>整理解析文本结构和换行</small></span></label>
+      <label className={useForVision ? "active" : ""}><input type="checkbox" checked={useForVision} onChange={(event) => setUseForVision(event.target.checked)} /><ImageIcon size={15} /><span><strong>视觉重建模型</strong><small>逐页生成 Markdown、插图分析与公式复核</small></span></label>
       <label className={useForOcr ? "active" : ""}><input type="checkbox" checked={useForOcr} onChange={(event) => setUseForOcr(event.target.checked)} /><ScanText size={15} /><span><strong>全文 OCR</strong><small>仅 OpenAI-compatible；页面上传仍需另行同意</small></span></label>
     </div>
     {error && <p className="model-setup-error" role="alert">{error}</p>}

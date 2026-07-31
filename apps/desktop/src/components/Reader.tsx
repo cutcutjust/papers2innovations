@@ -2,16 +2,15 @@ import type { ContextDraftItem, ContextSnapshot, FigureAnalysis, LibraryPaper, M
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpen, BookOpenText, Bot, Check, ChevronLeft, Eye, EyeOff, FileImage, FileText, Languages, Layers3, LoaderCircle, Maximize2, MessageSquareText, Minimize2, Minus, Palette, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus, RefreshCw, RotateCcw, Search, Send, Sparkles, Square, Trash2, TriangleAlert, Volume2, WandSparkles, X } from "lucide-react";
+import { BookOpen, BookOpenText, Bot, Check, ChevronLeft, Eye, EyeOff, FileImage, FileText, Languages, Layers3, LoaderCircle, Maximize2, MessageSquareText, Minimize2, Minus, Palette, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus, RefreshCw, RotateCcw, Search, Send, Sparkles, Square, Trash2, TriangleAlert, Volume2, X } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import { activateContextCompression, addPaperToContext, addSelectionToContext, assetUrl, clearReaderConversation, deleteReaderAnalysis, deleteReaderAnnotation, deleteReaderChatTurn, deleteScopedContextItem, deleteTranslation, getContextCompression, getContextDraft, getReaderConversation, listFigureAnalyses, listPromptTemplates, listReaderAnalyses, listReaderAnnotations, listTranslations, nativeRuntime, readContextItem, readDocument, readMarkdown, removePaperFromContext, resetContextScope, retryFigureAnalysis, saveContextCompression, saveFormattedDocument, saveReaderAnalysis, saveReaderAnnotation, saveReaderChatTurn, saveTranslation, startModelStream, updateReaderChatTurn, upsertScopedContextItem, type ModelStreamHandle } from "../lib/bridge";
+import { activateContextCompression, addPaperToContext, addSelectionToContext, assetUrl, clearReaderConversation, deleteReaderAnalysis, deleteReaderAnnotation, deleteReaderChatTurn, deleteScopedContextItem, deleteTranslation, getContextCompression, getContextDraft, getReaderConversation, listDocumentUncertainties, listFigureAnalyses, listPromptTemplates, listReaderAnalyses, listReaderAnnotations, listTranslations, nativeRuntime, readContextItem, readDocument, readMarkdown, removePaperFromContext, resetContextScope, retryFigureAnalysis, saveContextCompression, saveReaderAnalysis, saveReaderAnnotation, saveReaderChatTurn, saveTranslation, startModelStream, updateReaderChatTurn, upsertScopedContextItem, type ModelStreamHandle } from "../lib/bridge";
 import { hydrateProviderCredentials } from "../lib/credentials";
 import { buildReaderSections, resolveMarkdownAssetPath, type ReaderDisplaySection, type ReaderDocumentBlock } from "../lib/documentBlocks";
-import { MARKDOWN_FORMAT_PROMPT_VERSION, prepareMarkdownForFormatting, restoreFormattedMarkdown, splitMarkdownForFormatting } from "../lib/markdownFormatting";
 import { normalizeMarkdownMath } from "../lib/markdownMath";
 import { CONTEXT_COMPRESSION_PROMPT_VERSION, contextCompressionBudgetError, contextCompressionMessages } from "../lib/contextCompression";
 import { contrastRatio, parseStructuredTranslation, projectTranslationSegmentsAcrossBlocks, splitTranslationChunks, structuredTranslationPrompt, translationTermParts, type TranslationBlockProjection } from "../lib/readerTranslation";
@@ -243,7 +242,7 @@ function BilingualBlock({ block, state, records, annotations, activeTranslationK
 }
 
 export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) {
-  const { setView, customModels, providers, defaultTextModelId, contextCompressionModelId, markdownFormattingModelId, autoFormatMarkdown, readerFocusMode, setReaderFocusMode, fontSize, readerZoom, setReaderZoom, readerTheme, setReaderTheme, readerBackgroundColor, readerTextColor, setReaderColors, readerAnnotationsVisible, setReaderAnnotationsVisible } = useWorkspace();
+  const { setView, customModels, providers, defaultTextModelId, translationModelId, contextCompressionModelId, readerFocusMode, setReaderFocusMode, fontSize, readerZoom, setReaderZoom, readerTheme, setReaderTheme, readerBackgroundColor, readerTextColor, setReaderColors, readerAnnotationsVisible, setReaderAnnotationsVisible } = useWorkspace();
   const queryClient = useQueryClient();
   const [mode, setMode] = useState<ReaderMode>("integrated");
   const [selection, setSelection] = useState<SelectionSource | null>(null);
@@ -267,14 +266,10 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const [chatStatus, setChatStatus] = useState<"idle" | "streaming" | "error">("idle");
   const [chatError, setChatError] = useState("");
   const [agentOpen, setAgentOpen] = useState(false);
-  const [formattingStatus, setFormattingStatus] = useState<"idle" | "formatting" | "saved" | "error">("idle");
-  const [formattingProgress, setFormattingProgress] = useState(0);
-  const [formattingError, setFormattingError] = useState("");
   const [promptPickerOpen, setPromptPickerOpen] = useState(false);
   const [readerPromptId, setReaderPromptId] = useState(() => selectedPromptId("reader"));
   const [translationPromptId, setTranslationPromptId] = useState(() => selectedPromptId("translation"));
   const [explanationPromptId, setExplanationPromptId] = useState(() => selectedPromptId("explanation"));
-  const [markdownPromptId, setMarkdownPromptId] = useState(() => selectedPromptId("markdown"));
   const [outlineWidth, setOutlineWidth] = useState(() => {
     if (typeof window === "undefined") return DEFAULT_OUTLINE_WIDTH;
     const persisted = Number(window.localStorage.getItem(READER_OUTLINE_WIDTH_KEY));
@@ -296,8 +291,6 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const streamHandles = useRef(new Map<string, ModelStreamHandle>());
   const translationSlowTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const chatHandle = useRef<ModelStreamHandle | null>(null);
-  const formattingHandle = useRef<ModelStreamHandle | null>(null);
-  const autoFormattingKey = useRef("");
   const termPanelCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selectionToolbar = useRef<HTMLDivElement | null>(null);
   const readerCanvas = useRef<HTMLElement | null>(null);
@@ -331,6 +324,12 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const figureAnalysisQuery = useQuery({
     queryKey: ["figure-analyses", root, paper?.id],
     queryFn: () => listFigureAnalyses(root, paper!.id),
+    enabled: readable,
+    retry: false,
+  });
+  const uncertaintyQuery = useQuery({
+    queryKey: ["document-uncertainties", root, paper?.id],
+    queryFn: () => listDocumentUncertainties(root, paper!.id),
     enabled: readable,
     retry: false,
   });
@@ -391,14 +390,12 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   }, [projectedTranslationsByBlock, translationQuery.data]);
   const selectedModel = customModels.find((model) => model.id === agentModel) ?? customModels.find((model) => model.id === defaultTextModelId) ?? customModels[0];
   const selectedProvider = providers.find((provider) => provider.id === selectedModel?.providerId);
-  const formattingModel = customModels.find((model) => model.id === markdownFormattingModelId) ?? customModels[0];
-  const formattingProvider = providers.find((provider) => provider.id === formattingModel?.providerId);
+  const translationModel = customModels.find((model) => model.id === translationModelId) ?? customModels.find((model) => model.id === defaultTextModelId) ?? selectedModel;
+  const translationProvider = providers.find((provider) => provider.id === translationModel?.providerId);
   const promptTemplates = promptTemplatesQuery.data ?? [];
   const readerPrompt = resolvePromptTemplate(promptTemplates, "reader", readerPromptId);
   const translationPrompt = resolvePromptTemplate(promptTemplates, "translation", translationPromptId);
   const explanationPrompt = resolvePromptTemplate(promptTemplates, "explanation", explanationPromptId);
-  const markdownPrompt = resolvePromptTemplate(promptTemplates, "markdown", markdownPromptId);
-  const markdownPromptVersion = `${MARKDOWN_FORMAT_PROMPT_VERSION}:${markdownPrompt?.id ?? "default"}`;
 
   useEffect(() => {
     if (!customModels.some((model) => model.id === agentModel)) setAgentModel(defaultTextModelId || customModels[0]?.id || "");
@@ -409,9 +406,6 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const contextPercent = Math.min(100, Math.round(contextUsed / maxContextTokens * 100));
   const fullText = Boolean(paper && contextDraftQuery.data?.items.some(
     (item) => item.paperId === paper.id && !item.sectionId && !item.blockId,
-  ));
-  const formattingCredentialReady = !nativeRuntime || Boolean(formattingProvider && providerCredentialQuery.data?.some(
-    (summary) => summary.credentialId === formattingProvider.credentialId && summary.configured,
   ));
 
   useEffect(() => {
@@ -432,12 +426,8 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     setChatStatus("idle");
     setChatError("");
     setAgentOpen(false);
-    setFormattingStatus("idle");
-    setFormattingProgress(0);
-    setFormattingError("");
     setPdfPage(1);
     setPdfNavigationKey(0);
-    autoFormattingKey.current = "";
     for (const timer of translationSlowTimers.current.values()) clearTimeout(timer);
     translationSlowTimers.current.clear();
     for (const handle of streamHandles.current.values()) void handle.cancel();
@@ -446,11 +436,6 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       void chatHandle.current.cancel();
       chatHandle.current.dispose();
       chatHandle.current = null;
-    }
-    if (formattingHandle.current) {
-      void formattingHandle.current.cancel();
-      formattingHandle.current.dispose();
-      formattingHandle.current = null;
     }
   }, [paper?.id]);
 
@@ -511,10 +496,6 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     if (chatHandle.current) {
       chatHandle.current.dispose();
       void chatHandle.current.cancel();
-    }
-    if (formattingHandle.current) {
-      formattingHandle.current.dispose();
-      void formattingHandle.current.cancel();
     }
   }, []);
 
@@ -657,22 +638,11 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     };
   }, [themeMenuOpen]);
 
-  useEffect(() => {
-    const document = documentQuery.data;
-    if (!autoFormatMarkdown || !paper || !document || !formattingModel || !formattingProvider || !formattingCredentialReady) return;
-    const key = `${paper.id}:${document.source_sha256}:${formattingModel.id}:${markdownPromptVersion}`;
-    if (document.formatting?.model_id === formattingModel.id && document.formatting.prompt_version === markdownPromptVersion) return;
-    if (autoFormattingKey.current === key) return;
-    autoFormattingKey.current = key;
-    void formatDocument();
-  }, [autoFormatMarkdown, documentQuery.data, formattingCredentialReady, formattingModel?.id, formattingProvider?.id, markdownPromptVersion, paper?.id]);
-
   const choosePrompt = (category: PromptTemplateCategory, id: string) => {
     selectPromptTemplate(category, id);
     if (category === "reader") setReaderPromptId(id);
     else if (category === "translation") setTranslationPromptId(id);
     else if (category === "explanation") setExplanationPromptId(id);
-    else if (category === "markdown") setMarkdownPromptId(id);
   };
 
   const toggleFocusMode = async (enabled: boolean) => {
@@ -703,6 +673,9 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
 
   const credentialReady = !nativeRuntime || Boolean(selectedProvider && providerCredentialQuery.data?.some(
     (summary) => summary.credentialId === selectedProvider.credentialId && summary.configured,
+  ));
+  const translationCredentialReady = !nativeRuntime || Boolean(translationProvider && providerCredentialQuery.data?.some(
+    (summary) => summary.credentialId === translationProvider.credentialId && summary.configured,
   ));
 
   const updateTranslation = (blockId: string, update: (current: TranslationState) => TranslationState) => {
@@ -755,10 +728,16 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         return succeeded;
       }
     }
-    if (!selectedModel || !selectedProvider || !credentialReady) {
-      const message = selectedModel && selectedProvider
-        ? `“${selectedModel.displayName}”缺少 API Key，请先到“模型与处理”中恢复或重新保存密钥。`
+    if (!translationModel || !translationProvider || !translationCredentialReady) {
+      const message = translationModel && translationProvider
+        ? `“${translationModel.displayName}”缺少 API Key，请先到“模型与处理”中恢复或重新保存密钥。`
         : "尚未选择可用于翻译的模型，请先完成模型配置。";
+      setTranslations((current) => ({ ...current, [block.id]: { status: "error", text: "", kind, error: message } }));
+      setContextNotice(message);
+      return false;
+    }
+    if (kind === "passage" && /reason|deepseek|\bo[134]\b/i.test(translationModel.model) && translationModel.maxOutputTokens < 4096) {
+      const message = `“${translationModel.displayName}”是推理模型，但最大输出仅 ${translationModel.maxOutputTokens} tokens，容易在输出译文前耗尽预算。请在“模型与处理”选择直接输出模型，或把该模型输出上限提高到至少 4096。`;
       setTranslations((current) => ({ ...current, [block.id]: { status: "error", text: "", kind, error: message } }));
       setContextNotice(message);
       return false;
@@ -832,7 +811,11 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         setTranslations((current) => ({ ...current, [block.id]: completedState }));
         void persistTranslation(block, completedState)
           .then((saved) => {
-            if (saved) setContextNotice(kind === "word" ? "词义已保存到本篇论文。" : "译文已保存，可随时切换回英文原文。");
+            if (saved) setContextNotice(kind === "word"
+              ? "词义已保存到本篇论文。"
+              : parsed?.missingSegmentIds.length
+                ? `已保存 ${parsed.segments.length} 个句段，另有 ${parsed.missingSegmentIds.length} 个句段未返回；可单独选择失败句重试。`
+                : "译文已保存，可随时切换回英文原文。");
             finish(saved);
           });
       } else if (event.kind === "cancelled") {
@@ -846,10 +829,13 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     try {
       const handle = await startModelStream({
         requestId,
-        provider: selectedProvider,
-        model: selectedModel,
+        provider: translationProvider,
+        model: translationModel,
         temperature: 0,
-        maxOutputTokens: kind === "word" ? Math.min(selectedModel.maxOutputTokens, 2048) : Math.min(selectedModel.maxOutputTokens, 3072),
+        reasoningMode: "disabled",
+        maxOutputTokens: kind === "word"
+          ? Math.min(translationModel.maxOutputTokens, 2048)
+          : Math.min(translationModel.maxOutputTokens, Math.max(1536, Math.ceil(block.text.length * 1.5) + (/reason|deepseek|\bo[134]\b/i.test(translationModel.model) ? 3072 : 768))),
         messages: kind === "word" ? buildWordLookupMessages(block.text, paperWordContextFor(block)).map((message, index) => index === 0 ? { ...message, content: `${translationPrompt?.content ?? ""}\n\n${message.content}` } : message) : [
           { role: "system", content: translationPrompt?.content ?? "请将科研文本忠实翻译为简体中文，保留公式、术语、引用和数字，只返回译文。" },
           { role: "user", content: structuredTranslationPrompt(block.text) },
@@ -873,7 +859,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   };
 
   async function persistTranslation(block: ReaderBlock, state: TranslationState): Promise<boolean> {
-    if (!paper || !selectedModel || !state.text.trim()) {
+    if (!paper || !translationModel || !state.text.trim()) {
       const message = "模型没有返回可保存的译文。";
       updateTranslation(block.id, (current) => ({ ...current, status: "error", activityPhase: "error", error: message }));
       if (state.requestId) failModelActivity(state.requestId, message);
@@ -907,7 +893,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
         segments,
         terms,
         targetLanguage: "zh-CN",
-        modelId: selectedModel.id,
+        modelId: translationModel.id,
         promptVersion: `${state.kind === "word" ? WORD_LOOKUP_PROMPT_VERSION : TRANSLATION_PROMPT_VERSION}:${translationPrompt?.id ?? "default"}`,
       });
       setTranslations((current) => ({ ...current, [block.id]: { status: "saved", text: record.translatedText, segments: record.segments, terms: record.terms, record } }));
@@ -933,7 +919,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const translateCurrentSection = async () => {
     const section = sections.find((candidate) => candidate.id === activeSection) ?? sections[0];
     if (!section || translationBatchBusy) return;
-    if (!credentialReady) {
+    if (!translationCredentialReady) {
       setContextNotice("当前翻译模型缺少密钥，请先在“模型与处理”中恢复或重新保存 API Key。");
       return;
     }
@@ -1366,93 +1352,6 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     const draft = await resetContextScope(root, paperScopeId);
     queryClient.setQueryData(["context-draft", root, paperScopeId], draft);
   };
-  const streamFormattedChunk = (chunk: string): Promise<string> => new Promise((resolve, reject) => {
-    if (!formattingModel || !formattingProvider) {
-      reject(new Error("Choose a Markdown formatting model in Settings."));
-      return;
-    }
-    let output = "";
-    let terminal = false;
-    const onEvent = (event: ModelStreamEvent) => {
-      if (event.kind === "delta" && event.text) output += event.text;
-      if (event.kind === "done") {
-        terminal = true;
-        if (output.trim()) resolve(output);
-        else reject(new Error("Formatting model returned empty Markdown."));
-      } else if (event.kind === "cancelled") {
-        terminal = true;
-        reject(new Error("Markdown formatting was cancelled."));
-      } else if (event.kind === "error") {
-        terminal = true;
-        reject(new Error(event.error ?? "Markdown formatting failed."));
-      }
-      if (terminal) {
-        formattingHandle.current?.dispose();
-        formattingHandle.current = null;
-      }
-    };
-    void startModelStream({
-      requestId: crypto.randomUUID(),
-      provider: formattingProvider,
-      model: formattingModel,
-      temperature: 0,
-      messages: [
-        { role: "system", content: `${markdownPrompt?.content ?? "请无损整理科研 Markdown 的结构和换行。"}\n\n必须原样保留每个 [[P2I_EVIDENCE_ANCHOR_N]] 占位符，只返回 Markdown，不要使用代码围栏。` },
-        { role: "user", content: chunk },
-      ],
-    }, onEvent, { source: "markdown-formatting", label: "整理 Markdown 文档", groupKey: `format:${paper.id}` }).then((handle) => {
-      if (terminal) handle.dispose();
-      else formattingHandle.current = handle;
-    }).catch(reject);
-  });
-
-  async function formatDocument() {
-    const document = documentQuery.data;
-    if (!paper || !document || !formattingModel || !formattingProvider) return;
-    if (!formattingCredentialReady) {
-      setFormattingStatus("error");
-      setFormattingError("Store this formatting model's API key in Settings first.");
-      return;
-    }
-    setFormattingStatus("formatting");
-    setFormattingProgress(0);
-    setFormattingError("");
-    try {
-      const formattedSections: Array<{ id: string; markdown: string }> = [];
-      const totalSections = Math.max(1, document.sections.length);
-      for (let sectionIndex = 0; sectionIndex < document.sections.length; sectionIndex += 1) {
-        const section = document.sections[sectionIndex];
-        const prepared = prepareMarkdownForFormatting(section.markdown);
-        const outputLimit = Math.max(2000, (formattingModel.maxOutputTokens - 512) * 3);
-        const contextLimit = Math.max(2000, (formattingModel.maxContextTokens - formattingModel.maxOutputTokens - 2000) * 3);
-        const chunks = splitMarkdownForFormatting(prepared.promptText, Math.min(outputLimit, contextLimit, 12000));
-        const outputs: string[] = [];
-        for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
-          outputs.push(await streamFormattedChunk(chunks[chunkIndex]));
-          setFormattingProgress(Math.round(((sectionIndex + (chunkIndex + 1) / chunks.length) / totalSections) * 100));
-        }
-        formattedSections.push({ id: section.id, markdown: restoreFormattedMarkdown(outputs.join("\n\n"), prepared.anchors) });
-      }
-      const saved = await saveFormattedDocument(root, {
-        paperId: paper.id,
-        sections: formattedSections,
-        modelId: formattingModel.id,
-        promptVersion: markdownPromptVersion,
-        sourceSha256: document.source_sha256,
-      });
-      queryClient.setQueryData(["paper-document", root, paper.id], saved);
-      await markdownQuery.refetch();
-      setFormattingProgress(100);
-      setFormattingStatus("saved");
-    } catch (error) {
-      setFormattingStatus("error");
-      setFormattingError(error instanceof Error ? error.message : String(error));
-    } finally {
-      formattingHandle.current?.dispose();
-      formattingHandle.current = null;
-    }
-  }
-
   const captureSelection = (block: ReaderBlock, event: ReactMouseEvent<HTMLElement>) => {
     const selected = window.getSelection();
     const range = selected?.rangeCount ? selected.getRangeAt(0) : undefined;
@@ -1821,14 +1720,14 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       <button className="reader-focus-button" onClick={() => void toggleFocusMode(true)} title="只保留目录、Markdown 正文和论文阅读助手"><Maximize2 size={13} /> 纯享阅读</button>
       <button><Search size={13} /> 查找</button>
       <div className="reader-prompt-control"><button className={promptPickerOpen ? "active" : ""} onClick={() => setPromptPickerOpen((value) => !value)}><BookOpenText size={13} /> AI 模板</button>{promptPickerOpen && <div className="reader-prompt-picker">
-        {(["translation", "explanation", "markdown"] as PromptTemplateCategory[]).map((category) => {
-          const label = category === "translation" ? "翻译" : category === "explanation" ? "解释" : "Markdown 整理";
-          const selected = category === "translation" ? translationPrompt : category === "explanation" ? explanationPrompt : markdownPrompt;
+        {(["translation", "explanation"] as PromptTemplateCategory[]).map((category) => {
+          const label = category === "translation" ? "翻译" : "解释";
+          const selected = category === "translation" ? translationPrompt : explanationPrompt;
           return <label key={category}><span>{label}</span><select value={selected?.id ?? ""} onChange={(event) => choosePrompt(category, event.target.value)}>{promptTemplates.filter((template) => template.category === category).map((template) => <option value={template.id} key={template.id}>{template.name}</option>)}</select></label>;
         })}
         <button className="reader-prompt-manage" onClick={() => setView("agents")}>管理提示词</button>
       </div>}</div>
-      <button className={formattingStatus === "saved" ? "active" : ""} disabled={formattingStatus === "formatting"} title={formattingError || `使用 ${formattingModel?.displayName ?? "所选模型"} 与 ${markdownPrompt?.name ?? "默认提示词"} 整理 Markdown`} onClick={() => void formatDocument()}>{formattingStatus === "formatting" ? <LoaderCircle className="spin" size={13} /> : <WandSparkles size={13} />} {formattingStatus === "formatting" ? `${formattingProgress}%` : "整理"}</button><button className={fullText ? "active" : ""} disabled={contextBusy === "paper"} onClick={() => void togglePaperContext()}><Layers3 size={13} /> {fullText ? `MD 上下文 · ${contextPercent}%` : "加入 MD 原文"}</button><button className="reader-agent-toggle" onClick={() => { setAgentOpen(true); setAgentCollapsed(false); }}><Bot size={13} /> 询问 AI</button>
+      <button className={fullText ? "active" : ""} disabled={contextBusy === "paper"} onClick={() => void togglePaperContext()}><Layers3 size={13} /> {fullText ? `MD 上下文 · ${contextPercent}%` : "加入 MD 原文"}</button><button className="reader-agent-toggle" onClick={() => { setAgentOpen(true); setAgentCollapsed(false); }}><Bot size={13} /> 询问 AI</button>
     </div>
     <div className="reader-main">
       <aside className={`reader-outline ${outlineCollapsed ? "collapsed" : ""}`} style={{ width: renderedOutlineWidth, flexBasis: renderedOutlineWidth }}>
@@ -1837,8 +1736,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
       </aside>
       <main className={`reader-canvas reader-theme-${readerTheme}`} ref={readerCanvas}>
         {mode === "integrated" && <article className="integrated-paper">
-          <header className="paper-reading-header"><span className="tag tag-primary">MD 章节阅读</span><h1>{paper.title}</h1><p>本地文档 · {paper.pageCount || "—"} 页 · 更新于 {new Date(paper.updatedAt).toLocaleDateString("zh-CN")}</p></header>
-          {formattingStatus === "error" && <div className="formatting-notice error"><TriangleAlert size={13} /> {formattingError}</div>}
+          <header className="paper-reading-header"><span className="tag tag-primary">MD 章节阅读</span><h1>{paper.title}</h1><p>本地文档 · {paper.pageCount || "—"} 页 · 更新于 {new Date(paper.updatedAt).toLocaleDateString("zh-CN")}</p>{Boolean(uncertaintyQuery.data?.length) && <button className="document-uncertainty-link" onClick={() => { const page = uncertaintyQuery.data?.[0]?.page ?? 1; setPdfPage(page); setMode("pdf"); setPdfNavigationKey((value) => value + 1); }}><TriangleAlert size={13} /> {uncertaintyQuery.data?.length} 处需对照 PDF</button>}</header>
           {readerAnnotationsVisible && !hasPassageTranslations && <div className="reader-translation-empty"><div><Languages size={18} /><span><strong>当前还没有中文译文</strong><small>原始 Markdown 始终保持英文不变。翻译完成后，点击蓝色下划线即可在原位置切换中英文。</small></span></div><button className="primary-button compact" disabled={translationBatchBusy} onClick={() => credentialReady ? void translateCurrentSection() : setView("settings")}>{translationBatchBusy ? <LoaderCircle className="spin" size={14} /> : <Languages size={14} />} {credentialReady ? (translationBatchBusy ? "正在翻译本章" : "翻译当前章节") : "配置文本模型"}</button></div>}
           {markdownQuery.isLoading || documentQuery.isLoading ? <div className="document-loading">Loading structured document…</div> : sections.map((section, sectionIndex) => {
             const displayBlocks = section.blocks;

@@ -2,8 +2,13 @@ export const jobStatuses = [
   "DISCOVERED",
   "HASHING",
   "QUEUED",
+  "RENDERING",
   "PARSING_LAYOUT",
+  "RECOGNIZING_TEXT",
   "EXTRACTING_FIGURES",
+  "CHECKING_FORMULAS",
+  "CLEANING_DOCUMENT",
+  "VERIFYING_DOCUMENT",
   "PARSING_REFERENCES",
   "RESOLVING_METADATA",
   "INDEXING",
@@ -141,7 +146,7 @@ export interface PaperSource {
   importedAt: string;
 }
 
-export type PipelineStage = "hash" | "layout" | "ocr" | "figures" | "tables" | "index";
+export type PipelineStage = "hash" | "render" | "layout" | "vision_text" | "ocr" | "figures" | "tables" | "formulas" | "cleanup" | "verification" | "index";
 
 export interface JobStage {
   id: string;
@@ -177,6 +182,72 @@ export interface ParseArtifactBundle {
   ocr?: OcrUsage;
   partial: boolean;
   warnings: string[];
+}
+
+export interface PdfImportPreviewItem {
+  path: string;
+  filename: string;
+  pageCount: number;
+  sizeBytes: number;
+  encrypted: boolean;
+}
+
+export interface PdfImportPreview {
+  items: PdfImportPreviewItem[];
+  fileCount: number;
+  pageCount: number;
+  estimatedVisionCalls: number;
+  visionReady: boolean;
+  visionModelId?: string;
+  visionModelName?: string;
+}
+
+export interface PdfImportOptions {
+  processingMode: "vision" | "local";
+  visionConfirmed: boolean;
+}
+
+export interface DocumentRevision {
+  id: string;
+  paperId: string;
+  sourceHash: string;
+  pipelineVersion: string;
+  processingMode: "vision" | "local";
+  status: "running" | "completed" | "partial" | "failed" | "cancelled";
+  markdownPath?: string;
+  documentPath?: string;
+  previousRevisionId?: string;
+  createdAt: string;
+  completedAt?: string;
+  error?: string;
+}
+
+export interface PageRecognition {
+  id: string;
+  revisionId: string;
+  paperId: string;
+  page: number;
+  task: "page_transcribe" | "region_verify" | "formula_repair" | "table_reconstruct" | "figure_analysis";
+  modelId: string;
+  promptVersion: string;
+  status: "pending" | "completed" | "failed";
+  confidence?: number;
+  cacheHit: boolean;
+  usage: { inputTokens: number; outputTokens: number; durationMs: number };
+  error?: string;
+}
+
+export interface DocumentUncertainty {
+  id: string;
+  revisionId: string;
+  paperId: string;
+  page: number;
+  kind: "text" | "heading" | "formula" | "table" | "reading_order";
+  bbox?: BoundingBox;
+  sourceText: string;
+  candidateText: string;
+  confidence: number;
+  resolutionStatus: "resolved" | "unresolved" | "ignored";
 }
 
 export type ApiFormat = "openai" | "anthropic";
@@ -234,6 +305,7 @@ export interface ModelStreamRequest {
   tools?: ModelToolDefinition[];
   temperature?: number;
   maxOutputTokens?: number;
+  reasoningMode?: "default" | "disabled";
 }
 
 export interface ModelStreamEvent {
@@ -663,6 +735,12 @@ export interface PreprocessQualityReport {
   figureCount: number;
   analyzedFigureCount: number;
   failedFigureCount: number;
+  recognizedPageCount: number;
+  cachedPageCount: number;
+  failedPageCount: number;
+  uncertainRegionCount: number;
+  removedHeaderFooterCount: number;
+  usage: { inputTokens: number; outputTokens: number; durationMs: number };
   warnings: string[];
   updatedAt: string;
 }

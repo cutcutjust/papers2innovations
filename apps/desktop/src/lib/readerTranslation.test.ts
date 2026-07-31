@@ -135,12 +135,22 @@ describe("reader translation", () => {
     expect(chunks.map((chunk) => chunk.text).join(" ")).toContain("C".repeat(100));
   });
 
-  it("rejects incomplete structured translation output", () => {
+  it("preserves completed sentences from incomplete structured output", () => {
     const parsed = parseStructuredTranslation("First result. Second result.", JSON.stringify({
       segments: [{ id: "sentence-1", translatedText: "第一个结果。" }],
       terms: [],
     }));
-    expect(parsed.structured).toBe(false);
+    expect(parsed.structured).toBe(true);
     expect(parsed.missingSegmentIds).toEqual(["sentence-2"]);
+    expect(parsed.segments).toHaveLength(1);
+    expect(parsed.segments[0].translatedText).toBe("第一个结果。");
+  });
+
+  it("limits a translation request to four sentences", () => {
+    const source = "One. Two. Three. Four. Five. Six.";
+    const chunks = splitTranslationChunks(source, 1200, 4);
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0].text).toContain("Four.");
+    expect(chunks[0].text).not.toContain("Five.");
   });
 });

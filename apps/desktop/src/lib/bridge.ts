@@ -1,4 +1,4 @@
-import type { AgentProfile, AgentPromptTemplate, AgentRun, AgentToolCallRecord, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, FigureAnalysis, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryCollection, LibraryPaper, ModelActivityMeta, ModelStreamEvent, ModelStreamRequest, ModelToolDefinition, PaperDocument, PreprocessQualityReport, ProgressNotification, PromptTemplate, PromptTemplateCategory, ReaderAnalysisRecord, ReaderAnalysisType, ReaderAnnotation, ReaderChatTurn, ReaderConversation, ScopedContextItem, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
+import type { AgentProfile, AgentPromptTemplate, AgentRun, AgentToolCallRecord, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, DocumentUncertainty, FigureAnalysis, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryCollection, LibraryPaper, ModelActivityMeta, ModelStreamEvent, ModelStreamRequest, ModelToolDefinition, PaperDocument, PdfImportOptions, PdfImportPreview, PreprocessQualityReport, ProgressNotification, PromptTemplate, PromptTemplateCategory, ReaderAnalysisRecord, ReaderAnalysisType, ReaderAnnotation, ReaderChatTurn, ReaderConversation, ScopedContextItem, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { demoMarkdown, demoPapers } from "../demo";
@@ -35,14 +35,41 @@ export interface PdfImportResult {
   destination: string;
 }
 
-export async function importPdfs(root: string, paths: string[] = []): Promise<PdfImportResult> {
+export async function selectPdfPaths(): Promise<string[]> {
+  if (!nativeRuntime) return ["D:/Research/example-paper.pdf"];
+  return invoke<string[]>("select_pdf_paths");
+}
+
+export async function previewPdfImport(root: string, paths: string[]): Promise<PdfImportPreview> {
+  if (!nativeRuntime) return {
+    items: paths.map((path) => ({ path, filename: path.split(/[\\/]/).at(-1) ?? "paper.pdf", pageCount: 12, sizeBytes: 1_200_000, encrypted: false })),
+    fileCount: paths.length, pageCount: paths.length * 12, estimatedVisionCalls: paths.length * 12,
+    visionReady: true, visionModelId: "demo-vision", visionModelName: "演示视觉模型",
+  };
+  return invoke<PdfImportPreview>("preview_pdf_import", { root, paths });
+}
+
+export async function importPdfs(root: string, paths: string[] = [], options: PdfImportOptions = { processingMode: "local", visionConfirmed: false }): Promise<PdfImportResult> {
   if (!nativeRuntime) {
     await new Promise((resolve) => setTimeout(resolve, 500));
     return { selected: paths.length || 2, copied: paths.length || 2, deduplicated: 0, destination: `${root}/Papers/Manual` };
   }
   return paths.length
-    ? invoke<PdfImportResult>("import_pdf_paths", { root, paths })
+    ? invoke<PdfImportResult>("import_pdf_paths", { root, paths, options })
     : invoke<PdfImportResult>("import_pdfs", { root });
+}
+
+export async function listDocumentUncertainties(root: string, paperId: string): Promise<DocumentUncertainty[]> {
+  if (!nativeRuntime) return [];
+  return rpc<DocumentUncertainty[]>("paper.uncertainty_list", { root, paperId });
+}
+
+export async function previewPaperReprocessing(root: string, paperIds: string[]): Promise<{ paperCount: number; pageCount: number; estimatedVisionCalls: number; visionReady: boolean; visionModelId?: string }> {
+  return rpc("paper.reprocess_preview", { root, paperIds });
+}
+
+export async function reprocessPapers(root: string, paperIds: string[], visionConfirmed: boolean): Promise<Array<{ jobId: string; paperId: string }>> {
+  return rpc("paper.reprocess_batch", { root, paperIds, visionConfirmed });
 }
 
 export async function initializeLibrary(root: string): Promise<void> {
@@ -151,7 +178,7 @@ export async function retryFigureAnalysis(root: string, paperId: string, figureI
 }
 
 export async function getPreprocessStatus(root: string, paperId: string): Promise<PreprocessQualityReport> {
-  if (!nativeRuntime) return { paperId, sourceHash: "", formulaIssueCount: 0, repairedFormulaCount: 0, figureCount: 0, analyzedFigureCount: 0, failedFigureCount: 0, warnings: [], updatedAt: new Date().toISOString() };
+  if (!nativeRuntime) return { paperId, sourceHash: "", formulaIssueCount: 0, repairedFormulaCount: 0, figureCount: 0, analyzedFigureCount: 0, failedFigureCount: 0, recognizedPageCount: 0, cachedPageCount: 0, failedPageCount: 0, uncertainRegionCount: 0, removedHeaderFooterCount: 0, usage: { inputTokens: 0, outputTokens: 0, durationMs: 0 }, warnings: [], updatedAt: new Date().toISOString() };
   return rpc<PreprocessQualityReport>("paper.preprocess_status", { root, paperId });
 }
 

@@ -119,18 +119,21 @@ export function splitTranslationSegments(source: string): TranslationSegment[] {
   }));
 }
 
-export function splitTranslationChunks(source: string, maxCharacters = 2500): Array<{ start: number; end: number; text: string }> {
+export function splitTranslationChunks(source: string, maxCharacters = 1200, maxSentences = 4): Array<{ start: number; end: number; text: string }> {
   const segments = splitTranslationSegments(source);
   if (!segments.length) return source.trim() ? [{ start: 0, end: source.length, text: source }] : [];
   const chunks: Array<{ start: number; end: number; text: string }> = [];
   let start = segments[0].sourceStart;
   let end = segments[0].sourceEnd;
+  let sentenceCount = 1;
   for (const segment of segments.slice(1)) {
-    if (segment.sourceEnd - start > maxCharacters) {
+    if (segment.sourceEnd - start > maxCharacters || sentenceCount >= maxSentences) {
       chunks.push({ start, end, text: source.slice(start, end) });
       start = segment.sourceStart;
+      sentenceCount = 0;
     }
     end = segment.sourceEnd;
+    sentenceCount += 1;
   }
   chunks.push({ start, end, text: source.slice(start, end) });
   return chunks;
@@ -279,7 +282,9 @@ export function parseStructuredTranslation(source: string, response: string): St
     const parsed = JSON.parse(stripFence(response)) as { segments?: Array<{ id?: string; translatedText?: string }>; terms?: TranslationTerm[] };
     const values = new Map((parsed.segments ?? []).map((segment) => [segment.id, String(segment.translatedText ?? "").trim()]));
     const missingSegmentIds = sourceSegments.filter((segment) => !values.get(segment.id)?.trim()).map((segment) => segment.id);
-    const segments = sourceSegments.map((segment) => ({ ...segment, translatedText: values.get(segment.id) || segment.sourceText }));
+    const segments = sourceSegments
+      .filter((segment) => Boolean(values.get(segment.id)?.trim()))
+      .map((segment) => ({ ...segment, translatedText: values.get(segment.id)! }));
     const terms = (parsed.terms ?? []).filter((term) => term && term.text && term.translation).map((term) => {
       const text = String(term.text);
       const segment = sourceSegments.find((candidate) => candidate.id === term.segmentId);
@@ -321,12 +326,12 @@ export function parseStructuredTranslation(source: string, response: string): St
         specialtyScore: Number.isFinite(Number(term.specialtyScore)) ? Math.min(1, Math.max(0, Number(term.specialtyScore))) : undefined,
         selectionReason: String(term.selectionReason ?? "").trim() || undefined,
       };
-    });
+    }).filter((term) => !term.segmentId || segments.some((segment) => segment.id === term.segmentId));
     return {
       translatedText: segments.map((segment) => segment.translatedText).join(""),
       segments,
       terms,
-      structured: missingSegmentIds.length === 0,
+      structured: segments.length > 0,
       missingSegmentIds,
       error: missingSegmentIds.length ? `模型返回缺少 ${missingSegmentIds.length} 个句段` : undefined,
     };
