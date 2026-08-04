@@ -25,6 +25,7 @@ const PUBLIC_DASHSCOPE_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatib
 const KEYRING_SERVICE: &str = "ai.papers2innovations.desktop";
 const KEYRING_USER: &str = "stronghold-vault-v1";
 const PROVIDER_KEYRING_PREFIX: &str = "model-provider-v1:";
+const FILE_HASH_BUFFER_BYTES: usize = 64 * 1024;
 
 struct EngineInner {
     child: Mutex<Option<Child>>,
@@ -1972,7 +1973,11 @@ struct PdfImportResult {
     selected: usize,
     copied: usize,
     deduplicated: usize,
+    enqueued: usize,
+    job_ids: Vec<String>,
     destination: String,
+    #[serde(skip)]
+    managed_paths: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2060,7 +2065,9 @@ fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
     let mut file =
         fs::File::open(path).map_err(|error| format!("Cannot open {}: {error}", path.display()))?;
     let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    // Tauri commands run on worker threads with a limited stack. Keep the file
+    // buffer on the heap so importing a PDF cannot exhaust that stack.
+    let mut buffer = vec![0_u8; FILE_HASH_BUFFER_BYTES];
     loop {
         let read = file
             .read(&mut buffer)
@@ -2103,7 +2110,7 @@ fn write_import_options(
     fs::write(
         &temporary,
         serde_json::to_vec(&json!({
-            "processingMode": if options.processing_mode == "vision" { "vision" } else { "local" },
+            "processingMode": "vision",
             "visionConfirmed": options.vision_confirmed,
         }))
         .map_err(|error| error.to_string())?,
@@ -2124,6 +2131,7 @@ fn import_pdf_sources(
         .map_err(|error| format!("Cannot create {}: {error}", destination.display()))?;
     let mut copied = 0;
     let mut deduplicated = 0;
+    let mut managed_paths = Vec::with_capacity(selected.len());
     for (index, source) in selected.iter().enumerate() {
         let file_name = source.file_name().ok_or("Selected PDF has no file name")?;
         let mut target = destination.join(file_name);
@@ -2131,6 +2139,7 @@ fn import_pdf_sources(
         write_import_options(root, &source_hash, options)?;
         if target.is_file() && sha256_file(&target)? == source_hash {
             deduplicated += 1;
+            managed_paths.push(target.to_string_lossy().into_owned());
             continue;
         }
         if target.exists() {
@@ -2153,6 +2162,7 @@ fn import_pdf_sources(
                 suffix += 1;
             }
             if target.is_file() && sha256_file(&target)? == source_hash {
+                managed_paths.push(target.to_string_lossy().into_owned());
                 continue;
             }
         }
@@ -2166,12 +2176,16 @@ fn import_pdf_sources(
         fs::rename(&temporary, &target)
             .map_err(|error| format!("Cannot finish importing {}: {error}", source.display()))?;
         copied += 1;
+        managed_paths.push(target.to_string_lossy().into_owned());
     }
     Ok(PdfImportResult {
         selected: selected.len(),
         copied,
         deduplicated,
+        enqueued: 0,
+        job_ids: Vec::new(),
         destination: destination.to_string_lossy().into_owned(),
+        managed_paths,
     })
 }
 
@@ -2198,18 +2212,13 @@ fn preview_pdf_import(
 }
 
 #[tauri::command]
-fn import_pdfs(engine: State<'_, Engine>, root: String) -> Result<PdfImportResult, String> {
-    engine.allow_library_root(&root)?;
-    let selected = rfd::FileDialog::new()
-        .set_title("添加 PDF 到 Papers2Innovations")
-        .add_filter("PDF 论文", &["pdf"])
-        .pick_files()
-        .unwrap_or_default();
-    import_pdf_sources(&root, selected, &PdfImportOptions::default())
+fn import_pdfs(_engine: State<'_, Engine>, _root: String) -> Result<PdfImportResult, String> {
+    Err("请通过“添加论文”窗口预览页数并确认视觉调用后再导入。".into())
 }
 
 #[tauri::command]
-fn import_pdf_paths(
+async fn import_pdf_paths(
+    app: AppHandle,
     engine: State<'_, Engine>,
     root: String,
     paths: Vec<String>,
@@ -2217,25 +2226,45 @@ fn import_pdf_paths(
 ) -> Result<PdfImportResult, String> {
     engine.allow_library_root(&root)?;
     let options = options.unwrap_or_default();
-    if options.processing_mode == "vision" {
-        if !options.vision_confirmed {
-            return Err("请先确认预计视觉调用量。".into());
-        }
-        if engine
-            .0
-            .vision
-            .lock()
-            .map_err(|_| "Vision config lock poisoned")?
-            .is_none()
-        {
-            return Err("视觉模型尚未配置，请先配置或改用本地基础解析。".into());
-        }
+    if options.processing_mode != "vision" || !options.vision_confirmed {
+        return Err("请先预览页数并确认高质量视觉重建。".into());
     }
-    import_pdf_sources(
+    if engine
+        .0
+        .vision
+        .lock()
+        .map_err(|_| "Vision config lock poisoned")?
+        .is_none()
+    {
+        return Err("视觉模型尚未配置，请先完成视觉模型配置。".into());
+    }
+    let mut result = import_pdf_sources(
         &root,
         paths.into_iter().map(PathBuf::from).collect(),
         &options,
-    )
+    )?;
+    if !result.managed_paths.is_empty() {
+        let enqueue = engine
+            .call(
+                app,
+                "library.import_paths".into(),
+                json!({"root": root, "paths": result.managed_paths}),
+            )
+            .await?;
+        result.enqueued = enqueue.get("enqueued").and_then(Value::as_u64).unwrap_or(0) as usize;
+        result.job_ids = enqueue
+            .get("jobIds")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -2327,9 +2356,9 @@ pub fn run() {
 mod tests {
     use super::{
         consume_model_stream, import_pdf_sources, model_endpoint, model_headers,
-        model_request_body, send_model_request, stream_delta, stream_reasoning_delta,
+        model_request_body, send_model_request, sha256_file, stream_delta, stream_reasoning_delta,
         validate_credential_id, Engine, ModelConfigInput, ModelMessageInput, ModelStreamInput,
-        OcrLimiter, PdfImportOptions, ProviderConfigInput,
+        OcrLimiter, PdfImportOptions, ProviderConfigInput, FILE_HASH_BUFFER_BYTES,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -2684,7 +2713,8 @@ mod tests {
     }
 
     #[test]
-    fn local_pdf_import_rejects_other_formats_and_deduplicates_content() {
+    fn visual_pdf_import_rejects_other_formats_and_deduplicates_content() {
+        assert!(FILE_HASH_BUFFER_BYTES <= 64 * 1024);
         let base = std::env::temp_dir().join(format!(
             "p2i-local-import-{}-{}",
             std::process::id(),
@@ -2714,6 +2744,7 @@ mod tests {
         assert_eq!(first.selected, 1);
         assert_eq!(first.copied, 1);
         assert_eq!(first.deduplicated, 0);
+        assert_eq!(first.managed_paths.len(), 1);
 
         let second = import_pdf_sources(
             library.to_str().expect("library string"),
@@ -2723,6 +2754,7 @@ mod tests {
         .expect("duplicate import");
         assert_eq!(second.copied, 0);
         assert_eq!(second.deduplicated, 1);
+        assert_eq!(second.managed_paths.len(), 1);
         assert!(import_pdf_sources(
             library.to_str().expect("library string"),
             vec![text],
@@ -2734,6 +2766,40 @@ mod tests {
             .expect("import options")
             .count();
         assert_eq!(option_files, 1);
+        let option_path = fs::read_dir(library.join(".p2i/import-options"))
+            .expect("import options")
+            .next()
+            .expect("option file")
+            .expect("option entry")
+            .path();
+        let option: serde_json::Value =
+            serde_json::from_slice(&fs::read(option_path).expect("read import option"))
+                .expect("valid import option");
+        assert_eq!(option["processingMode"], "vision");
         fs::remove_dir_all(&base).expect("cleanup");
+    }
+
+    #[test]
+    fn pdf_hashing_succeeds_on_a_limited_tauri_worker_stack() {
+        let path = std::env::temp_dir().join(format!(
+            "p2i-limited-stack-hash-{}-{}.pdf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::write(&path, vec![0x5a; 2 * 1024 * 1024]).expect("write test PDF");
+        let worker_path = path.clone();
+        let digest = std::thread::Builder::new()
+            .name("tauri-worker-sized-stack".into())
+            .stack_size(256 * 1024)
+            .spawn(move || sha256_file(&worker_path))
+            .expect("spawn limited-stack worker")
+            .join()
+            .expect("limited-stack worker must not overflow")
+            .expect("hash PDF");
+        assert_eq!(digest.len(), 32);
+        fs::remove_file(path).expect("cleanup");
     }
 }

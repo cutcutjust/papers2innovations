@@ -1,4 +1,4 @@
-import type { AgentProfile, AgentPromptTemplate, AgentRun, AgentToolCallRecord, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, DocumentUncertainty, FigureAnalysis, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryCollection, LibraryPaper, ModelActivityMeta, ModelStreamEvent, ModelStreamRequest, ModelToolDefinition, PaperDocument, PaperEngagement, PdfImportOptions, PdfImportPreview, PreprocessQualityReport, ProgressNotification, PromptTemplate, PromptTemplateCategory, ReaderAnalysisRecord, ReaderAnalysisType, ReaderAnnotation, ReaderChatTurn, ReaderConversation, ScopedContextItem, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
+import type { AgentProfile, AgentPromptTemplate, AgentRun, AgentToolCallRecord, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, DocumentUncertainty, FigureAnalysis, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryCollection, LibraryPaper, ModelActivityMeta, ModelStreamEvent, ModelStreamRequest, ModelToolDefinition, PaperDeleteResult, PaperDocument, PaperEngagement, PaperMetadataUpdate, PdfImportOptions, PdfImportPreview, PreprocessQualityReport, ProgressNotification, PromptTemplate, PromptTemplateCategory, ReaderAnalysisRecord, ReaderAnalysisType, ReaderAnnotation, ReaderChatTurn, ReaderConversation, ScopedContextItem, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { demoMarkdown, demoPapers } from "../demo";
@@ -32,6 +32,8 @@ export interface PdfImportResult {
   selected: number;
   copied: number;
   deduplicated: number;
+  enqueued: number;
+  jobIds: string[];
   destination: string;
 }
 
@@ -49,14 +51,13 @@ export async function previewPdfImport(root: string, paths: string[]): Promise<P
   return invoke<PdfImportPreview>("preview_pdf_import", { root, paths });
 }
 
-export async function importPdfs(root: string, paths: string[] = [], options: PdfImportOptions = { processingMode: "local", visionConfirmed: false }): Promise<PdfImportResult> {
+export async function importPdfs(root: string, paths: string[], options: PdfImportOptions = { processingMode: "vision", visionConfirmed: true }): Promise<PdfImportResult> {
   if (!nativeRuntime) {
     await new Promise((resolve) => setTimeout(resolve, 500));
-    return { selected: paths.length || 2, copied: paths.length || 2, deduplicated: 0, destination: `${root}/Papers/Manual` };
+    return { selected: paths.length, copied: paths.length, deduplicated: 0, enqueued: paths.length, jobIds: paths.map((_, index) => `demo-import-${index}`), destination: `${root}/Papers/Manual` };
   }
-  return paths.length
-    ? invoke<PdfImportResult>("import_pdf_paths", { root, paths, options })
-    : invoke<PdfImportResult>("import_pdfs", { root });
+  if (!paths.length) throw new Error("请先选择至少一篇 PDF。");
+  return invoke<PdfImportResult>("import_pdf_paths", { root, paths, options });
 }
 
 export async function listDocumentUncertainties(root: string, paperId: string): Promise<DocumentUncertainty[]> {
@@ -75,6 +76,11 @@ export async function reprocessPapers(root: string, paperIds: string[], visionCo
 export async function initializeLibrary(root: string): Promise<void> {
   if (!nativeRuntime) return;
   await rpc("library.initialize", { root });
+}
+
+export async function resumeLibraryJobs(root: string): Promise<{ resumed: number; jobIds: string[] }> {
+  if (!nativeRuntime || !root) return { resumed: 0, jobIds: [] };
+  return rpc("library.resume_jobs", { root });
 }
 
 export async function scanLibrary(root: string, requireStable = false): Promise<void> {
@@ -114,6 +120,26 @@ export async function updatePaperReading(root: string, paperId: string, state: {
     return { paperId, isFavorite: paper.isFavorite, favoritedAt: paper.favoritedAt, lastOpenedAt: now, lastReadAt: now, lastSectionId: paper.lastSectionId, lastPage: paper.lastPage, readingProgress: paper.readingProgress, updatedAt: now };
   }
   return rpc<PaperEngagement>("paper.reading_update", { root, paperId, ...state });
+}
+
+export async function updatePaperMetadata(root: string, paperId: string, input: PaperMetadataUpdate): Promise<LibraryPaper> {
+  if (!nativeRuntime) {
+    const paper = demoPapers.find((item) => item.id === paperId);
+    if (!paper) throw new Error("论文不存在");
+    Object.assign(paper, input, { updatedAt: new Date().toISOString() });
+    return { ...paper, authors: [...paper.authors], tags: [...paper.tags], collectionIds: [...paper.collectionIds] };
+  }
+  return rpc<LibraryPaper>("paper.update", { root, paperId, ...input });
+}
+
+export async function deletePaper(root: string, paperId: string): Promise<PaperDeleteResult> {
+  if (!nativeRuntime) {
+    const index = demoPapers.findIndex((item) => item.id === paperId);
+    if (index < 0) throw new Error("论文不存在");
+    demoPapers.splice(index, 1);
+    return { paperId, deleted: true, deletedManagedFiles: 1 };
+  }
+  return rpc<PaperDeleteResult>("paper.delete", { root, paperId });
 }
 
 export async function listCollections(root: string): Promise<LibraryCollection[]> {

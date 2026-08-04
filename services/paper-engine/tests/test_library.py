@@ -264,6 +264,114 @@ def test_favorites_and_reading_progress_are_persistent(tmp_path: Path) -> None:
     assert unfavorited["favoritedAt"] is None
 
 
+def test_paper_metadata_update_persists_manual_overrides(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    make_pdf(library.papers_dir / "metadata.pdf", pages=2)
+    library.scan()
+    paper = library.list_papers()[0]
+
+    updated = library.update_paper_metadata(
+        paper["id"],
+        {
+            "title": "人工修订标题",
+            "authors": ["Alice Zhang", "Bob Li"],
+            "year": 2026,
+            "venue": "ICASSP",
+            "doi": "10.1000/p2i.test",
+            "abstract": "人工核验后的摘要。",
+            "tags": ["多模态", "缺失模态", "多模态"],
+        },
+    )
+
+    assert updated["title"] == "人工修订标题"
+    assert updated["authors"] == ["Alice Zhang", "Bob Li"]
+    assert updated["year"] == 2026
+    assert updated["venue"] == "ICASSP"
+    assert updated["tags"] == ["多模态", "缺失模态"]
+    restored = Library(tmp_path).list_papers()[0]
+    assert restored["title"] == "人工修订标题"
+    assert restored["doi"] == "10.1000/p2i.test"
+
+
+def test_delete_paper_removes_only_managed_copy_and_generated_artifacts(tmp_path: Path) -> None:
+    source = tmp_path / "external-source.pdf"
+    make_pdf(source)
+    library = Library(tmp_path / "library")
+    library.initialize()
+    managed = library.papers_dir / "Manual" / source.name
+    managed.parent.mkdir(parents=True)
+    shutil.copy2(source, managed)
+    library.scan()
+    paper = library.list_papers()[0]
+    generated = library.generated_dir / paper["id"]
+    generated.mkdir(parents=True, exist_ok=True)
+    (generated / "artifact.txt").write_text("derived", encoding="utf-8")
+
+    result = library.delete_paper(paper["id"])
+
+    assert result["deleted"] is True
+    assert source.is_file()
+    assert not managed.exists()
+    assert not generated.exists()
+    assert Library(tmp_path / "library").list_papers() == []
+
+
+def test_delete_paper_refuses_library_external_paths(tmp_path: Path) -> None:
+    library = Library(tmp_path / "library")
+    library.initialize()
+    managed = library.papers_dir / "managed.pdf"
+    make_pdf(managed)
+    library.scan()
+    paper = library.list_papers()[0]
+    outside = tmp_path / "outside.pdf"
+    make_pdf(outside)
+    with library.db.connect() as connection:
+        connection.execute(
+            "UPDATE paper_files SET absolute_path = ? WHERE paper_id = ?",
+            (str(outside.resolve()), paper["id"]),
+        )
+
+    with pytest.raises(ValueError, match="论文库外"):
+        library.delete_paper(paper["id"])
+    assert outside.is_file()
+    assert Library(tmp_path / "library").list_papers()[0]["id"] == paper["id"]
+
+
+def test_delete_paper_keeps_database_consistent_when_option_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    library = Library(tmp_path / "library")
+    library.initialize()
+    managed = library.papers_dir / "managed.pdf"
+    make_pdf(managed)
+    library.scan()
+    paper = library.list_papers()[0]
+    option_file = library.internal_dir / "import-options" / "blocked.json"
+    option_file.parent.mkdir(parents=True, exist_ok=True)
+    option_file.write_text("{}", encoding="utf-8")
+    with library.db.connect() as connection:
+        connection.execute(
+            "UPDATE papers SET canonical_sha256 = ? WHERE id = ?",
+            ("blocked", paper["id"]),
+        )
+    original_unlink = Path.unlink
+
+    def fail_option_cleanup(path: Path, *args: object, **kwargs: object) -> None:
+        if path == option_file:
+            raise PermissionError("locked")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_option_cleanup)
+
+    result = library.delete_paper(paper["id"])
+
+    assert result["deleted"] is True
+    assert "导入选项稍后清理" in result["warning"]
+    assert not managed.exists()
+    assert library.list_papers() == []
+
+
 def test_agent_profiles_runs_retry_and_restart_recovery_are_persistent(tmp_path: Path) -> None:
     library = Library(tmp_path)
     library.initialize()

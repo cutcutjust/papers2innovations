@@ -2,9 +2,19 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
+from typing import Any
 
 from p2i_engine.models import JobStatus, ProgressEvent
 from p2i_engine.rpc.server import RpcServer, serve
+
+
+class RecordingExecutor:
+    def __init__(self) -> None:
+        self.submissions: list[tuple[Any, tuple[Any, ...]]] = []
+
+    def submit(self, function: Any, *args: Any) -> None:
+        self.submissions.append((function, args))
 
 
 def test_rpc_ping_returns_versioned_pong() -> None:
@@ -16,7 +26,7 @@ def test_rpc_ping_returns_versioned_pong() -> None:
     response = json.loads(output.getvalue())
     assert response["id"] == 7
     assert response["result"]["pong"] is True
-    assert response["result"]["version"] == "0.1.31"
+    assert response["result"]["version"] == "0.1.32"
 
 
 def test_rpc_accepts_windows_utf8_bom() -> None:
@@ -83,3 +93,40 @@ def test_progress_notification_uses_shared_contract_fields() -> None:
     assert params["requestId"] == 3
     assert params["jobId"] == "job-1"
     assert params["paperId"] == "paper-1"
+
+
+def test_library_import_paths_enqueues_without_blocking_and_resume_finds_job(
+    tmp_path: Path,
+) -> None:
+    server = RpcServer(io.StringIO(), io.StringIO())
+    server.executor.shutdown(wait=True)
+    executor = RecordingExecutor()
+    server.executor = executor  # type: ignore[assignment]
+    root = tmp_path / "library"
+    pdf = root / "Papers" / "Manual" / "paper.pdf"
+    pdf.parent.mkdir(parents=True)
+    pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    imported = server.dispatch(
+        {
+            "id": 11,
+            "method": "library.import_paths",
+            "params": {"root": str(root), "paths": [str(pdf)]},
+        }
+    )
+
+    assert imported["enqueued"] == 1
+    assert len(imported["jobIds"]) == 1
+    assert len(executor.submissions) == 1
+    assert executor.submissions[0][0].__name__ == "run_queued_jobs"
+
+    resumed = server.dispatch(
+        {
+            "id": 12,
+            "method": "library.resume_jobs",
+            "params": {"root": str(root)},
+        }
+    )
+
+    assert resumed == {"resumed": 1, "jobIds": imported["jobIds"]}
+    assert len(executor.submissions) == 2

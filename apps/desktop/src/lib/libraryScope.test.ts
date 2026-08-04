@@ -5,6 +5,8 @@ import { papersForLibraryScope } from "./libraryScope";
 const paper = (id: string, patch: Partial<LibraryPaper> = {}): LibraryPaper => ({
   id,
   title: id,
+  authors: [],
+  tags: [],
   sourcePath: `${id}.pdf`,
   status: "READY",
   progress: 1,

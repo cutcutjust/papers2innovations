@@ -6,7 +6,7 @@ const collections: LibraryCollection[] = [
   { id: "root", name: "研究", color: "#000000", sortOrder: 0, paperCount: 0, createdAt: "", updatedAt: "" },
   { id: "child", name: "多模态", parentId: "root", color: "#000000", sortOrder: 0, paperCount: 1, createdAt: "", updatedAt: "" },
 ];
-const paper = (id: string, collectionIds: string[]): LibraryPaper => ({ id, title: id, sourcePath: `${id}.pdf`, status: "READY", progress: 1, pageCount: 1, figures: [], createdAt: "", updatedAt: "", collectionIds, isFavorite: false, readingProgress: 0 });
+const paper = (id: string, collectionIds: string[]): LibraryPaper => ({ id, title: id, authors: [], tags: [], sourcePath: `${id}.pdf`, status: "READY", progress: 1, pageCount: 1, figures: [], createdAt: "", updatedAt: "", collectionIds, isFavorite: false, readingProgress: 0 });
 const papers = [paper("nested", ["child"]), paper("loose", [])];
 
 describe("collection tree", () => {

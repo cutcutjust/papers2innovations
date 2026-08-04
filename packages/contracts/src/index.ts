@@ -203,7 +203,7 @@ export interface PdfImportPreview {
 }
 
 export interface PdfImportOptions {
-  processingMode: "vision" | "local";
+  processingMode: "vision";
   visionConfirmed: boolean;
 }
 
@@ -824,6 +824,12 @@ export interface CitationGraphResult {
 export interface LibraryPaper {
   id: string;
   title: string;
+  authors: string[];
+  year?: number;
+  venue?: string;
+  doi?: string;
+  abstract?: string;
+  tags: string[];
   sourcePath: string;
   status: JobStatus;
   progress: number;
@@ -842,6 +848,23 @@ export interface LibraryPaper {
   lastSectionId?: string;
   lastPage?: number;
   readingProgress: number;
+}
+
+export interface PaperMetadataUpdate {
+  title: string;
+  authors: string[];
+  year?: number;
+  venue?: string;
+  doi?: string;
+  abstract?: string;
+  tags: string[];
+}
+
+export interface PaperDeleteResult {
+  paperId: string;
+  deleted: boolean;
+  deletedManagedFiles: number;
+  warning?: string;
 }
 
 export interface PaperEngagement {

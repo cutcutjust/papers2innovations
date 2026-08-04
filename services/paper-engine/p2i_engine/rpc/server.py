@@ -90,22 +90,36 @@ class RpcServer:
             return {"pong": True, "version": __version__}
         if method == "library.initialize":
             library = self.library(params["root"])
-            result = library.initialize(resume_recovered=False)
-            recovered_job_ids = library.take_recovered_job_ids()
-            if recovered_job_ids:
+            return library.initialize(resume_recovered=False)
+        if method == "library.resume_jobs":
+            library = self.library(params["root"])
+            job_ids = library.pending_job_ids()
+            if job_ids:
                 self.executor.submit(
                     library.run_queued_jobs,
-                    recovered_job_ids,
+                    job_ids,
                     self.notify_progress,
                     request_id,
                 )
-            return result
+            return {"resumed": len(job_ids), "jobIds": job_ids}
         if method == "library.scan":
             return self.library(params["root"]).scan(
                 self.notify_progress,
                 request_id,
                 bool(params.get("requireStable", False)),
             )
+        if method == "library.import_paths":
+            library = self.library(params["root"])
+            result = library.enqueue_paths(params.get("paths", []))
+            job_ids = result.get("jobIds", [])
+            if job_ids:
+                self.executor.submit(
+                    library.run_queued_jobs,
+                    job_ids,
+                    self.notify_progress,
+                    request_id,
+                )
+            return result
         if method == "library.list":
             return self.library(params["root"]).list_papers()
         if method == "paper.favorite_set":
@@ -116,6 +130,12 @@ class RpcServer:
             return self.library(params["root"]).update_paper_reading(
                 params["paperId"], params
             )
+        if method == "paper.update":
+            return self.library(params["root"]).update_paper_metadata(
+                params["paperId"], params
+            )
+        if method == "paper.delete":
+            return self.library(params["root"]).delete_paper(params["paperId"])
         if method == "collection.list":
             return self.library(params["root"]).list_collections()
         if method == "collection.create":

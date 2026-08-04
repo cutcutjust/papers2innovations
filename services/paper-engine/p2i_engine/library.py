@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import sqlite3
 import time
 import uuid
@@ -604,17 +605,19 @@ class Library:
         revision_id = str(uuid.uuid4())
         started = utc_now()
         import_options_path = self.internal_dir / "import-options" / f"{sha256}.json"
-        processing_mode = "vision"
+        # Files created before the visual import pipeline have no option file;
+        # keep those historical records readable without exposing a new local-import path.
+        processing_mode = "legacy-local"
         if import_options_path.is_file():
             try:
                 processing_mode = str(json.loads(import_options_path.read_text(encoding="utf-8")).get("processingMode") or "vision")
             except (OSError, json.JSONDecodeError):
-                processing_mode = "vision"
+                processing_mode = "legacy-local"
         vision_model_id: str | None = None
         if processing_mode == "vision":
             try:
                 vision_model_id = str((self.vision_config() if self.vision_config else {}).get("modelId") or "") or None
-            except Exception:  # A missing visual model falls back to local parsing without losing the PDF.
+            except Exception:
                 vision_model_id = None
         output_dir = self.generated_dir / paper_id / "revisions" / revision_id
         with self.db.connect() as connection:
@@ -630,9 +633,11 @@ class Library:
             connection.execute(
                 "INSERT INTO document_revisions(id, paper_id, source_hash, pipeline_version, processing_mode, "
                 "status, previous_revision_id, created_at) VALUES (?, ?, ?, 'visual-document-v1', ?, 'running', ?, ?)",
-                (revision_id, paper_id, sha256, "vision" if vision_model_id else "local", previous["id"] if previous else None, started),
+                (revision_id, paper_id, sha256, "vision" if processing_mode == "vision" else "local", previous["id"] if previous else None, started),
             )
         try:
+            if processing_mode == "vision" and not vision_model_id:
+                raise RuntimeError("视觉模型未就绪，PDF 已保留；请配置视觉模型后重试解析。")
             self._progress(callback, job_id, paper_id, JobStatus.HASHING, 0.12, "SHA-256 verified", request_id)
             self._progress(callback, job_id, paper_id, JobStatus.QUEUED, 0.2, "Parse job queued", request_id)
             self._progress(callback, job_id, paper_id, JobStatus.RENDERING, 0.26, "Rendering PDF pages at 200 DPI", request_id)
@@ -820,16 +825,41 @@ class Library:
                         "alignment_confidence, ocr_cache_key, bbox_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         page_rows,
                     )
+                existing_metadata_row = connection.execute(
+                    "SELECT metadata_json FROM papers WHERE id = ?", (paper_id,)
+                ).fetchone()
+                try:
+                    existing_metadata = json.loads(
+                        existing_metadata_row["metadata_json"] if existing_metadata_row else "{}"
+                    )
+                except (TypeError, json.JSONDecodeError):
+                    existing_metadata = {}
+                manual_overrides = (
+                    existing_metadata.get("manualOverrides", {})
+                    if isinstance(existing_metadata, dict)
+                    else {}
+                )
+                if not isinstance(manual_overrides, dict):
+                    manual_overrides = {}
+                try:
+                    parsed_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                except (OSError, TypeError, json.JSONDecodeError):
+                    parsed_metadata = {}
+                if not isinstance(parsed_metadata, dict):
+                    parsed_metadata = {}
+                if manual_overrides:
+                    parsed_metadata["manualOverrides"] = manual_overrides
+                display_title = str(manual_overrides.get("title") or result.document.title)
                 connection.execute(
                     "UPDATE papers SET title = ?, status = ?, page_count = ?, markdown_path = ?, "
                     "document_path = ?, metadata_json = ?, updated_at = ? WHERE id = ?",
                     (
-                        result.document.title,
+                        display_title,
                         final_status.value,
                         result.document.page_count,
                         str(markdown_path),
                         str(document_path),
-                        metadata_path.read_text(encoding="utf-8"),
+                        json.dumps(parsed_metadata, ensure_ascii=False),
                         now,
                         paper_id,
                     ),
@@ -1134,6 +1164,18 @@ class Library:
                 completed += 1
         return {"completed": completed, "skipped": skipped}
 
+    def pending_job_ids(self) -> list[str]:
+        self.initialize()
+        with self.db.connect() as connection:
+            return [
+                row["id"]
+                for row in connection.execute(
+                    "SELECT id FROM jobs WHERE finished_at IS NULL AND status IN (?, ?) "
+                    "ORDER BY created_at",
+                    (JobStatus.DISCOVERED.value, JobStatus.QUEUED.value),
+                )
+            ]
+
     def list_papers(self) -> list[dict]:
         self.initialize()
         with self.db.connect() as connection:
@@ -1149,6 +1191,21 @@ class Library:
             ).fetchall()
             papers = []
             for row in rows:
+                try:
+                    metadata = json.loads(row["metadata_json"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                manual = metadata.get("manualOverrides")
+                if not isinstance(manual, dict):
+                    manual = {}
+                authors = manual.get("authors", metadata.get("authors", []))
+                if not isinstance(authors, list):
+                    authors = []
+                tags = manual.get("tags", metadata.get("tags", []))
+                if not isinstance(tags, list):
+                    tags = []
                 collection_ids = [
                     item["collection_id"]
                     for item in connection.execute(
@@ -1167,6 +1224,12 @@ class Library:
                     {
                         "id": row["id"],
                         "title": row["title"],
+                        "authors": [str(value) for value in authors if str(value).strip()],
+                        "year": manual.get("year", metadata.get("year")),
+                        "venue": manual.get("venue", metadata.get("venue")),
+                        "doi": manual.get("doi", metadata.get("doi")),
+                        "abstract": manual.get("abstract", metadata.get("abstract")),
+                        "tags": [str(value) for value in tags if str(value).strip()],
                         "sourcePath": row["source_path"],
                         "status": row["status"],
                         "progress": row["progress"],
@@ -1199,6 +1262,145 @@ class Library:
                     }
                 )
             return papers
+
+    def update_paper_metadata(self, paper_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        title = " ".join(str(payload.get("title") or "").split())
+        if not title:
+            raise ValueError("论文标题不能为空")
+        if len(title) > 500:
+            raise ValueError("论文标题不能超过 500 个字符")
+
+        authors_value = payload.get("authors", [])
+        if not isinstance(authors_value, list):
+            raise ValueError("作者必须是字符串数组")
+        authors = [" ".join(str(value).split()) for value in authors_value]
+        authors = [value for value in authors if value][:100]
+        tags_value = payload.get("tags", [])
+        if not isinstance(tags_value, list):
+            raise ValueError("标签必须是字符串数组")
+        tags = list(dict.fromkeys(" ".join(str(value).split()) for value in tags_value if str(value).strip()))[:50]
+
+        year_value = payload.get("year")
+        year = None if year_value in (None, "") else int(year_value)
+        if year is not None and not 1000 <= year <= 2100:
+            raise ValueError("年份必须在 1000 到 2100 之间")
+
+        def limited_text(name: str, limit: int) -> str | None:
+            value = str(payload.get(name) or "").strip()
+            if len(value) > limit:
+                raise ValueError(f"{name} 不能超过 {limit} 个字符")
+            return value or None
+
+        manual = {
+            "title": title,
+            "authors": authors,
+            "year": year,
+            "venue": limited_text("venue", 500),
+            "doi": limited_text("doi", 300),
+            "abstract": limited_text("abstract", 20_000),
+            "tags": tags,
+        }
+        now = utc_now()
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT metadata_json FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone()
+            if not row:
+                raise KeyError(f"Unknown paper: {paper_id}")
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata["manualOverrides"] = manual
+            connection.execute(
+                "UPDATE papers SET title = ?, metadata_json = ?, updated_at = ? WHERE id = ?",
+                (title, json.dumps(metadata, ensure_ascii=False), now, paper_id),
+            )
+        return next(paper for paper in self.list_papers() if paper["id"] == paper_id)
+
+    def delete_paper(self, paper_id: str) -> dict[str, Any]:
+        self.initialize()
+        if not self._queue_lock.acquire(blocking=False):
+            raise RuntimeError("解析任务正在运行，请先在任务活动中取消任务，完成后再删除论文。")
+        moved: list[tuple[Path, Path]] = []
+        trash_root = self.internal_dir / "trash" / f"paper-{paper_id}-{uuid.uuid4().hex}"
+        try:
+            with self.db.connect() as connection:
+                paper = connection.execute(
+                    "SELECT id, canonical_sha256 FROM papers WHERE id = ?", (paper_id,)
+                ).fetchone()
+                if not paper:
+                    raise KeyError(f"Unknown paper: {paper_id}")
+                active = connection.execute(
+                    "SELECT COUNT(*) AS count FROM jobs WHERE paper_id = ? AND finished_at IS NULL "
+                    "AND status NOT IN (?, ?, ?, ?)",
+                    (
+                        paper_id,
+                        JobStatus.READY.value,
+                        JobStatus.PARTIAL.value,
+                        JobStatus.FAILED.value,
+                        JobStatus.CANCELLED.value,
+                    ),
+                ).fetchone()["count"]
+                if active:
+                    raise RuntimeError("论文仍在解析，请先取消任务并等待状态停止后再删除。")
+                file_rows = connection.execute(
+                    "SELECT absolute_path FROM paper_files WHERE paper_id = ?", (paper_id,)
+                ).fetchall()
+
+            for row in file_rows:
+                source = Path(row["absolute_path"]).resolve(strict=False)
+                try:
+                    relative = source.relative_to(self.papers_dir)
+                except ValueError as error:
+                    raise ValueError(f"拒绝删除论文库外文件: {source}") from error
+                if source.exists():
+                    target = trash_root / "Papers" / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    source.replace(target)
+                    moved.append((source, target))
+
+            generated = self.generated_dir / paper_id
+            if generated.exists():
+                generated_target = trash_root / "generated"
+                generated_target.parent.mkdir(parents=True, exist_ok=True)
+                generated.replace(generated_target)
+                moved.append((generated, generated_target))
+
+            with self.db.connect() as connection:
+                deleted = connection.execute(
+                    "DELETE FROM papers WHERE id = ?", (paper_id,)
+                ).rowcount
+            if not deleted:
+                raise KeyError(f"Unknown paper: {paper_id}")
+
+            cleanup_warnings: list[str] = []
+            option_file = self.internal_dir / "import-options" / f"{paper['canonical_sha256']}.json"
+            try:
+                option_file.unlink(missing_ok=True)
+            except OSError as error:
+                cleanup_warnings.append(f"导入选项稍后清理: {error}")
+            try:
+                shutil.rmtree(trash_root, ignore_errors=False)
+            except OSError as error:
+                cleanup_warnings.append(f"内部回收区稍后清理: {error}")
+            return {
+                "paperId": paper_id,
+                "deleted": True,
+                "deletedManagedFiles": len(file_rows),
+                "warning": "；".join(cleanup_warnings) or None,
+            }
+        except Exception:
+            for source, target in reversed(moved):
+                if target.exists() and not source.exists():
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    target.replace(source)
+            raise
+        finally:
+            self._queue_lock.release()
 
     @staticmethod
     def _paper_engagement_contract(row: sqlite3.Row) -> dict[str, Any]:

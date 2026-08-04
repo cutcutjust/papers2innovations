@@ -4,6 +4,10 @@ export const demoPapers: LibraryPaper[] = [
   {
     id: "demo-graph-reasoning",
     title: "Evidence-Grounded Graph Reasoning for Scientific Discovery",
+    authors: ["Lin Zhang", "Maya Chen"],
+    year: 2026,
+    venue: "Research Systems",
+    tags: ["证据推理", "知识图谱"],
     sourcePath: "D:/Research/Papers/Graph-Reasoning/evidence-grounded.pdf",
     status: "READY",
     progress: 1,
@@ -33,6 +37,10 @@ export const demoPapers: LibraryPaper[] = [
   {
     id: "demo-multimodal",
     title: "A Structured Benchmark for Multimodal Research Agents",
+    authors: ["Kai Wang", "Rui Li"],
+    year: 2026,
+    venue: "Multimodal AI Workshop",
+    tags: ["多模态", "智能体"],
     sourcePath: "D:/Research/Papers/Agents/multimodal-benchmark.pdf",
     status: "PARSING_LAYOUT",
     progress: 0.46,
@@ -47,6 +55,9 @@ export const demoPapers: LibraryPaper[] = [
   {
     id: "demo-failed",
     title: "Robust Table Extraction from Scanned Documents",
+    authors: ["Alex Kim"],
+    year: 2025,
+    tags: ["文档智能", "表格识别"],
     sourcePath: "D:/Research/Papers/Document-AI/scanned-tables.pdf",
     status: "FAILED",
     progress: 1,

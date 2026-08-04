@@ -21,7 +21,7 @@ import { CitationGraph } from "./components/CitationGraph";
 import { ModelActivityCenter } from "./components/ModelActivityCenter";
 import { PaperImportDialog } from "./components/PaperImportDialog";
 import { FirstRunOnboarding } from "./components/FirstRunOnboarding";
-import { chooseLibrary, initializeLibrary, listCollections, listJobs, listPapers, nativeRuntime, onEngineProgress, scanLibrary, setPaperFavorite, startLibraryWatcher } from "./lib/bridge";
+import { chooseLibrary, initializeLibrary, listCollections, listJobs, listPapers, nativeRuntime, onEngineProgress, resumeLibraryJobs, scanLibrary, setPaperFavorite, startLibraryWatcher } from "./lib/bridge";
 import { clearVisionProvider, configureVisionProvider, hydrateOcrCredential, hydrateProviderCredentials, loadWorkspaceSettingsSnapshot, saveWorkspaceSettingsSnapshot } from "./lib/credentials";
 import { filterPapersByCollection } from "./lib/collectionTree";
 import { papersForLibraryScope } from "./lib/libraryScope";
@@ -180,8 +180,9 @@ export function App() {
     }
     void hydrateProviderCredentials([provider])
       .then(() => configureVisionProvider(provider, model))
+      .then(() => root ? resumeLibraryJobs(root) : undefined)
       .catch(() => undefined);
-  }, [settingsRecovered, workspace.visionAnalysisModelId, workspace.customModels, workspace.providers]);
+  }, [root, settingsRecovered, workspace.visionAnalysisModelId, workspace.customModels, workspace.providers]);
 
   useEffect(() => {
     let cleanup: () => void = () => {};
@@ -298,7 +299,7 @@ export function App() {
   ) : papersQuery.isError ? (
     <LibraryStartup error={new Error(papersQuery.error instanceof Error ? papersQuery.error.message : String(papersQuery.error ?? "无法打开本地索引"))} onRetry={() => void papersQuery.refetch()} />
   ) : (
-    <LibraryWorkspace papers={papers} allPapers={allPapers} collections={collectionsQuery.data ?? []} selected={papers.find((paper) => paper.id === workspace.selectedPaperId) ?? papers[0]} scope={workspace.libraryScope} favoriteBusyId={favoriteMutation.isPending ? favoriteMutation.variables?.paperId : undefined} scanning={scanMutation.isPending} onScan={() => scanMutation.mutate()} onChooseLibrary={choose} onToggleFavorite={(paper) => favoriteMutation.mutate({ paperId: paper.id, favorite: !paper.isFavorite })} onShowAll={() => { workspace.setLibraryScope("all"); workspace.setSelectedCollectionId(undefined); }} />
+    <LibraryWorkspace root={root} papers={papers} allPapers={allPapers} collections={collectionsQuery.data ?? []} selected={papers.find((paper) => paper.id === workspace.selectedPaperId) ?? papers[0]} scope={workspace.libraryScope} favoriteBusyId={favoriteMutation.isPending ? favoriteMutation.variables?.paperId : undefined} scanning={scanMutation.isPending} onScan={() => scanMutation.mutate()} onChooseLibrary={choose} onToggleFavorite={(paper) => favoriteMutation.mutate({ paperId: paper.id, favorite: !paper.isFavorite })} onShowAll={() => { workspace.setLibraryScope("all"); workspace.setSelectedCollectionId(undefined); }} />
   );
 
   const forceOnboardingPreview = !nativeRuntime && new URLSearchParams(window.location.search).has("onboarding");
@@ -324,8 +325,8 @@ export function App() {
         pendingPaths={workspace.pendingImportPaths}
         onClose={workspace.closePaperImport}
         onImported={() => {
-          scanMutation.mutate();
-          window.setTimeout(() => void queryClient.invalidateQueries({ queryKey: ["papers", root] }), 1_000);
+          void queryClient.invalidateQueries({ queryKey: ["papers", root] });
+          void queryClient.invalidateQueries({ queryKey: ["jobs", root] });
         }}
         onOpenZotero={() => workspace.setView("import")}
         onOpenActivity={() => workspace.setView("jobs")}
