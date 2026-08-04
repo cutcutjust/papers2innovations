@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent,
 import { createCollection, deleteCollection, movePaperToCollection, updateCollection } from "../lib/bridge";
 import { buildCollectionTree, collectionScopeIds, type CollectionTreeNode } from "../lib/collectionTree";
 import { finishCollectionDrag, readCollectionDrag, startPointerCollectionDrag, subscribeCollectionDrag, subscribeCollectionDrop, type CollectionDragPayload } from "../lib/collectionDrag";
-import { useWorkspace } from "../store";
+import { useWorkspace, type LibraryScope } from "../store";
 
 const colors = ["#4f6bed", "#3984d8", "#28a06a", "#7357d8", "#d64545", "#d98916"];
 type EditorState = { mode: "create" | "rename"; parentId?: string; collection?: LibraryCollection; name: string; color: string };
@@ -19,7 +19,7 @@ const clampSidebarWidth = (width: number) => Math.min(MAX_SIDEBAR_WIDTH, Math.ma
 
 export function Sidebar({ root, papers, collections }: { root: string; papers: LibraryPaper[]; collections: LibraryCollection[] }) {
   const queryClient = useQueryClient();
-  const { view, setView, statusFilter, setStatusFilter, selectedCollectionId, setSelectedCollectionId, selectedPaperId, selectPaper, openReader } = useWorkspace();
+  const { view, setView, libraryScope, setLibraryScope, statusFilter, setStatusFilter, selectedCollectionId, setSelectedCollectionId, selectedPaperId, selectPaper, openReader } = useWorkspace();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const initialExpansionApplied = useRef(false);
   const [editor, setEditor] = useState<EditorState | null>(null);
@@ -43,6 +43,8 @@ export function Sidebar({ root, papers, collections }: { root: string; papers: L
     return map;
   }, [papers]);
   const uncategorizedCount = papers.filter((paper) => paper.collectionIds.length === 0).length;
+  const favoriteCount = papers.filter((paper) => paper.isFavorite).length;
+  const readingCount = papers.filter((paper) => paper.lastReadAt).length;
 
   useEffect(() => {
     if (initialExpansionApplied.current || !collections.length) return;
@@ -92,8 +94,9 @@ export function Sidebar({ root, papers, collections }: { root: string; papers: L
       setBusy("");
     }
   };
-  const goLibrary = (filter: "all" | "ready", collectionId?: string) => {
-    setStatusFilter(filter);
+  const goLibrary = (scope: LibraryScope = "all", collectionId?: string) => {
+    setLibraryScope(scope);
+    setStatusFilter("all");
     setSelectedCollectionId(collectionId);
     setView("library");
   };
@@ -200,11 +203,10 @@ export function Sidebar({ root, papers, collections }: { root: string; papers: L
   return <aside className={`research-sidebar ${collapsed ? "collapsed" : ""}`} style={{ width: renderedWidth, flexBasis: renderedWidth }}>
     <div className="sidebar-panel-controls"><button title={collapsed ? "展开左侧栏" : "收起左侧栏"} onClick={() => setCollapsed((value) => !value)}>{collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}<span>{collapsed ? "" : "导航"}</span></button></div>
     <div className="sidebar-scroll">
-      <button className={`research-nav-item ${view === "library" && statusFilter === "all" && !selectedCollectionId ? "active" : ""}`} onClick={() => goLibrary("all")}><BookOpen size={14} /><span>全部论文</span><b>{papers.length}</b></button>
-      <button className="research-nav-item" onClick={() => goLibrary("ready")}><Star size={14} /><span>已收藏</span><b>{Math.min(4, papers.length)}</b></button>
-      <button className="research-nav-item" onClick={() => goLibrary("all")}><Clock3 size={14} /><span>最近添加</span></button>
-      <button className={`research-nav-item ${view === "reader" ? "active" : ""}`} onClick={() => setView("reader")}><BookOpen size={14} /><span>正在阅读</span><b>{papers.length ? 1 : 0}</b></button>
-      <button className="research-nav-item" onClick={() => goLibrary("all")}><Inbox size={14} /><span>收件箱 / 未读</span></button>
+      <button aria-label={`全部论文，${papers.length} 篇`} title="全部论文" className={`research-nav-item ${view === "library" && libraryScope === "all" && statusFilter === "all" && !selectedCollectionId ? "active" : ""}`} onClick={() => goLibrary("all")}><BookOpen size={14} /><span>全部论文</span><b>{papers.length}</b></button>
+      <button aria-label={`已收藏，${favoriteCount} 篇`} title="已收藏" className={`research-nav-item ${view === "library" && libraryScope === "favorites" ? "active" : ""}`} onClick={() => goLibrary("favorites")}><Star size={14} /><span>已收藏</span><b>{favoriteCount}</b></button>
+      <button aria-label="最近添加" title="最近添加" className={`research-nav-item ${view === "library" && libraryScope === "recent" ? "active" : ""}`} onClick={() => goLibrary("recent")}><Clock3 size={14} /><span>最近添加</span></button>
+      <button aria-label={`正在阅读，${readingCount} 篇`} title="正在阅读" className={`research-nav-item ${view === "library" && libraryScope === "reading" ? "active" : ""}`} onClick={() => goLibrary("reading")}><BookOpenText size={14} /><span>正在阅读</span><b>{readingCount}</b></button>
 
       <div className="sidebar-divider" />
       <div data-collection-drop-id="__root__" className={`sidebar-section-title collection-root-drop ${dropTarget === "__root__" ? "drop-target" : ""}`} onDragOver={(event) => allowDrop(event, "__root__")} onDragLeave={() => setDropTarget("")} onDrop={(event) => dropItem(event)} title="把文件夹拖到这里可移到分类根目录"><span>分类</span><button title="新建分类" onClick={() => openCreate()}><Plus size={12} /></button></div>

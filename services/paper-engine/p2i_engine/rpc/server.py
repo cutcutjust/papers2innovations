@@ -108,6 +108,14 @@ class RpcServer:
             )
         if method == "library.list":
             return self.library(params["root"]).list_papers()
+        if method == "paper.favorite_set":
+            return self.library(params["root"]).set_paper_favorite(
+                params["paperId"], bool(params.get("favorite", False))
+            )
+        if method == "paper.reading_update":
+            return self.library(params["root"]).update_paper_reading(
+                params["paperId"], params
+            )
         if method == "collection.list":
             return self.library(params["root"]).list_collections()
         if method == "collection.create":

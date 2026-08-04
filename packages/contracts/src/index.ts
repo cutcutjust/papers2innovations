@@ -831,9 +831,29 @@ export interface LibraryPaper {
   markdownPath?: string;
   documentPath?: string;
   figures: LibraryFigure[];
+  createdAt: string;
   updatedAt: string;
   error?: string;
   collectionIds: string[];
+  isFavorite: boolean;
+  favoritedAt?: string;
+  lastOpenedAt?: string;
+  lastReadAt?: string;
+  lastSectionId?: string;
+  lastPage?: number;
+  readingProgress: number;
+}
+
+export interface PaperEngagement {
+  paperId: string;
+  isFavorite: boolean;
+  favoritedAt?: string;
+  lastOpenedAt?: string;
+  lastReadAt?: string;
+  lastSectionId?: string;
+  lastPage?: number;
+  readingProgress: number;
+  updatedAt: string;
 }
 
 export interface LibraryCollection {

@@ -1139,10 +1139,12 @@ class Library:
         with self.db.connect() as connection:
             rows = connection.execute(
                 "SELECT p.*, COALESCE(j.progress, CASE WHEN p.status = 'READY' THEN 1 ELSE 0 END) AS progress, "
-                "j.error, pf.absolute_path AS source_path "
+                "j.error, pf.absolute_path AS source_path, pe.is_favorite, pe.favorited_at, "
+                "pe.last_opened_at, pe.last_read_at, pe.last_section_id, pe.last_page, pe.reading_progress "
                 "FROM papers p "
                 "LEFT JOIN jobs j ON j.id = (SELECT id FROM jobs WHERE paper_id = p.id ORDER BY created_at DESC LIMIT 1) "
                 "LEFT JOIN paper_files pf ON pf.id = (SELECT id FROM paper_files WHERE paper_id = p.id ORDER BY is_missing, created_at LIMIT 1) "
+                "LEFT JOIN paper_engagement pe ON pe.paper_id = p.id "
                 "ORDER BY p.updated_at DESC"
             ).fetchall()
             papers = []
@@ -1183,12 +1185,104 @@ class Library:
                             }
                             for figure in figures
                         ],
+                        "createdAt": row["created_at"],
                         "updatedAt": row["updated_at"],
                         "error": row["error"],
                         "collectionIds": collection_ids,
+                        "isFavorite": bool(row["is_favorite"]),
+                        "favoritedAt": row["favorited_at"],
+                        "lastOpenedAt": row["last_opened_at"],
+                        "lastReadAt": row["last_read_at"],
+                        "lastSectionId": row["last_section_id"],
+                        "lastPage": row["last_page"],
+                        "readingProgress": row["reading_progress"] or 0,
                     }
                 )
             return papers
+
+    @staticmethod
+    def _paper_engagement_contract(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "paperId": row["paper_id"],
+            "isFavorite": bool(row["is_favorite"]),
+            "favoritedAt": row["favorited_at"],
+            "lastOpenedAt": row["last_opened_at"],
+            "lastReadAt": row["last_read_at"],
+            "lastSectionId": row["last_section_id"],
+            "lastPage": row["last_page"],
+            "readingProgress": row["reading_progress"],
+            "updatedAt": row["updated_at"],
+        }
+
+    def set_paper_favorite(self, paper_id: str, favorite: bool) -> dict[str, Any]:
+        self.initialize()
+        now = utc_now()
+        with self.db.connect() as connection:
+            if not connection.execute("SELECT 1 FROM papers WHERE id = ?", (paper_id,)).fetchone():
+                raise KeyError(f"Unknown paper: {paper_id}")
+            current = connection.execute(
+                "SELECT * FROM paper_engagement WHERE paper_id = ?", (paper_id,)
+            ).fetchone()
+            favorited_at = (
+                now if favorite and (not current or not current["is_favorite"])
+                else current["favorited_at"] if current and favorite
+                else None
+            )
+            connection.execute(
+                "INSERT INTO paper_engagement(paper_id, is_favorite, favorited_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(paper_id) DO UPDATE SET "
+                "is_favorite = excluded.is_favorite, favorited_at = excluded.favorited_at, updated_at = excluded.updated_at",
+                (paper_id, int(favorite), favorited_at, now, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM paper_engagement WHERE paper_id = ?", (paper_id,)
+            ).fetchone()
+        return self._paper_engagement_contract(row)
+
+    def update_paper_reading(self, paper_id: str, state: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        progress_value = state.get("progress")
+        if progress_value is not None:
+            progress_value = float(progress_value)
+            if not 0 <= progress_value <= 1:
+                raise ValueError("Reading progress must be between 0 and 1")
+        page_value = state.get("lastPage")
+        if page_value is not None:
+            page_value = int(page_value)
+            if page_value < 1:
+                raise ValueError("Last page must be at least 1")
+        section_value = str(state.get("lastSectionId") or "").strip() or None
+        now = utc_now()
+        with self.db.connect() as connection:
+            if not connection.execute("SELECT 1 FROM papers WHERE id = ?", (paper_id,)).fetchone():
+                raise KeyError(f"Unknown paper: {paper_id}")
+            current = connection.execute(
+                "SELECT * FROM paper_engagement WHERE paper_id = ?", (paper_id,)
+            ).fetchone()
+            connection.execute(
+                "INSERT INTO paper_engagement(paper_id, is_favorite, favorited_at, last_opened_at, last_read_at, "
+                "last_section_id, last_page, reading_progress, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(paper_id) DO UPDATE SET "
+                "last_opened_at = excluded.last_opened_at, last_read_at = excluded.last_read_at, "
+                "last_section_id = excluded.last_section_id, last_page = excluded.last_page, "
+                "reading_progress = excluded.reading_progress, updated_at = excluded.updated_at",
+                (
+                    paper_id,
+                    current["is_favorite"] if current else 0,
+                    current["favorited_at"] if current else None,
+                    now,
+                    now,
+                    section_value or (current["last_section_id"] if current else None),
+                    page_value if page_value is not None else (current["last_page"] if current else None),
+                    progress_value if progress_value is not None else (current["reading_progress"] if current else 0),
+                    current["created_at"] if current else now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM paper_engagement WHERE paper_id = ?", (paper_id,)
+            ).fetchone()
+        return self._paper_engagement_contract(row)
 
     @staticmethod
     def _validate_collection_name(name: Any) -> str:

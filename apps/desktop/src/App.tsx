@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { LibraryPaper } from "@p2i/contracts";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { documentDir, join } from "@tauri-apps/api/path";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -20,9 +21,10 @@ import { CitationGraph } from "./components/CitationGraph";
 import { ModelActivityCenter } from "./components/ModelActivityCenter";
 import { PaperImportDialog } from "./components/PaperImportDialog";
 import { FirstRunOnboarding } from "./components/FirstRunOnboarding";
-import { chooseLibrary, initializeLibrary, listCollections, listJobs, listPapers, nativeRuntime, onEngineProgress, scanLibrary, startLibraryWatcher } from "./lib/bridge";
+import { chooseLibrary, initializeLibrary, listCollections, listJobs, listPapers, nativeRuntime, onEngineProgress, scanLibrary, setPaperFavorite, startLibraryWatcher } from "./lib/bridge";
 import { clearVisionProvider, configureVisionProvider, hydrateOcrCredential, hydrateProviderCredentials, loadWorkspaceSettingsSnapshot, saveWorkspaceSettingsSnapshot } from "./lib/credentials";
 import { filterPapersByCollection } from "./lib/collectionTree";
+import { papersForLibraryScope } from "./lib/libraryScope";
 import { isPlaceholderProvider } from "./lib/providerConfig";
 import { CURRENT_ONBOARDING_VERSION, hasPersistedWorkspaceSettings, useWorkspace } from "./store";
 
@@ -50,6 +52,23 @@ export function App() {
   const scanMutation = useMutation({
     mutationFn: () => scanLibrary(root),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["papers", root] }),
+  });
+  const favoriteMutation = useMutation({
+    mutationFn: ({ paperId, favorite }: { paperId: string; favorite: boolean }) => setPaperFavorite(root, paperId, favorite),
+    onMutate: async ({ paperId, favorite }) => {
+      await queryClient.cancelQueries({ queryKey: ["papers", root] });
+      const previous = queryClient.getQueryData<LibraryPaper[]>(["papers", root]);
+      queryClient.setQueryData<LibraryPaper[]>(["papers", root], (current = []) => current.map((paper) => paper.id === paperId ? {
+        ...paper,
+        isFavorite: favorite,
+        favoritedAt: favorite ? new Date().toISOString() : undefined,
+      } : paper));
+      return { previous };
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previous) queryClient.setQueryData(["papers", root], context.previous);
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["papers", root] }),
   });
   const collectionsQuery = useQuery({
     queryKey: ["collections", root],
@@ -218,14 +237,14 @@ export function App() {
     const all = papersQuery.data ?? [];
     const text = workspace.query.trim().toLowerCase();
     const scoped = filterPapersByCollection(all, collectionsQuery.data ?? [], workspace.selectedCollectionId);
-    return scoped.filter((paper) => {
+    return papersForLibraryScope(scoped, workspace.libraryScope).filter((paper) => {
       if (text && !`${paper.title} ${paper.sourcePath}`.toLowerCase().includes(text)) return false;
       if (workspace.statusFilter === "ready") return paper.status === "READY";
       if (workspace.statusFilter === "issues") return ["FAILED", "MISSING", "CANCELLED"].includes(paper.status);
       if (workspace.statusFilter === "processing") return !["READY", "FAILED", "MISSING", "CANCELLED"].includes(paper.status);
       return true;
     });
-  }, [collectionsQuery.data, papersQuery.data, workspace.query, workspace.selectedCollectionId, workspace.statusFilter]);
+  }, [collectionsQuery.data, papersQuery.data, workspace.libraryScope, workspace.query, workspace.selectedCollectionId, workspace.statusFilter]);
 
   const allPapers = papersQuery.data ?? [];
 
@@ -279,7 +298,7 @@ export function App() {
   ) : papersQuery.isError ? (
     <LibraryStartup error={new Error(papersQuery.error instanceof Error ? papersQuery.error.message : String(papersQuery.error ?? "无法打开本地索引"))} onRetry={() => void papersQuery.refetch()} />
   ) : (
-    <LibraryWorkspace papers={papers} allPapers={allPapers} collections={collectionsQuery.data ?? []} selected={papers.find((paper) => paper.id === workspace.selectedPaperId) ?? papers[0]} scanning={scanMutation.isPending} onScan={() => scanMutation.mutate()} onChooseLibrary={choose} />
+    <LibraryWorkspace papers={papers} allPapers={allPapers} collections={collectionsQuery.data ?? []} selected={papers.find((paper) => paper.id === workspace.selectedPaperId) ?? papers[0]} scope={workspace.libraryScope} favoriteBusyId={favoriteMutation.isPending ? favoriteMutation.variables?.paperId : undefined} scanning={scanMutation.isPending} onScan={() => scanMutation.mutate()} onChooseLibrary={choose} onToggleFavorite={(paper) => favoriteMutation.mutate({ paperId: paper.id, favorite: !paper.isFavorite })} onShowAll={() => { workspace.setLibraryScope("all"); workspace.setSelectedCollectionId(undefined); }} />
   );
 
   const forceOnboardingPreview = !nativeRuntime && new URLSearchParams(window.location.search).has("onboarding");

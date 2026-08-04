@@ -8,7 +8,7 @@ import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import { activateContextCompression, addPaperToContext, addSelectionToContext, assetUrl, clearReaderConversation, deleteReaderAnalysis, deleteReaderAnnotation, deleteReaderChatTurn, deleteScopedContextItem, deleteTranslation, getContextCompression, getContextDraft, getReaderConversation, listDocumentUncertainties, listFigureAnalyses, listPromptTemplates, listReaderAnalyses, listReaderAnnotations, listTranslations, nativeRuntime, readContextItem, readDocument, readMarkdown, removePaperFromContext, resetContextScope, retryFigureAnalysis, saveContextCompression, saveReaderAnalysis, saveReaderAnnotation, saveReaderChatTurn, saveTranslation, startModelStream, updateReaderChatTurn, upsertScopedContextItem, type ModelStreamHandle } from "../lib/bridge";
+import { activateContextCompression, addPaperToContext, addSelectionToContext, assetUrl, clearReaderConversation, deleteReaderAnalysis, deleteReaderAnnotation, deleteReaderChatTurn, deleteScopedContextItem, deleteTranslation, getContextCompression, getContextDraft, getReaderConversation, listDocumentUncertainties, listFigureAnalyses, listPromptTemplates, listReaderAnalyses, listReaderAnnotations, listTranslations, nativeRuntime, readContextItem, readDocument, readMarkdown, removePaperFromContext, resetContextScope, retryFigureAnalysis, saveContextCompression, saveReaderAnalysis, saveReaderAnnotation, saveReaderChatTurn, saveTranslation, startModelStream, updatePaperReading, updateReaderChatTurn, upsertScopedContextItem, type ModelStreamHandle } from "../lib/bridge";
 import { hydrateProviderCredentials } from "../lib/credentials";
 import { buildReaderSections, resolveMarkdownAssetPath, type ReaderDisplaySection, type ReaderDocumentBlock } from "../lib/documentBlocks";
 import { normalizeMarkdownMath } from "../lib/markdownMath";
@@ -296,6 +296,7 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
   const readerCanvas = useRef<HTMLElement | null>(null);
   const outlineDrag = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
   const agentDrag = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+  const restoredReadingPaperId = useRef("");
   const readable = Boolean(paper?.id && paper && ["READY", "PARTIAL"].includes(paper.status));
   const paperScopeId = paper?.id ? `paper:${paper.id}` : "paper:none";
   const markdownQuery = useQuery({
@@ -472,7 +473,14 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
 
   useEffect(() => {
     if (mode !== "integrated" || !sections.length) return;
-    setActiveSection((current) => current || sections[0].id);
+    const preferredSection = paper?.lastSectionId && sections.some((section) => section.id === paper.lastSectionId)
+      ? paper.lastSectionId
+      : sections[0].id;
+    setActiveSection((current) => current || preferredSection);
+    if (paper && restoredReadingPaperId.current !== paper.id) {
+      restoredReadingPaperId.current = paper.id;
+      window.requestAnimationFrame(() => document.getElementById(`reader-section-${preferredSection}`)?.scrollIntoView({ block: "start" }));
+    }
     const root = readerCanvas.current;
     if (!root || typeof IntersectionObserver === "undefined") return;
     const observer = new IntersectionObserver((entries) => {
@@ -483,7 +491,30 @@ export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) 
     }, { root, rootMargin: "-10% 0px -72% 0px", threshold: [0, 0.05] });
     root.querySelectorAll<HTMLElement>("[data-section-id]").forEach((element) => observer.observe(element));
     return () => observer.disconnect();
-  }, [mode, sections]);
+  }, [mode, paper?.id, paper?.lastSectionId, sections]);
+
+  useEffect(() => {
+    if (!paper || !readable || !sections.length) return;
+    const section = sections.find((candidate) => candidate.id === activeSection) ?? sections[0];
+    const sectionIndex = Math.max(0, sections.findIndex((candidate) => candidate.id === section.id));
+    const page = mode === "pdf" ? pdfPage : section.pageStart ?? paper.lastPage ?? 1;
+    const progress = mode === "pdf" && paper.pageCount > 0
+      ? Math.min(1, page / paper.pageCount)
+      : Math.min(1, (sectionIndex + 1) / sections.length);
+    const timer = window.setTimeout(() => {
+      void updatePaperReading(root, paper.id, { progress, lastSectionId: section.id, lastPage: page })
+        .then((engagement) => queryClient.setQueryData<LibraryPaper[]>(["papers", root], (current = []) => current.map((item) => item.id === paper.id ? {
+          ...item,
+          lastOpenedAt: engagement.lastOpenedAt,
+          lastReadAt: engagement.lastReadAt,
+          lastSectionId: engagement.lastSectionId,
+          lastPage: engagement.lastPage,
+          readingProgress: engagement.readingProgress,
+        } : item)))
+        .catch(() => undefined);
+    }, 650);
+    return () => window.clearTimeout(timer);
+  }, [activeSection, mode, paper?.id, paper?.pageCount, pdfPage, queryClient, readable, root, sections]);
 
   useEffect(() => () => {
     if (termPanelCloseTimer.current) clearTimeout(termPanelCloseTimer.current);

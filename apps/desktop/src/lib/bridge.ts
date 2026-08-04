@@ -1,4 +1,4 @@
-import type { AgentProfile, AgentPromptTemplate, AgentRun, AgentToolCallRecord, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, DocumentUncertainty, FigureAnalysis, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryCollection, LibraryPaper, ModelActivityMeta, ModelStreamEvent, ModelStreamRequest, ModelToolDefinition, PaperDocument, PdfImportOptions, PdfImportPreview, PreprocessQualityReport, ProgressNotification, PromptTemplate, PromptTemplateCategory, ReaderAnalysisRecord, ReaderAnalysisType, ReaderAnnotation, ReaderChatTurn, ReaderConversation, ScopedContextItem, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
+import type { AgentProfile, AgentPromptTemplate, AgentRun, AgentToolCallRecord, CitationGraphResult, CitationReference, ContextCompressionRecord, ContextDraft, ContextDraftItem, ContextLoadMode, ContextSnapshot, ContextSourceItem, DocumentUncertainty, FigureAnalysis, InnovationPromptRevision, InnovationRun, InnovationStageId, JobStage, LibraryCollection, LibraryPaper, ModelActivityMeta, ModelStreamEvent, ModelStreamRequest, ModelToolDefinition, PaperDocument, PaperEngagement, PdfImportOptions, PdfImportPreview, PreprocessQualityReport, ProgressNotification, PromptTemplate, PromptTemplateCategory, ReaderAnalysisRecord, ReaderAnalysisType, ReaderAnnotation, ReaderChatTurn, ReaderConversation, ScopedContextItem, TranslationRecord, ZoteroImportCandidate, ZoteroImportResult, ZoteroInspection } from "@p2i/contracts";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { demoMarkdown, demoPapers } from "../demo";
@@ -88,6 +88,32 @@ export async function scanLibrary(root: string, requireStable = false): Promise<
 export async function listPapers(root: string): Promise<LibraryPaper[]> {
   if (!nativeRuntime) return demoPapers.map((paper) => ({ ...paper, collectionIds: [...paper.collectionIds] }));
   return rpc<LibraryPaper[]>("library.list", { root });
+}
+
+export async function setPaperFavorite(root: string, paperId: string, favorite: boolean): Promise<PaperEngagement> {
+  if (!nativeRuntime) {
+    const paper = demoPapers.find((item) => item.id === paperId);
+    if (!paper) throw new Error("论文不存在");
+    paper.isFavorite = favorite;
+    paper.favoritedAt = favorite ? new Date().toISOString() : undefined;
+    return { paperId, isFavorite: favorite, favoritedAt: paper.favoritedAt, lastOpenedAt: paper.lastOpenedAt, lastReadAt: paper.lastReadAt, lastSectionId: paper.lastSectionId, lastPage: paper.lastPage, readingProgress: paper.readingProgress, updatedAt: new Date().toISOString() };
+  }
+  return rpc<PaperEngagement>("paper.favorite_set", { root, paperId, favorite });
+}
+
+export async function updatePaperReading(root: string, paperId: string, state: { progress?: number; lastSectionId?: string; lastPage?: number } = {}): Promise<PaperEngagement> {
+  if (!nativeRuntime) {
+    const paper = demoPapers.find((item) => item.id === paperId);
+    if (!paper) throw new Error("论文不存在");
+    const now = new Date().toISOString();
+    paper.lastOpenedAt = now;
+    paper.lastReadAt = now;
+    if (state.lastSectionId) paper.lastSectionId = state.lastSectionId;
+    if (state.lastPage) paper.lastPage = state.lastPage;
+    if (state.progress !== undefined) paper.readingProgress = state.progress;
+    return { paperId, isFavorite: paper.isFavorite, favoritedAt: paper.favoritedAt, lastOpenedAt: now, lastReadAt: now, lastSectionId: paper.lastSectionId, lastPage: paper.lastPage, readingProgress: paper.readingProgress, updatedAt: now };
+  }
+  return rpc<PaperEngagement>("paper.reading_update", { root, paperId, ...state });
 }
 
 export async function listCollections(root: string): Promise<LibraryCollection[]> {

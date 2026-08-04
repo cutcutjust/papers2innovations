@@ -39,9 +39,9 @@ def test_initializes_versioned_library_layout(tmp_path: Path) -> None:
 
     with sqlite3.connect(result["database"]) as connection:
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-        assert version == 15
+        assert version == 16
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        assert {"document_revisions", "page_recognitions", "document_uncertainties"} <= tables
+        assert {"document_revisions", "page_recognitions", "document_uncertainties", "paper_engagement"} <= tables
 
 
 def test_migration_0013_upgrades_existing_0012_context_without_data_loss(tmp_path: Path) -> None:
@@ -66,7 +66,7 @@ def test_migration_0013_upgrades_existing_0012_context_without_data_loss(tmp_pat
         )
     Database(database_path).migrate()
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 15
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 16
         assert connection.execute(
             "SELECT scope_id FROM context_scope_items WHERE context_item_id = 'context-1'"
         ).fetchone()[0] == "research:default"
@@ -234,6 +234,34 @@ def test_collection_tree_move_filter_and_delete_are_persistent(tmp_path: Path) -
     assert restarted.delete_collection(parent["id"]) is True
     assert restarted.list_collections() == []
     assert restarted.list_papers()[0]["collectionIds"] == []
+
+
+def test_favorites_and_reading_progress_are_persistent(tmp_path: Path) -> None:
+    library = Library(tmp_path)
+    library.initialize()
+    make_pdf(library.papers_dir / "reading-state.pdf", pages=8)
+    library.scan()
+    paper_id = library.list_papers()[0]["id"]
+
+    favorite = library.set_paper_favorite(paper_id, True)
+    reading = library.update_paper_reading(
+        paper_id,
+        {"progress": 0.5, "lastSectionId": "method", "lastPage": 4},
+    )
+    assert favorite["isFavorite"] is True
+    assert favorite["favoritedAt"]
+    assert reading["readingProgress"] == 0.5
+
+    restarted_paper = Library(tmp_path).list_papers()[0]
+    assert restarted_paper["isFavorite"] is True
+    assert restarted_paper["lastSectionId"] == "method"
+    assert restarted_paper["lastPage"] == 4
+    assert restarted_paper["lastReadAt"]
+    assert restarted_paper["readingProgress"] == 0.5
+
+    unfavorited = Library(tmp_path).set_paper_favorite(paper_id, False)
+    assert unfavorited["isFavorite"] is False
+    assert unfavorited["favoritedAt"] is None
 
 
 def test_agent_profiles_runs_retry_and_restart_recovery_are_persistent(tmp_path: Path) -> None:

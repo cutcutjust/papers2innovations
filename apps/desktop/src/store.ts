@@ -8,6 +8,7 @@ import { modelHasCapability } from "./lib/modelCapabilities";
 
 export type View = "library" | "reader" | "agents" | "context" | "graph" | "innovate" | "jobs" | "import" | "settings" | "security";
 type ReaderMode = "markdown" | "pdf" | "figures";
+export type LibraryScope = "all" | "favorites" | "recent" | "reading";
 export type ModelApiFormat = ApiFormat;
 export const CURRENT_ONBOARDING_VERSION = 1;
 
@@ -35,6 +36,7 @@ export interface WorkspaceState {
   readerMode: ReaderMode;
   query: string;
   statusFilter: "all" | "ready" | "processing" | "issues";
+  libraryScope: LibraryScope;
   selectedCollectionId?: string;
   readerFocusMode: boolean;
   pdfPage: number;
@@ -65,6 +67,7 @@ export interface WorkspaceState {
   setReaderMode: (mode: ReaderMode) => void;
   setQuery: (query: string) => void;
   setStatusFilter: (filter: WorkspaceState["statusFilter"]) => void;
+  setLibraryScope: (scope: LibraryScope) => void;
   setSelectedCollectionId: (collectionId?: string) => void;
   setReaderFocusMode: (enabled: boolean) => void;
   openPdfAt: (page: number) => void;
@@ -153,6 +156,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   readerMode: "markdown",
   query: "",
   statusFilter: "all",
+  libraryScope: "all",
   selectedCollectionId: undefined,
   readerFocusMode: false,
   pdfPage: 1,
@@ -188,6 +192,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   setReaderMode: (readerMode) => set({ readerMode }),
   setQuery: (query) => set({ query }),
   setStatusFilter: (statusFilter) => set({ statusFilter }),
+  setLibraryScope: (libraryScope) => set({ libraryScope }),
   setSelectedCollectionId: (selectedCollectionId) => set({ selectedCollectionId }),
   setReaderFocusMode: (readerFocusMode) => set({ readerFocusMode }),
   openPdfAt: (pdfPage) => set({ pdfPage, readerMode: "pdf" }),
