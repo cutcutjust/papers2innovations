@@ -1484,6 +1484,19 @@ fn model_request_body(input: &ModelStreamInput, stream: bool, max_tokens: u64) -
         if tools.is_empty() {
             body.as_object_mut().expect("model body").remove("tools");
         }
+        // Translation and other direct-output tasks must not spend the entire
+        // completion budget on hidden reasoning. Qwen uses enable_thinking,
+        // while DeepSeek's OpenAI-compatible API uses the thinking object.
+        if input.reasoning_mode.as_deref() == Some("disabled") {
+            let model_name = input.model.model.to_ascii_lowercase();
+            let object = body.as_object_mut().expect("model body");
+            if model_name.contains("qwen") {
+                object.insert("enable_thinking".into(), Value::Bool(false));
+            }
+            if model_name.contains("deepseek") {
+                object.insert("thinking".into(), json!({"type": "disabled"}));
+            }
+        }
         body
     }
 }
@@ -2314,9 +2327,9 @@ pub fn run() {
 mod tests {
     use super::{
         consume_model_stream, import_pdf_sources, model_endpoint, model_headers,
-        send_model_request, stream_delta, stream_reasoning_delta, validate_credential_id, Engine,
-        ModelConfigInput, ModelMessageInput, ModelStreamInput, OcrLimiter, PdfImportOptions,
-        ProviderConfigInput,
+        model_request_body, send_model_request, stream_delta, stream_reasoning_delta,
+        validate_credential_id, Engine, ModelConfigInput, ModelMessageInput, ModelStreamInput,
+        OcrLimiter, PdfImportOptions, ProviderConfigInput,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -2486,6 +2499,31 @@ mod tests {
         };
         let result = model_headers(&safe_provider, "stronghold-secret").expect("safe headers");
         assert_eq!(result.get("OpenAI-Organization").unwrap(), "org-test");
+    }
+
+    #[test]
+    fn openai_reasoning_can_be_disabled_for_translation_models() {
+        let mut qwen = model_request("https://gateway.example/v1".into(), "openai");
+        qwen.model.model = "qwen3.6-plus".into();
+        qwen.reasoning_mode = Some("disabled".into());
+        let qwen_body = model_request_body(&qwen, true, 1024);
+        assert_eq!(qwen_body["enable_thinking"], json!(false));
+        assert!(qwen_body.get("thinking").is_none());
+
+        let mut deepseek = model_request("https://gateway.example/v1".into(), "openai");
+        deepseek.model.model = "deepseek-v4-pro".into();
+        deepseek.reasoning_mode = Some("disabled".into());
+        let deepseek_body = model_request_body(&deepseek, true, 1024);
+        assert_eq!(deepseek_body["thinking"], json!({"type": "disabled"}));
+        assert!(deepseek_body.get("enable_thinking").is_none());
+
+        let default_body = model_request_body(
+            &model_request("https://gateway.example/v1".into(), "openai"),
+            true,
+            1024,
+        );
+        assert!(default_body.get("enable_thinking").is_none());
+        assert!(default_body.get("thinking").is_none());
     }
 
     #[test]
