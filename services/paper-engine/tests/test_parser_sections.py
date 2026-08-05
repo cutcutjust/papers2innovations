@@ -7,7 +7,9 @@ import fitz
 from p2i_engine.parsing.parser import (
     _embed_figures,
     _extract_rendered_figures,
+    _markdown_quality_issues,
     _normalize_extracted_text,
+    _normalize_reference_layout,
     _semantic_sections,
 )
 
@@ -96,3 +98,27 @@ def test_fallback_parser_renders_vector_figure_and_embeds_markdown(tmp_path: Pat
     assert markdown.index("![Figure 1: Synthetic vector architecture.]") < markdown.index(
         "\n\nFig. 1: Synthetic vector architecture."
     )
+
+
+def test_reference_layout_only_splits_bibliography_entries() -> None:
+    markdown = (
+        "Body cites [1] and [2] together.\n\n"
+        "# References\n\n[1] First paper. [2] Second paper.\n[3] Third paper."
+    )
+
+    normalized = _normalize_reference_layout(markdown)
+
+    assert "Body cites [1] and [2] together." in normalized
+    assert "[1] First paper.\n\n[2] Second paper.\n\n[3] Third paper." in normalized
+
+
+def test_markdown_quality_gate_detects_flattened_tables_and_bare_formulas() -> None:
+    markdown = (
+        "Table 2. Ablation results\n"
+        "Dataset Model A B C ours 71.05 87.60 70.88 baseline 69.61 85.43 69.18\n\n"
+        "The objective is {stage1 = task1 + lcons}."
+    )
+
+    kinds = {issue["kind"] for issue in _markdown_quality_issues(markdown)}
+
+    assert kinds == {"formula", "table"}

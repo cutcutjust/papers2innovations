@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import io
 from pathlib import Path
 
 import fitz
+from PIL import Image, ImageDraw
 
 from p2i_engine.parsing.parser import _remove_repeated_marginal_lines, parse_pdf
 
@@ -58,3 +60,164 @@ def test_repeated_headers_page_numbers_and_false_numeric_headings_are_removed() 
     assert "# 15" not in joined
     assert "Body two" in joined
     assert removed >= 6
+
+
+def test_full_page_raster_is_not_exported_as_a_figure(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("P2I_DISABLE_DOCLING", "1")
+    source = tmp_path / "scanned.pdf"
+    image = Image.new("RGB", (1224, 1584), "white")
+    ImageDraw.Draw(image).text((80, 100), "Scanned paper page", fill="black")
+    image_bytes = io.BytesIO()
+    image.save(image_bytes, "PNG")
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_image(page.rect, stream=image_bytes.getvalue())
+    document.save(source)
+    document.close()
+
+    result = parse_pdf(source, tmp_path / "output", "paper-scan", "b" * 64)
+
+    assert result.document.figures == []
+
+
+def test_scanned_page_caption_produces_a_local_figure_crop(tmp_path: Path) -> None:
+    source = tmp_path / "captioned-scan.pdf"
+    image = Image.new("RGB", (1224, 1584), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((650, 380, 1080, 760), outline="black", width=4)
+    image_bytes = io.BytesIO()
+    image.save(image_bytes, "PNG")
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_image(page.rect, stream=image_bytes.getvalue())
+    page.insert_text((340, 210), "Happy Sad Neutral Angry", fontsize=9)
+    page.insert_text((340, 235), "Weight 0.0 0.5 1.0", fontsize=9)
+    page.insert_text((315, 280), "Fig. 2. Model weights for one conversation.", fontsize=9)
+    document.save(source)
+    document.close()
+
+    from p2i_engine.parsing.parser import _extract_rendered_figures
+
+    figure_dir = tmp_path / "figures"
+    figure_dir.mkdir()
+    figures = _extract_rendered_figures(source, figure_dir)
+
+    assert len(figures) == 1
+    with Image.open(tmp_path / figures[0].relative_path) as cropped:
+        assert cropped.width < 1224
+        assert cropped.height < 1584
+
+
+def test_table_region_uses_targeted_visual_reconstruction(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("P2I_DISABLE_DOCLING", "1")
+    source = tmp_path / "table.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 72), "Table 2. Ablation results.", fontsize=10)
+    page.insert_text((72, 100), "Dataset Model Score", fontsize=9)
+    page.insert_text((72, 120), "MOSI DSSR 88.9", fontsize=9)
+    page.insert_text((72, 140), "MOSEI DSSR 87.9", fontsize=9)
+    page.insert_text((72, 190), "3. Experiments", fontsize=11)
+    document.save(source)
+    document.close()
+    calls: list[dict] = []
+
+    def recognize(params: dict) -> dict:
+        calls.append(params)
+        if params["task"] == "table_reconstruct":
+            markdown = "| Dataset | Model | Score |\n| --- | --- | ---: |\n| MOSI | DSSR | 88.9 |\n| MOSEI | DSSR | 87.9 |"
+        else:
+            markdown = "# Table 2. Ablation results\n\nDataset Model Score MOSI DSSR 88.9 MOSEI DSSR 87.9\n\n# 3. Experiments"
+        return {
+            "description": json.dumps(
+                {"markdown": markdown, "confidence": 0.96, "uncertainties": []}
+            ),
+            "modelId": "vision-model",
+            "usage": {"inputTokens": 4, "outputTokens": 8, "durationMs": 10},
+        }
+
+    cache = tmp_path / "cache" / "ocr" / "hash"
+    result = parse_pdf(
+        source,
+        tmp_path / "output",
+        "paper-table",
+        "c" * 64,
+        cache,
+        None,
+        recognize,
+        "vision-model",
+    )
+
+    assert any(call["task"] == "table_reconstruct" for call in calls)
+    assert "| Dataset | Model | Score |" in result.markdown
+    assert (tmp_path / "output" / "tables" / "table-1.md").is_file()
+    assert (tmp_path / "output" / "tables" / "table-1.csv").is_file()
+
+
+def test_suspicious_formula_uses_region_crop_and_updates_markdown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("P2I_DISABLE_DOCLING", "1")
+    source = tmp_path / "formula.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 72), "2. Method", fontsize=12)
+    page.insert_text((150, 240), "L task = sum i x i", fontsize=14)
+    document.save(source)
+    document.close()
+    calls: list[dict] = []
+    crop_sizes: list[tuple[int, int]] = []
+
+    def recognize(params: dict) -> dict:
+        calls.append(params)
+        if params["task"] == "formula_repair":
+            with Image.open(params["imagePath"]) as crop:
+                crop_sizes.append(crop.size)
+            payload = {
+                "repairedLatex": r"$$\mathcal{L}_{task}=\sum_i x_i$$",
+                "confidence": 0.97,
+            }
+        elif params["task"] == "region_verify":
+            payload = {
+                "markdown": "# 2. Method\n\n{l_task = sum_i x_i}",
+                "confidence": 0.8,
+                "regions": [],
+                "uncertainties": [],
+            }
+        else:
+            payload = {
+                "markdown": "# 2. Method\n\n{l_task = sum_i x_i}",
+                "confidence": 0.96,
+                "regions": [
+                    {
+                        "kind": "formula",
+                        "sourceText": "{l_task = sum_i x_i}",
+                        "caption": "",
+                        "bbox": {"left": 0.18, "top": 0.24, "right": 0.72, "bottom": 0.36},
+                        "confidence": 0.7,
+                    }
+                ],
+                "uncertainties": [],
+            }
+        return {
+            "description": json.dumps(payload),
+            "modelId": "vision-model",
+            "usage": {"inputTokens": 4, "outputTokens": 8, "durationMs": 10},
+        }
+
+    result = parse_pdf(
+        source,
+        tmp_path / "output",
+        "paper-formula",
+        "d" * 64,
+        tmp_path / "cache" / "ocr" / "hash",
+        None,
+        recognize,
+        "vision-model",
+    )
+
+    assert any(call["task"] == "formula_repair" for call in calls)
+    assert r"$$\mathcal{L}_{task}=\sum_i x_i$$" in result.markdown
+    assert crop_sizes
+    assert crop_sizes[0][0] < 1700
+    assert crop_sizes[0][1] < 2200

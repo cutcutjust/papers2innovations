@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import csv
 import hashlib
 import io
 import json
@@ -75,6 +76,10 @@ _FIGURE_CAPTION = re.compile(
     r"^\s*(?:fig(?:ure)?\.?)\s*(?P<number>\d+[A-Za-z]?)\s*[:.]\s*(?P<caption>.+)",
     re.I | re.S,
 )
+_TABLE_CAPTION = re.compile(
+    r"^\s*(?:table|tab\.)\s*(?P<number>\d+[A-Za-z]?)\s*[:.]\s*(?P<caption>.+)",
+    re.I | re.S,
+)
 _PAGE_ANCHOR = re.compile(
     r'<a\b[^>]*\bdata-page=["\'](?P<page>\d+)["\'][^>]*>\s*</a>', re.I
 )
@@ -134,6 +139,103 @@ def _embed_figures(markdown: str, figures: list[PaperFigure]) -> str:
         if not inserted:
             result = f"{result.rstrip()}\n\n{image}"
     return result
+
+
+def _looks_like_full_page_raster(
+    image_bytes: bytes, page_width_points: float, page_height_points: float
+) -> bool:
+    """Reject scanned/page-sized image resources before they become figures."""
+
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            width, height = image.size
+    except Exception:
+        return False
+    if width < 1 or height < 1 or page_width_points <= 0 or page_height_points <= 0:
+        return False
+    expected_width = page_width_points * 200 / 72
+    expected_height = page_height_points * 200 / 72
+    area_ratio = (width * height) / (expected_width * expected_height)
+    image_aspect = width / height
+    page_aspect = page_width_points / page_height_points
+    same_aspect = abs(image_aspect - page_aspect) / page_aspect < 0.035
+    covers_page = width >= expected_width * 0.72 and height >= expected_height * 0.72
+    return same_aspect and (covers_page or area_ratio >= 0.62)
+
+
+def _normalize_reference_layout(markdown: str) -> str:
+    """Keep body citations untouched while separating bibliography entries."""
+
+    heading = re.search(r"(?im)^\s*#{0,6}\s*(?:references|bibliography)\s*$", markdown)
+    if not heading:
+        return markdown
+    prefix = markdown[: heading.end()]
+    references = markdown[heading.end() :]
+    references = re.sub(r"[ \t]+(?=\[\d{1,3}\]\s+)", "\n\n", references)
+    references = re.sub(r"\n(?=\[\d{1,3}\]\s+)", "\n\n", references)
+    references = re.sub(r"\n{3,}", "\n\n", references)
+    return f"{prefix}{references}"
+
+
+def _sanitize_visual_markdown(markdown: str) -> str:
+    # Page transcription describes image locations through regions; only locally
+    # extracted and validated files may become Markdown images.
+    cleaned = re.sub(r"(?m)^\s*!\[[^\]]*\]\([^)]+\)\s*$", "", markdown)
+    cleaned = _normalize_reference_layout(cleaned)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def _markdown_quality_issues(markdown: str) -> list[dict[str, Any]]:
+    """Detect structural failures that require another visual comparison."""
+
+    issues: list[dict[str, Any]] = []
+    formula_like = re.search(
+        r"\{[^{}\n]{0,90}(?:=|\\(?:sum|frac|mathcal)|[ℓl](?:task|cons|rec)|[_^])[^{}\n]{1,160}\}",
+        markdown,
+        re.I,
+    )
+    if formula_like:
+        issues.append(
+            {
+                "kind": "formula",
+                "sourceText": formula_like.group(0),
+                "candidateText": "",
+                "confidence": 0.45,
+            }
+        )
+
+    for caption in re.finditer(r"(?im)^\s*(?:table|tab\.)\s*\d+[A-Za-z]?\s*[:.]?.*$", markdown):
+        next_heading = re.search(r"(?m)^#{1,6}\s+|^\d+(?:\.\d+)*[.)]?\s+[A-Z]", markdown[caption.end() :])
+        end = caption.end() + (next_heading.start() if next_heading else min(1800, len(markdown) - caption.end()))
+        table_region = markdown[caption.start() : end]
+        has_gfm_table = bool(re.search(r"(?m)^\s*\|.+\|\s*$\n\s*\|?\s*:?-{3,}", table_region))
+        numeric_cells = len(re.findall(r"(?<!\w)[+-]?\d+(?:\.\d+)?(?:/\d+(?:\.\d+)?)?", table_region))
+        if not has_gfm_table and numeric_cells >= 6:
+            issues.append(
+                {
+                    "kind": "table",
+                    "sourceText": table_region[:1200],
+                    "candidateText": "",
+                    "confidence": 0.35,
+                }
+            )
+
+    heading = re.search(r"(?im)^\s*#{0,6}\s*(?:references|bibliography)\s*$", markdown)
+    if heading:
+        for line in markdown[heading.end() :].splitlines():
+            if len(re.findall(r"\[\d{1,3}\]", line)) >= 2:
+                issues.append(
+                    {
+                        "kind": "reading_order",
+                        "sourceText": line[:1200],
+                        "candidateText": "",
+                        "confidence": 0.45,
+                    }
+                )
+                break
+    return issues
 
 
 def _page_markdown_from_sections(document: PaperDocument) -> dict[int, str]:
@@ -208,6 +310,38 @@ def _extract_rendered_figures(source: Path, figure_dir: Path) -> list[PaperFigur
                         if overlaps_caption_column(rect):
                             candidates.append(rect)
                     if not candidates:
+                        # Scanned PDFs often expose one full-page image plus a text
+                        # layer. Walk upward from the caption and crop the compact
+                        # visual cluster instead of storing the whole page.
+                        column_width = page_rect.width / 2
+                        if wide_caption:
+                            column_left, column_right = page_rect.x0, page_rect.x1
+                        elif caption_rect.x0 >= page_rect.width / 2:
+                            column_left, column_right = page_rect.width / 2, page_rect.x1
+                        else:
+                            column_left, column_right = page_rect.x0, page_rect.width / 2
+                        prior_blocks: list[tuple[Any, str]] = []
+                        for block in blocks:
+                            rect = fitz.Rect(block[:4])
+                            text = re.sub(r"\s+", " ", str(block[4])).strip()
+                            overlap = min(rect.x1, column_right) - max(rect.x0, column_left)
+                            if (
+                                rect.y1 <= caption_rect.y0 + 2
+                                and rect.y0 >= caption_rect.y0 - page_rect.height * 0.28
+                                and overlap > min(rect.width, column_width) * 0.2
+                                and text
+                            ):
+                                prior_blocks.append((rect, text))
+                        cursor = caption_rect.y0
+                        for rect, text in sorted(prior_blocks, key=lambda item: item[0].y1, reverse=True):
+                            gap = cursor - rect.y1
+                            if candidates and gap > 24:
+                                break
+                            if len(text) > 260 and rect.width > column_width * 0.72:
+                                break
+                            candidates.append(rect)
+                            cursor = min(cursor, rect.y0)
+                    if not candidates:
                         previous_caption_bottom = caption_rect.y1
                         continue
 
@@ -267,6 +401,123 @@ def _extract_rendered_figures(source: Path, figure_dir: Path) -> list[PaperFigur
     return figures
 
 
+def _extract_rendered_tables(source: Path, table_dir: Path) -> list[dict[str, Any]]:
+    """Crop caption-linked tables for targeted visual reconstruction."""
+
+    try:
+        import fitz
+    except ImportError:
+        return []
+    table_dir.mkdir(parents=True, exist_ok=True)
+    tables: list[dict[str, Any]] = []
+    try:
+        with fitz.open(source) as document:
+            for page_number, page in enumerate(document, start=1):
+                page_rect = page.rect
+                blocks = page.get_text("blocks", sort=True)
+                for block in blocks:
+                    caption_text = re.sub(r"\s+", " ", str(block[4])).strip()
+                    caption_match = _TABLE_CAPTION.match(caption_text)
+                    if not caption_match:
+                        continue
+                    caption_rect = fitz.Rect(block[:4])
+                    content: list[tuple[Any, str]] = []
+                    for candidate in blocks:
+                        rect = fitz.Rect(candidate[:4])
+                        text = re.sub(r"\s+", " ", str(candidate[4])).strip()
+                        if rect.y0 < caption_rect.y1 - 2 or rect.y0 > caption_rect.y1 + page_rect.height * 0.34:
+                            continue
+                        if rect == caption_rect or not text:
+                            continue
+                        if _heading_candidate(text) and content:
+                            break
+                        horizontal_overlap = min(rect.x1, caption_rect.x1) - max(rect.x0, caption_rect.x0)
+                        if horizontal_overlap > min(rect.width, caption_rect.width) * 0.15:
+                            content.append((rect, text))
+                    if not content:
+                        continue
+                    clip = fitz.Rect(caption_rect)
+                    for rect, _ in content:
+                        clip |= rect
+                    clip = fitz.Rect(
+                        max(page_rect.x0, clip.x0 - 5),
+                        max(page_rect.y0, clip.y0 - 4),
+                        min(page_rect.x1, clip.x1 + 5),
+                        min(page_rect.y1, clip.y1 + 5),
+                    )
+                    if clip.width < 120 or clip.height < 45 or clip.get_area() > page_rect.get_area() * 0.48:
+                        continue
+                    table_index = len(tables) + 1
+                    image_path = table_dir / f"table-{table_index}-source.png"
+                    page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), clip=clip, alpha=False).save(image_path)
+                    tables.append(
+                        {
+                            "id": f"table-{table_index}",
+                            "caption": caption_text,
+                            "page": page_number,
+                            "bbox": {
+                                "left": clip.x0 / page_rect.width,
+                                "top": clip.y0 / page_rect.height,
+                                "right": clip.x1 / page_rect.width,
+                                "bottom": clip.y1 / page_rect.height,
+                            },
+                            "image_path": f"tables/{image_path.name}",
+                            "source_text": "\n".join(text for _, text in content),
+                        }
+                    )
+    except Exception:
+        return []
+    return tables
+
+
+def _is_gfm_table(markdown: str) -> bool:
+    return bool(
+        re.search(
+            r"(?m)^\s*\|.+\|\s*$\n\s*\|?\s*:?-{3,}:?(?:\s*\|\s*:?-{3,}:?)+\s*\|?\s*$",
+            markdown,
+        )
+    )
+
+
+def _write_table_csv(markdown: str, target: Path) -> bool:
+    lines = [line.strip() for line in markdown.splitlines() if line.strip().startswith("|")]
+    if len(lines) < 3:
+        return False
+    rows = [[cell.strip() for cell in line.strip("|").split("|")] for line in lines]
+    if not all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in rows[1]):
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", newline="", encoding="utf-8-sig") as output:
+        writer = csv.writer(output)
+        writer.writerow(rows[0])
+        writer.writerows(rows[2:])
+    return True
+
+
+def _insert_reconstructed_table(markdown: str, caption: str, table_markdown: str) -> str:
+    if _is_gfm_table(markdown):
+        return markdown
+    number = _TABLE_CAPTION.match(caption or "")
+    if not number:
+        return f"{markdown.rstrip()}\n\n{table_markdown.strip()}"
+    marker = re.search(
+        rf"(?im)^.*(?:table|tab\.)\s*{re.escape(number.group('number'))}\s*[:.]?.*$",
+        markdown,
+    )
+    if not marker:
+        return f"{markdown.rstrip()}\n\n{table_markdown.strip()}"
+    tail = markdown[marker.end() :]
+    next_heading = re.search(
+        r"(?m)^\s*(?:#{1,6}\s+|\d+(?:\.\d+)*[.)]?\s+[A-Z][A-Za-z])",
+        tail,
+    )
+    if next_heading:
+        flattened = tail[: next_heading.start()]
+        if len(re.findall(r"\d+(?:\.\d+)?", flattened)) >= 8:
+            tail = tail[next_heading.start() :]
+    return f"{markdown[:marker.end()].rstrip()}\n\n{table_markdown.strip()}\n\n{tail.lstrip()}"
+
+
 _KNOWN_SECTION_NAMES = {
     "abstract",
     "keywords",
@@ -312,6 +563,8 @@ def _clean_heading_title(value: str) -> str:
 def _heading_candidate(line: str) -> tuple[str, int, bool] | None:
     stripped = line.strip()
     if not stripped or len(stripped) > 120:
+        return None
+    if stripped.startswith(("|", ">", "- ", "* ", "+ ", "```", "$$")):
         return None
     markdown = re.match(r"^(#{1,6})\s+(.+?)\s*$", stripped)
     if markdown:
@@ -458,6 +711,7 @@ def _parse_with_pypdf(
     figure_dir.mkdir(parents=True, exist_ok=True)
     page_contents: list[tuple[int, str]] = []
     figures = _extract_rendered_figures(source, figure_dir)
+    tables = _extract_rendered_tables(source, output_dir / "tables")
     figures_by_page: dict[int, list[PaperFigure]] = {}
     for figure in figures:
         if figure.page is not None:
@@ -478,10 +732,15 @@ def _parse_with_pypdf(
             try:
                 for image in page.images:
                     image_name = _safe_image_name(image.name, len(figures) + 1)
+                    image_bytes = image.data
+                    if _looks_like_full_page_raster(
+                        image_bytes, float(page.mediabox.width), float(page.mediabox.height)
+                    ):
+                        continue
                     image_path = figure_dir / image_name
-                    image_path.write_bytes(image.data)
+                    image_path.write_bytes(image_bytes)
                     thumbnail_name = _thumbnail(
-                        image.data, figure_dir / f"{Path(image_name).stem}-thumb.webp"
+                        image_bytes, figure_dir / f"{Path(image_name).stem}-thumb.webp"
                     )
                     mime = (
                         "image/png"
@@ -516,6 +775,7 @@ def _parse_with_pypdf(
         page_count=len(reader.pages),
         sections=sections,
         figures=figures,
+        tables=tables,
         parser=ParserInfo(name="pypdf-fallback", version=parser_version),
     )
     frontmatter = (
@@ -677,6 +937,68 @@ def _crop_page_body(source: Path, target: Path) -> None:
         image.crop((left, top, right, bottom)).convert("RGB").save(target, "JPEG", quality=94)
 
 
+def _crop_normalized_region(
+    source: Path,
+    bbox: dict[str, Any],
+    target: Path,
+    *,
+    padding_ratio: float = 0.018,
+) -> tuple[int, int]:
+    """Crop a model-provided top-left normalized bbox with a small context margin."""
+
+    from PIL import Image
+
+    with Image.open(source) as image:
+        width, height = image.size
+        left = max(0, int((float(bbox["left"]) - padding_ratio) * width))
+        top = max(0, int((float(bbox["top"]) - padding_ratio) * height))
+        right = min(width, int((float(bbox["right"]) + padding_ratio) * width))
+        bottom = min(height, int((float(bbox["bottom"]) + padding_ratio) * height))
+        if right - left < 24 or bottom - top < 16:
+            raise ValueError("视觉模型返回的公式区域过小")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        crop = image.crop((left, top, right, bottom)).convert("RGB")
+        crop.save(target, "PNG")
+        return crop.size
+
+
+def _parse_formula_repair_response(response: dict[str, Any]) -> tuple[str, float]:
+    raw = str(response.get("description") or "").strip()
+    cleaned = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as error:
+        raise ValueError("视觉模型没有返回合法的公式修复 JSON") from error
+    repaired = str(parsed.get("repairedLatex") or "").strip()
+    confidence = max(0.0, min(1.0, float(parsed.get("confidence") or 0.0)))
+    if not repaired or repaired.count("$") % 2 or "�" in repaired or "□" in repaired:
+        raise ValueError("视觉模型返回的公式定界符或字符无效")
+    if not (
+        (repaired.startswith("$") and repaired.endswith("$"))
+        or (repaired.startswith(r"\[") and repaired.endswith(r"\]"))
+    ):
+        raise ValueError("公式修复结果缺少 Markdown 数学定界符")
+    return repaired, confidence
+
+
+def _replace_unique_whitespace_equivalent(
+    markdown: str, source_text: str, replacement: str
+) -> tuple[str, bool]:
+    """Replace one formula only when its non-whitespace text maps unambiguously."""
+
+    if source_text and markdown.count(source_text) == 1:
+        return markdown.replace(source_text, replacement, 1), True
+    compact = re.sub(r"\s+", "", source_text)
+    if not compact:
+        return markdown, False
+    pattern = r"\s*".join(re.escape(character) for character in compact)
+    matches = list(re.finditer(pattern, markdown))
+    if len(matches) != 1:
+        return markdown, False
+    match = matches[0]
+    return f"{markdown[:match.start()]}{replacement}{markdown[match.end():]}", True
+
+
 def _parse_vision_page_response(response: dict[str, Any]) -> dict[str, Any]:
     raw = str(response.get("description") or response.get("markdown") or "").strip()
     cleaned = raw.removeprefix("```json").removeprefix("```markdown").removeprefix("```")
@@ -687,15 +1009,38 @@ def _parse_vision_page_response(response: dict[str, Any]) -> dict[str, Any]:
         parsed = value if isinstance(value, dict) else {"markdown": cleaned}
     except json.JSONDecodeError:
         parsed = {"markdown": cleaned, "confidence": 0.72, "uncertainties": []}
-    markdown = _normalize_extracted_text(str(parsed.get("markdown", ""))).strip()
+    markdown = _sanitize_visual_markdown(
+        _normalize_extracted_text(str(parsed.get("markdown", ""))).strip()
+    )
     confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0.72))))
     uncertainties = parsed.get("uncertainties")
     if not isinstance(uncertainties, list):
         uncertainties = []
+    regions = parsed.get("regions")
+    if not isinstance(regions, list):
+        regions = []
+    valid_regions: list[dict[str, Any]] = []
+    for item in regions:
+        if not isinstance(item, dict) or item.get("kind") not in {"figure", "table", "formula"}:
+            continue
+        bbox = item.get("bbox")
+        if not isinstance(bbox, dict):
+            continue
+        try:
+            coordinates = {key: float(bbox[key]) for key in ("left", "top", "right", "bottom")}
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (
+            0 <= coordinates["left"] < coordinates["right"] <= 1
+            and 0 <= coordinates["top"] < coordinates["bottom"] <= 1
+        ):
+            continue
+        valid_regions.append({**item, "bbox": coordinates})
     return {
         "markdown": markdown,
         "confidence": confidence,
         "uncertainties": [item for item in uncertainties if isinstance(item, dict)],
+        "regions": valid_regions,
     }
 
 
@@ -744,6 +1089,7 @@ def _remove_repeated_marginal_lines(pages: list[tuple[int, str]]) -> tuple[list[
 def _apply_vision_reconstruction(
     result: ParseResult,
     source: Path,
+    output_dir: Path,
     cache_dir: Path,
     paper_id: str,
     sha256: str,
@@ -758,7 +1104,7 @@ def _apply_vision_reconstruction(
         if figure.page is not None:
             figures_by_page.setdefault(figure.page, []).append(figure)
 
-    prompt_version = "page-reconstruction-v1"
+    prompt_version = "page-reconstruction-v2"
 
     def recognize(page_number: int) -> dict[str, Any]:
         cache_key = hashlib.sha256(
@@ -790,6 +1136,10 @@ def _apply_vision_reconstruction(
             parsed = _parse_vision_page_response(response)
             if not parsed["markdown"]:
                 raise ValueError("视觉模型没有返回页面 Markdown")
+            quality_issues = _markdown_quality_issues(parsed["markdown"])
+            if quality_issues:
+                parsed["uncertainties"].extend(quality_issues)
+                parsed["confidence"] = min(parsed["confidence"], 0.78)
             verified = False
             if parsed["confidence"] < 0.85 or parsed["uncertainties"]:
                 if not image_path.is_file():
@@ -808,15 +1158,26 @@ def _apply_vision_reconstruction(
                 })
                 verified_page = _parse_vision_page_response(verify_response)
                 if verified_page["markdown"] and verified_page["confidence"] >= parsed["confidence"]:
+                    # Verification prompts intentionally focus on corrected text. Keep
+                    # the first pass geometry so later formula/table crops stay local.
+                    if not verified_page["regions"]:
+                        verified_page["regions"] = parsed["regions"]
                     parsed = verified_page
                     verified = True
+            remaining_issues = _markdown_quality_issues(parsed["markdown"])
+            if remaining_issues:
+                parsed["uncertainties"].extend(remaining_issues)
+                parsed["confidence"] = min(parsed["confidence"], 0.78)
             usage = response.get("usage") or {}
             return {
                 **parsed,
                 "page": page_number,
+                "task": "page_transcribe",
+                "prompt_version": prompt_version,
                 "cache_key": cache_key,
                 "cache_hit": cache_hit,
                 "artifact_path": str(response_path),
+                "image_path": str(image_path),
                 "model_id": str(response.get("modelId") or model_id),
                 "input_tokens": int(usage.get("inputTokens", 0)),
                 "output_tokens": int(usage.get("outputTokens", 0)),
@@ -830,6 +1191,9 @@ def _apply_vision_reconstruction(
                 "markdown": fallback_pages.get(page_number, "_此页视觉识别失败，请对照 PDF。_"),
                 "confidence": 0.0,
                 "uncertainties": [{"kind": "text", "sourceText": "", "candidateText": ""}],
+                "regions": [],
+                "task": "page_transcribe",
+                "prompt_version": prompt_version,
                 "cache_key": cache_key,
                 "cache_hit": False,
                 "artifact_path": "",
@@ -845,16 +1209,240 @@ def _apply_vision_reconstruction(
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="vision-pages") as executor:
         page_results = list(executor.map(recognize, range(1, result.document.page_count + 1)))
 
+    page_result_by_number = {item["page"]: item for item in page_results}
+    formula_cache_dir = cache_dir / "formulas"
+    formula_cache_dir.mkdir(parents=True, exist_ok=True)
+    for page_item in list(page_results):
+        if page_item["task"] != "page_transcribe" or page_item["failed"]:
+            continue
+        formula_issues = [
+            issue
+            for issue in page_item.get("uncertainties", [])
+            if issue.get("kind") == "formula"
+        ]
+        formula_regions = [
+            region
+            for region in page_item.get("regions", [])
+            if region.get("kind") == "formula"
+        ]
+        if not formula_issues or not formula_regions:
+            continue
+        for index, issue in enumerate(formula_issues):
+            source_text = str(issue.get("sourceText") or issue.get("candidateText") or "").strip()
+            if not source_text:
+                continue
+            region = next(
+                (
+                    candidate
+                    for candidate in formula_regions
+                    if str(candidate.get("sourceText") or candidate.get("caption") or "").strip()
+                    == source_text
+                ),
+                formula_regions[0] if len(formula_issues) == len(formula_regions) == 1 else None,
+            )
+            if not region:
+                continue
+            bbox = region.get("bbox")
+            image_source = Path(str(page_item.get("image_path") or ""))
+            if not isinstance(bbox, dict) or not image_source.is_file():
+                continue
+            prompt_version_formula = "formula-repair-v2"
+            cache_key = hashlib.sha256(
+                f"{sha256}:{page_item['page']}:{bbox}:{source_text}:{model_id}:{prompt_version_formula}".encode()
+            ).hexdigest()
+            response_path = formula_cache_dir / f"page-{page_item['page']}-{index + 1}-{cache_key[:16]}.json"
+            crop_path = formula_cache_dir / f"page-{page_item['page']}-{index + 1}-{cache_key[:16]}.png"
+            cache_hit = response_path.is_file()
+            try:
+                if cache_hit:
+                    response = json.loads(response_path.read_text(encoding="utf-8"))
+                else:
+                    width, height = _crop_normalized_region(image_source, bbox, crop_path)
+                    response = vision_page(
+                        {
+                            "paperId": paper_id,
+                            "page": page_item["page"],
+                            "imagePath": str(crop_path.resolve()),
+                            "imageWidth": width,
+                            "imageHeight": height,
+                            "figureId": f"formula:page-{page_item['page']}:{index + 1}",
+                            "paperTitle": result.document.title,
+                            "task": "formula_repair",
+                            "sourceText": source_text,
+                            "promptVersion": prompt_version_formula,
+                        }
+                    )
+                    temporary = response_path.with_suffix(".tmp")
+                    temporary.write_text(
+                        json.dumps(response, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                    temporary.replace(response_path)
+                repaired, confidence = _parse_formula_repair_response(response)
+                if confidence < 0.85:
+                    raise ValueError("公式区域置信度不足，已保留原始文本")
+                repaired_markdown, replaced = _replace_unique_whitespace_equivalent(
+                    page_item["markdown"], source_text, repaired
+                )
+                if not replaced:
+                    raise ValueError("公式文本无法唯一映射到页面 Markdown")
+                page_item["markdown"] = repaired_markdown
+                page_item["uncertainties"] = [
+                    candidate
+                    for candidate in page_item.get("uncertainties", [])
+                    if candidate is not issue
+                ]
+                usage = response.get("usage") or {}
+                page_results.append(
+                    {
+                        "page": page_item["page"],
+                        "task": "formula_repair",
+                        "prompt_version": prompt_version_formula,
+                        "cache_key": cache_key,
+                        "cache_hit": cache_hit,
+                        "artifact_path": str(response_path),
+                        "model_id": str(response.get("modelId") or model_id),
+                        "confidence": confidence,
+                        "input_tokens": int(usage.get("inputTokens", 0)),
+                        "output_tokens": int(usage.get("outputTokens", 0)),
+                        "duration_ms": int(usage.get("durationMs", 0)),
+                        "failed": False,
+                    }
+                )
+            except Exception as error:  # noqa: BLE001 - unresolved formula remains reviewable
+                page_results.append(
+                    {
+                        "page": page_item["page"],
+                        "task": "formula_repair",
+                        "prompt_version": prompt_version_formula,
+                        "cache_key": cache_key,
+                        "cache_hit": cache_hit,
+                        "artifact_path": str(response_path) if response_path.is_file() else "",
+                        "model_id": model_id,
+                        "confidence": 0.0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "duration_ms": 0,
+                        "failed": True,
+                        "error": f"{type(error).__name__}: {error}",
+                    }
+                )
+
+    table_cache_dir = cache_dir / "tables"
+    table_cache_dir.mkdir(parents=True, exist_ok=True)
+    for table in result.document.tables:
+        image_relative = str(table.get("image_path") or "")
+        page_number = int(table.get("page") or 0)
+        image_path = (output_dir / image_relative).resolve() if image_relative else None
+        if not image_path or not image_path.is_file() or page_number not in page_result_by_number:
+            continue
+        prompt_version_table = "table-reconstruction-v2"
+        cache_key = hashlib.sha256(
+            f"{sha256}:{page_number}:{table.get('bbox')}:{model_id}:{prompt_version_table}".encode()
+        ).hexdigest()
+        response_path = table_cache_dir / f"{table['id']}-{cache_key[:16]}.json"
+        cache_hit = response_path.is_file()
+        try:
+            if cache_hit:
+                response = json.loads(response_path.read_text(encoding="utf-8"))
+            else:
+                response = vision_page(
+                    {
+                        "paperId": paper_id,
+                        "page": page_number,
+                        "imagePath": str(image_path),
+                        "figureId": f"table:{table['id']}",
+                        "paperTitle": result.document.title,
+                        "caption": str(table.get("caption") or ""),
+                        "task": "table_reconstruct",
+                        "sourceText": str(table.get("source_text") or "")[:30_000],
+                        "promptVersion": prompt_version_table,
+                    }
+                )
+                temporary = response_path.with_suffix(".tmp")
+                temporary.write_text(json.dumps(response, ensure_ascii=False, indent=2), encoding="utf-8")
+                temporary.replace(response_path)
+            parsed_table = _parse_vision_page_response(response)
+            if not _is_gfm_table(parsed_table["markdown"]):
+                raise ValueError("视觉模型没有返回合法的 Markdown 表格")
+            markdown_path = output_dir / "tables" / f"{table['id']}.md"
+            markdown_path.write_text(parsed_table["markdown"], encoding="utf-8")
+            csv_path = output_dir / "tables" / f"{table['id']}.csv"
+            table["markdown"] = parsed_table["markdown"]
+            table["markdown_path"] = f"tables/{markdown_path.name}"
+            if _write_table_csv(parsed_table["markdown"], csv_path):
+                table["csv_path"] = f"tables/{csv_path.name}"
+            page_item = page_result_by_number[page_number]
+            page_item["markdown"] = _insert_reconstructed_table(
+                page_item["markdown"], str(table.get("caption") or ""), parsed_table["markdown"]
+            )
+            page_item["uncertainties"] = [
+                uncertainty
+                for uncertainty in page_item.get("uncertainties", [])
+                if uncertainty.get("kind") != "table"
+            ]
+            usage = response.get("usage") or {}
+            page_results.append(
+                {
+                    "page": page_number,
+                    "task": "table_reconstruct",
+                    "prompt_version": prompt_version_table,
+                    "cache_key": cache_key,
+                    "cache_hit": cache_hit,
+                    "artifact_path": str(response_path),
+                    "model_id": str(response.get("modelId") or model_id),
+                    "confidence": parsed_table["confidence"],
+                    "input_tokens": int(usage.get("inputTokens", 0)),
+                    "output_tokens": int(usage.get("outputTokens", 0)),
+                    "duration_ms": int(usage.get("durationMs", 0)),
+                    "failed": False,
+                }
+            )
+        except Exception as error:  # noqa: BLE001 - keep readable page content on a table failure
+            result.uncertainties.append(
+                {
+                    "page": page_number,
+                    "kind": "table",
+                    "bbox": table.get("bbox"),
+                    "sourceText": str(table.get("source_text") or ""),
+                    "candidateText": "",
+                    "confidence": 0.0,
+                    "resolutionStatus": "unresolved",
+                }
+            )
+            page_results.append(
+                {
+                    "page": page_number,
+                    "task": "table_reconstruct",
+                    "prompt_version": prompt_version_table,
+                    "cache_key": cache_key,
+                    "cache_hit": cache_hit,
+                    "artifact_path": str(response_path) if response_path.is_file() else "",
+                    "model_id": model_id,
+                    "confidence": 0.0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "duration_ms": 0,
+                    "failed": True,
+                    "error": f"{type(error).__name__}: {error}",
+                }
+            )
+
     page_markdown = [
-        (item["page"], _embed_figures(item["markdown"], figures_by_page.get(item["page"], [])))
+        (
+            item["page"],
+            _normalize_reference_layout(
+                _embed_figures(item["markdown"], figures_by_page.get(item["page"], []))
+            ),
+        )
         for item in page_results
+        if item["task"] == "page_transcribe"
     ]
     page_markdown, removed = _remove_repeated_marginal_lines(page_markdown)
     result.document.sections = _semantic_sections(page_markdown, paper_id)
     result.markdown = "\n\n".join(section.markdown for section in result.document.sections)
     result.page_recognitions = page_results
     for item in page_results:
-        for uncertainty in item["uncertainties"]:
+        for uncertainty in item.get("uncertainties", []):
             result.uncertainties.append({
                 "page": item["page"],
                 "kind": str(uncertainty.get("kind", "text")),
@@ -864,14 +1452,24 @@ def _apply_vision_reconstruction(
                 "confidence": float(uncertainty.get("confidence", item["confidence"])),
                 "resolutionStatus": "unresolved" if item["confidence"] < 0.85 else "resolved",
             })
-    failed_pages = [item["page"] for item in page_results if item["failed"]]
+    failed_pages = [
+        item["page"]
+        for item in page_results
+        if item["task"] == "page_transcribe" and item["failed"]
+    ]
     unresolved = [item for item in result.uncertainties if item["resolutionStatus"] == "unresolved"]
+    result.document.partial = False
+    result.document.warnings = [
+        warning
+        for warning in result.document.warnings
+        if "pypdf fallback was used" not in warning
+    ]
     if failed_pages or unresolved:
         result.document.partial = True
     if failed_pages:
         result.document.warnings.append(f"视觉识别失败页面：{', '.join(map(str, failed_pages))}")
     result.quality_stats = {
-        "recognizedPageCount": len(page_results) - len(failed_pages),
+        "recognizedPageCount": sum(1 for item in page_results if item["task"] == "page_transcribe" and not item["failed"]),
         "cachedPageCount": sum(1 for item in page_results if item["cache_hit"]),
         "failedPageCount": len(failed_pages),
         "uncertainRegionCount": len(unresolved),
@@ -1025,7 +1623,7 @@ def parse_pdf(
         if vision_page and vision_model_id and cache_dir:
             try:
                 return _apply_vision_reconstruction(
-                    result, source, cache_dir.parent / "vision", paper_id, sha256,
+                    result, source, output_dir, cache_dir.parents[1] / "vision" / sha256, paper_id, sha256,
                     vision_model_id, vision_page,
                 )
             except Exception as error:
@@ -1047,7 +1645,7 @@ def parse_pdf(
     if vision_page and vision_model_id and cache_dir:
         try:
             return _apply_vision_reconstruction(
-                result, source, cache_dir.parent / "vision", paper_id, sha256,
+                result, source, output_dir, cache_dir.parents[1] / "vision" / sha256, paper_id, sha256,
                 vision_model_id, vision_page,
             )
         except Exception as error:

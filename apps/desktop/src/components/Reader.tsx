@@ -1,5 +1,5 @@
 import type { ContextDraftItem, ContextSnapshot, FigureAnalysis, LibraryPaper, ModelActivityPhase, ModelStreamEvent, PromptTemplateCategory, ReaderAnalysisRecord, ReaderAnalysisType, ReaderAnnotation, ReaderChatTurn, TranslationRecord, TranslationSegment, TranslationTerm } from "@p2i/contracts";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentPropsWithoutRef, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { BookOpen, BookOpenText, Bot, Check, ChevronLeft, Eye, EyeOff, FileImage, FileText, Languages, Layers3, LoaderCircle, Maximize2, MessageSquareText, Minimize2, Minus, Palette, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus, RefreshCw, RotateCcw, Search, Send, Sparkles, Square, Trash2, TriangleAlert, Volume2, X } from "lucide-react";
@@ -124,11 +124,16 @@ function customReaderPalette(background: string, text: string) {
   };
 }
 
+function ReaderTable({ children, node: _node, ...props }: ComponentPropsWithoutRef<"table"> & { node?: unknown }) {
+  return <div className="reader-table-scroll" role="region" aria-label="论文表格" tabIndex={0}><table {...props}>{children}</table></div>;
+}
+
 function MarkdownBlock({ value, markdownPath, figureAnalysisFor, onToggleFigure }: { value: string; markdownPath?: string; figureAnalysisFor?: (source?: string) => FigureAnalysis | undefined; onToggleFigure?: (source?: string) => void }) {
   return <ReactMarkdown
     remarkPlugins={[remarkGfm, remarkMath]}
     rehypePlugins={[rehypeKatex]}
     components={{
+      table: ReaderTable,
       img: ({ src, alt }) => {
         const resolved = resolveMarkdownAssetPath(markdownPath, src);
         const rendered = resolved && /^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(resolved) ? assetUrl(resolved) : resolved;
@@ -213,6 +218,7 @@ function BilingualBlock({ block, state, records, annotations, activeTranslationK
     };
   }, [activeTranslationKeys, annotations, annotationsVisible, annotationPlugin]);
   return <div ref={sourceRef} data-reader-block-id={block.id} className="reader-source range-annotated-source" onContextMenu={(event) => onSentenceContextMenu(block, event)}><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath, annotationPlugin]} rehypePlugins={[rehypeKatex]} components={{
+    table: ReaderTable,
     span: ({ children, ...props }) => {
       const attributes = props as Record<string, unknown>;
       const translationId = String(attributes["data-translation-id"] ?? "");

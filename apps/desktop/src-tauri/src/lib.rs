@@ -665,17 +665,17 @@ impl Engine {
             )
         } else if request.task == "page_transcribe" {
             format!(
-                "你是科研 PDF 页面重建器。请逐字阅读页面图片，并参考下方本地提取草稿校正阅读顺序。恢复标题层级、连续段落、列表、引用、LaTeX 公式和表格；删除页码、重复页眉页脚；不要总结、翻译或补写。孤立数字不得作为标题。只返回 JSON：{{\"markdown\":\"...\",\"confidence\":0.0,\"uncertainties\":[{{\"kind\":\"text|heading|formula|table|reading_order\",\"sourceText\":\"\",\"candidateText\":\"\",\"confidence\":0.0}}]}}。看不清时保留草稿并列入 uncertainties，不得猜测。\n\n本地草稿：\n{}",
+                "你是科研 PDF 到 Markdown 的忠实重建器。逐字阅读页面图片，并使用下方本地草稿辅助校正双栏阅读顺序。必须遵守：\n1. 连续正文合并为自然段，不保留 PDF 的视觉断行或断词。\n2. 只把真实章节标题写成 Markdown 标题；页码、孤立编号、图表内文字不得成为标题。\n3. 行内公式必须写成 $...$，独立公式必须写成 $$...$$；使用可渲染 LaTeX，不得把公式压成普通文本、花括号串或 Unicode 近似符号。\n4. 表格必须写成合法 GFM Markdown 表格，每一行单独换行，包含表头分隔线；复杂或看不清的单元格列入 uncertainties，不能把整张表压成一段空格分隔文本。\n5. References/Bibliography 中每条 [n] 参考文献单独成段，保留编号、作者、题名、出处、年份和页码；正文引用不要拆分。\n6. 不要输出任何图片链接或整页截图。用 regions 报告真实 figure、table、formula 的 top-left 归一化 bbox，供本地代码裁图；formula 区域的 sourceText 必须与 markdown 中对应的完整公式完全一致。\n7. 删除页码、下载水印和重复页眉页脚；不得总结、翻译或补写。\n只返回 JSON：{{\"markdown\":\"...\",\"confidence\":0.0,\"regions\":[{{\"kind\":\"figure|table|formula\",\"caption\":\"\",\"sourceText\":\"\",\"bbox\":{{\"left\":0.0,\"top\":0.0,\"right\":1.0,\"bottom\":1.0}},\"confidence\":0.0}}],\"uncertainties\":[{{\"kind\":\"text|heading|formula|table|reading_order\",\"sourceText\":\"\",\"candidateText\":\"\",\"confidence\":0.0}}]}}。看不清时保留草稿并列入 uncertainties，不得猜测。\n\n本地草稿：\n{}",
                 request.source_text
             )
         } else if request.task == "region_verify" {
             format!(
-                "请对照这张从科研 PDF 页面裁出的高分辨率区域，复核下面的候选 Markdown。纠正过度换行、标题误判、乱码公式和阅读顺序；不得总结、翻译或猜测。只返回 JSON：{{\"markdown\":\"...\",\"confidence\":0.0,\"uncertainties\":[]}}。\n\n候选 Markdown：\n{}",
+                "请逐字对照这张科研 PDF 高分辨率页面裁图，修复下面的候选 Markdown。重点检查：公式必须使用 $...$ 或 $$...$$ 的可渲染 LaTeX；表格必须是包含表头分隔线的逐行 GFM 表格；参考文献必须一条 [n] 一段；双栏顺序、标题层级和自然段不得混乱。不要输出图片链接，不得总结、翻译或猜测。只返回 JSON：{{\"markdown\":\"...\",\"confidence\":0.0,\"regions\":[],\"uncertainties\":[]}}。\n\n候选 Markdown：\n{}",
                 request.source_text
             )
         } else if request.task == "table_reconstruct" {
             format!(
-                "请把科研论文中的表格区域忠实重建为 Markdown 表格。保留数字、单位、脚注和缺失值，不得推测。只返回 JSON：{{\"markdown\":\"...\",\"confidence\":0.0,\"uncertainties\":[]}}。现有草稿：{}",
+                "请逐格读取科研论文表格裁图，忠实重建为合法 GFM Markdown 表格。每行必须单独换行并包含表头分隔线；合并表头用清晰的重复列名展开；保留数字、正负号、百分比、单位、脚注、加粗最佳值和缺失值，不得推测。不要返回普通空格分隔文本。只返回 JSON：{{\"markdown\":\"...\",\"confidence\":0.0,\"uncertainties\":[]}}。现有草稿：{}",
                 request.source_text
             )
         } else {
@@ -2688,6 +2688,42 @@ mod tests {
             .expect("allowed check"));
         assert!(!engine
             .is_allowed_ocr_path(&outside.canonicalize().expect("canonical outside"))
+            .expect("outside check"));
+        fs::remove_dir_all(&test_root).expect("cleanup");
+    }
+
+    #[test]
+    fn vision_paths_accept_only_generated_artifacts_and_the_dedicated_cache() {
+        let test_root =
+            std::env::temp_dir().join(format!("p2i-vision-path-{}", std::process::id()));
+        let cache = test_root.join(".p2i/cache/vision/hash");
+        let generated = test_root.join(".p2i/generated/paper/revisions/revision/figures");
+        fs::create_dir_all(&cache).expect("vision cache directory");
+        fs::create_dir_all(&generated).expect("generated directory");
+        let cached_page = cache.join("page.jpg");
+        let generated_figure = generated.join("figure.png");
+        let outside = test_root.join("Papers/source-page.jpg");
+        fs::create_dir_all(outside.parent().expect("outside parent")).expect("paper directory");
+        fs::write(&cached_page, b"page").expect("cached page");
+        fs::write(&generated_figure, b"figure").expect("generated figure");
+        fs::write(&outside, b"outside").expect("outside image");
+        let engine = Engine::new();
+        engine
+            .allow_library_root(test_root.to_str().expect("root string"))
+            .expect("register root");
+
+        assert!(engine
+            .is_allowed_vision_path(&cached_page.canonicalize().expect("cached page path"))
+            .expect("cached page check"));
+        assert!(engine
+            .is_allowed_vision_path(
+                &generated_figure
+                    .canonicalize()
+                    .expect("generated figure path")
+            )
+            .expect("generated figure check"));
+        assert!(!engine
+            .is_allowed_vision_path(&outside.canonicalize().expect("outside path"))
             .expect("outside check"));
         fs::remove_dir_all(&test_root).expect("cleanup");
     }

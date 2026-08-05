@@ -429,7 +429,7 @@ class Library:
 
     def _preprocess_visual_artifacts(
         self, paper_id: str, source_hash: str, title: str, source_pdf: Path,
-        output_dir: Path, document: Any
+        output_dir: Path, document: Any, page_recognitions: list[dict[str, Any]] | None = None
     ) -> dict[str, Any]:
         suspicious_formulas, structural_formula_issues = self._suspicious_formulas(document)
         formula_issues = len(suspicious_formulas) + structural_formula_issues
@@ -449,19 +449,47 @@ class Library:
                     warnings.append(str(error))
                     failed = len(document.figures)
         if model_config and self.vision_analyze and suspicious_formulas:
-            formula_dir = output_dir / "formula-pages"
+            formula_dir = output_dir / "formula-regions"
             formula_dir.mkdir(parents=True, exist_ok=True)
-            rendered_pages: dict[int, Path] = {}
+            formula_regions: dict[int, list[dict[str, Any]]] = {}
+            for recognition in page_recognitions or []:
+                if recognition.get("task") != "page_transcribe":
+                    continue
+                for region in recognition.get("regions", []):
+                    if region.get("kind") == "formula" and isinstance(region.get("bbox"), dict):
+                        formula_regions.setdefault(int(recognition["page"]), []).append(region)
             with fitz.open(source_pdf) as pdf:
-                for section, original, page_number in suspicious_formulas:
+                for formula_index, (section, original, page_number) in enumerate(suspicious_formulas, start=1):
                     page_index = min(max(page_number - 1, 0), len(pdf) - 1)
-                    image_path = rendered_pages.get(page_number)
-                    if not image_path:
-                        image_path = formula_dir / f"page-{page_number}.png"
-                        pixmap = pdf[page_index].get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-                        pixmap.save(image_path)
-                        rendered_pages[page_number] = image_path
-                    prompt_version = "formula-repair-v1"
+                    candidates = formula_regions.get(page_number, [])
+                    region = next(
+                        (
+                            item
+                            for item in candidates
+                            if str(item.get("sourceText") or item.get("caption") or "").strip()
+                            == original.strip()
+                        ),
+                        candidates[0] if len(candidates) == 1 else None,
+                    )
+                    if not region:
+                        warnings.append(f"第 {page_number} 页公式缺少可靠坐标，已保留原文供对照 PDF")
+                        continue
+                    bbox = region["bbox"]
+                    page = pdf[page_index]
+                    page_rect = page.rect
+                    padding = 8
+                    clip = fitz.Rect(
+                        max(page_rect.x0, float(bbox["left"]) * page_rect.width - padding),
+                        max(page_rect.y0, float(bbox["top"]) * page_rect.height - padding),
+                        min(page_rect.x1, float(bbox["right"]) * page_rect.width + padding),
+                        min(page_rect.y1, float(bbox["bottom"]) * page_rect.height + padding),
+                    )
+                    if clip.width < 8 or clip.height < 8:
+                        warnings.append(f"第 {page_number} 页公式坐标无效，已保留原文供对照 PDF")
+                        continue
+                    image_path = formula_dir / f"page-{page_number}-{formula_index}.png"
+                    page.get_pixmap(matrix=fitz.Matrix(3, 3), clip=clip, alpha=False).save(image_path)
+                    prompt_version = "formula-repair-v2"
                     cache_key = hashlib.sha256(
                         f"{source_hash}:{section.id}:{original}:{model_config['modelId']}:{prompt_version}".encode()
                     ).hexdigest()
@@ -479,7 +507,7 @@ class Library:
                             response = self.vision_analyze({
                                 "imagePath": str(image_path.resolve()), "figureId": f"formula:{section.id}",
                                 "caption": original, "paperTitle": title, "promptVersion": prompt_version,
-                                "task": "formula", "sourceText": original,
+                                "task": "formula_repair", "sourceText": original,
                             })
                             raw = str(response.get("description", "")).strip().removeprefix("```json").removesuffix("```").strip()
                             parsed = json.loads(raw)
@@ -632,7 +660,7 @@ class Library:
             )
             connection.execute(
                 "INSERT INTO document_revisions(id, paper_id, source_hash, pipeline_version, processing_mode, "
-                "status, previous_revision_id, created_at) VALUES (?, ?, ?, 'visual-document-v1', ?, 'running', ?, ?)",
+                "status, previous_revision_id, created_at) VALUES (?, ?, ?, 'visual-document-v2', ?, 'running', ?, ?)",
                 (revision_id, paper_id, sha256, "vision" if processing_mode == "vision" else "local", previous["id"] if previous else None, started),
             )
         try:
@@ -656,7 +684,16 @@ class Library:
             )
             self._progress(callback, job_id, paper_id, JobStatus.CHECKING_FORMULAS, 0.62, "Checking formulas and visual artifacts", request_id)
             quality = self._preprocess_visual_artifacts(
-                paper_id, sha256, result.document.title, path, output_dir, result.document
+                paper_id,
+                sha256,
+                result.document.title,
+                path,
+                output_dir,
+                result.document,
+                result.page_recognitions,
+            )
+            result.markdown = "\n\n".join(
+                section.markdown for section in result.document.sections
             )
             if quality["warnings"]:
                 result.document.warnings.extend(quality["warnings"])
@@ -705,12 +742,12 @@ class Library:
                 connection.executemany(
                     "INSERT INTO page_recognitions(id, revision_id, paper_id, page, task, model_id, "
                     "prompt_version, cache_key, status, artifact_path, confidence, input_tokens, output_tokens, "
-                    "duration_ms, error, created_at, updated_at) VALUES (?, ?, ?, ?, 'page_transcribe', ?, "
-                    "'page-reconstruction-v1', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "duration_ms, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         (
-                            str(uuid.uuid4()), revision_id, paper_id, item["page"], item["model_id"],
-                            item["cache_key"], "failed" if item["failed"] else "completed",
+                            str(uuid.uuid4()), revision_id, paper_id, item["page"], item["task"],
+                            item["model_id"], item["prompt_version"], item["cache_key"],
+                            "failed" if item["failed"] else "completed",
                             item.get("artifact_path") or None, item.get("confidence"),
                             item.get("input_tokens", 0), item.get("output_tokens", 0),
                             item.get("duration_ms", 0), item.get("error"), now, now,
