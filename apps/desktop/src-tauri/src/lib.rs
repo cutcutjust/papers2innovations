@@ -762,7 +762,7 @@ impl Engine {
             };
             (response, "/content/0/text")
         } else {
-            let body = json!({
+            let mut body = json!({
                 "model": config.model.model,
                 "messages": [{"role":"user","content":[
                     {"type":"text","text":prompt},
@@ -772,6 +772,10 @@ impl Engine {
                 "max_tokens": config.model.max_output_tokens.min(8192),
                 "stream": false
             });
+            // Regional reconstruction is a direct transcription task. Qwen and
+            // DeepSeek reasoning can otherwise consume the entire table timeout
+            // without producing the required structured JSON.
+            disable_reasoning_for_direct_output(&mut body, &config.model.model);
             let endpoint = format!(
                 "{}/chat/completions",
                 config.provider.base_url.trim_end_matches('/')
@@ -1560,6 +1564,17 @@ fn model_request_body(input: &ModelStreamInput, stream: bool, max_tokens: u64) -
             }
         }
         body
+    }
+}
+
+fn disable_reasoning_for_direct_output(body: &mut Value, model_name: &str) {
+    let model_name = model_name.to_ascii_lowercase();
+    let object = body.as_object_mut().expect("model body");
+    if model_name.contains("qwen") {
+        object.insert("enable_thinking".into(), Value::Bool(false));
+    }
+    if model_name.contains("deepseek") {
+        object.insert("thinking".into(), json!({"type": "disabled"}));
     }
 }
 
@@ -2416,10 +2431,11 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        consume_model_stream, import_pdf_sources, model_endpoint, model_headers,
-        model_request_body, send_model_request, sha256_file, stream_delta, stream_reasoning_delta,
-        validate_credential_id, Engine, ModelConfigInput, ModelMessageInput, ModelStreamInput,
-        OcrLimiter, PdfImportOptions, ProviderConfigInput, FILE_HASH_BUFFER_BYTES,
+        consume_model_stream, disable_reasoning_for_direct_output, import_pdf_sources,
+        model_endpoint, model_headers, model_request_body, send_model_request, sha256_file,
+        stream_delta, stream_reasoning_delta, validate_credential_id, Engine, ModelConfigInput,
+        ModelMessageInput, ModelStreamInput, OcrLimiter, PdfImportOptions, ProviderConfigInput,
+        FILE_HASH_BUFFER_BYTES,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -2612,6 +2628,24 @@ mod tests {
             true,
             1024,
         );
+        assert!(default_body.get("enable_thinking").is_none());
+        assert!(default_body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn direct_vision_transcription_disables_supported_reasoning_models() {
+        let mut qwen_body = json!({"model": "qwen3.6-plus"});
+        disable_reasoning_for_direct_output(&mut qwen_body, "qwen3.6-plus");
+        assert_eq!(qwen_body["enable_thinking"], json!(false));
+        assert!(qwen_body.get("thinking").is_none());
+
+        let mut deepseek_body = json!({"model": "deepseek-v4-pro"});
+        disable_reasoning_for_direct_output(&mut deepseek_body, "deepseek-v4-pro");
+        assert_eq!(deepseek_body["thinking"], json!({"type": "disabled"}));
+        assert!(deepseek_body.get("enable_thinking").is_none());
+
+        let mut default_body = json!({"model": "vision-model"});
+        disable_reasoning_for_direct_output(&mut default_body, "vision-model");
         assert!(default_body.get("enable_thinking").is_none());
         assert!(default_body.get("thinking").is_none());
     }
