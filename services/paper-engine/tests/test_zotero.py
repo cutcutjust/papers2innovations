@@ -133,7 +133,7 @@ def test_import_reresolves_zotero_attachment_and_enqueues_parse(tmp_path: Path) 
         source = connection.execute("SELECT metadata_json FROM paper_sources").fetchone()
         parse_runs = connection.execute("SELECT COUNT(*) FROM parse_runs").fetchone()[0]
     assert job["status"] == "DISCOVERED"
-    assert dict(stage) == {"stage": "hash", "status": "DISCOVERED"}
+    assert dict(stage) == {"stage": "hash", "status": "pending"}
     assert parse_runs == 0
     assert json.loads(source["metadata_json"])["title"] == "Test paper"
 

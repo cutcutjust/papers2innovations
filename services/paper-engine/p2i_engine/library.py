@@ -19,6 +19,7 @@ from .citations import GRAPH_SCHEMA_VERSION, build_two_level_graph, extract_refe
 from .ingestion import FileEventQueue
 from .models import CancelledError, JobStatus, PaperDocument, ProgressEvent, utc_now
 from .parsing import parse_pdf
+from .parsing.visual_regions import estimate_visual_calls, plan_visual_regions
 from .zotero import ZoteroImporter, ZoteroLockedError
 
 ProgressCallback = Callable[[ProgressEvent], None]
@@ -227,8 +228,8 @@ class Library:
                 (JobStatus.QUEUED.value, now, *transient),
             )
             connection.execute(
-                f"UPDATE job_stages SET status = ?, updated_at = ? WHERE status IN ({placeholders})",
-                (JobStatus.QUEUED.value, now, *transient),
+                f"UPDATE job_stages SET status = 'pending', updated_at = ? WHERE status = 'running' OR status IN ({placeholders})",
+                (now, *transient),
             )
         return recovered
 
@@ -291,13 +292,34 @@ class Library:
             stage = self._stage_for_status(status)
             if stage:
                 stage_progress = 1.0 if status in (JobStatus.READY, JobStatus.PARTIAL) else progress
+                stage_status = (
+                    "partial" if status is JobStatus.PARTIAL
+                    else "completed" if status is JobStatus.READY
+                    else "running"
+                )
+                stage_order = [
+                    "hash", "render", "layout", "vision_text", "figures", "formulas",
+                    "cleanup", "tables", "ocr", "verification", "index",
+                ]
+                earlier = stage_order[:stage_order.index(stage)] if stage in stage_order else []
+                if earlier:
+                    placeholders = ",".join("?" for _ in earlier)
+                    connection.execute(
+                        f"UPDATE job_stages SET status = ?, progress = 1, finished_at = COALESCE(finished_at, ?), "
+                        f"updated_at = ? WHERE job_id = ? AND stage IN ({placeholders}) "
+                        "AND status NOT IN (?, ?, ?)",
+                        (
+                            "completed", now, now, job_id, *earlier,
+                            "failed", "partial", "cancelled",
+                        ),
+                    )
                 connection.execute(
                     "INSERT INTO job_stages(id, job_id, stage, status, progress, started_at, updated_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(job_id, stage) DO UPDATE SET status = excluded.status, "
                     "progress = excluded.progress, started_at = COALESCE(job_stages.started_at, excluded.started_at), "
                     "updated_at = excluded.updated_at",
-                    (str(uuid.uuid4()), job_id, stage, status.value, stage_progress, now, now),
+                    (str(uuid.uuid4()), job_id, stage, stage_status, stage_progress, now, now),
                 )
         if callback:
             callback(
@@ -355,7 +377,7 @@ class Library:
             connection.execute(
                 "INSERT INTO job_stages(id, job_id, stage, status, progress, updated_at) "
                 "VALUES (?, ?, 'hash', ?, 0, ?)",
-                (str(uuid.uuid4()), job_id, JobStatus.DISCOVERED.value, now),
+                (str(uuid.uuid4()), job_id, "pending", now),
             )
         return paper_id, paper_file_id, job_id
 
@@ -636,10 +658,15 @@ class Library:
         # Files created before the visual import pipeline have no option file;
         # keep those historical records readable without exposing a new local-import path.
         processing_mode = "legacy-local"
+        vision_call_limit: int | None = None
         if import_options_path.is_file():
             try:
-                processing_mode = str(json.loads(import_options_path.read_text(encoding="utf-8")).get("processingMode") or "vision")
-            except (OSError, json.JSONDecodeError):
+                import_options = json.loads(import_options_path.read_text(encoding="utf-8"))
+                processing_mode = str(import_options.get("processingMode") or "vision")
+                configured_limit = import_options.get("maxVisionCalls")
+                if configured_limit is not None:
+                    vision_call_limit = max(1, int(configured_limit))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
                 processing_mode = "legacy-local"
         vision_model_id: str | None = None
         if processing_mode == "vision":
@@ -649,8 +676,12 @@ class Library:
                 vision_model_id = None
         output_dir = self.generated_dir / paper_id / "revisions" / revision_id
         with self.db.connect() as connection:
+            paper_before = connection.execute(
+                "SELECT status, markdown_path, document_path FROM papers WHERE id = ?",
+                (paper_id,),
+            ).fetchone()
             previous = connection.execute(
-                "SELECT id FROM document_revisions WHERE paper_id = ? AND status IN ('completed', 'partial') "
+                "SELECT id, status FROM document_revisions WHERE paper_id = ? AND status IN ('completed', 'partial') "
                 "ORDER BY created_at DESC LIMIT 1", (paper_id,),
             ).fetchone()
             connection.execute(
@@ -660,7 +691,7 @@ class Library:
             )
             connection.execute(
                 "INSERT INTO document_revisions(id, paper_id, source_hash, pipeline_version, processing_mode, "
-                "status, previous_revision_id, created_at) VALUES (?, ?, ?, 'visual-document-v2', ?, 'running', ?, ?)",
+                "status, previous_revision_id, created_at) VALUES (?, ?, ?, 'visual-document-v3', ?, 'running', ?, ?)",
                 (revision_id, paper_id, sha256, "vision" if processing_mode == "vision" else "local", previous["id"] if previous else None, started),
             )
         try:
@@ -669,9 +700,9 @@ class Library:
             self._progress(callback, job_id, paper_id, JobStatus.HASHING, 0.12, "SHA-256 verified", request_id)
             self._progress(callback, job_id, paper_id, JobStatus.QUEUED, 0.2, "Parse job queued", request_id)
             self._progress(callback, job_id, paper_id, JobStatus.RENDERING, 0.26, "Rendering PDF pages at 200 DPI", request_id)
-            self._progress(callback, job_id, paper_id, JobStatus.PARSING_LAYOUT, 0.32, "Parsing Docling layout and coordinates", request_id)
+            self._progress(callback, job_id, paper_id, JobStatus.PARSING_LAYOUT, 0.32, "正在使用 PyMuPDF 规划正文、公式、表格和参考文献区域", request_id)
             if vision_model_id:
-                self._progress(callback, job_id, paper_id, JobStatus.RECOGNIZING_TEXT, 0.4, "Reconstructing page Markdown with the vision model", request_id)
+                self._progress(callback, job_id, paper_id, JobStatus.RECOGNIZING_TEXT, 0.4, "正在逐区域重建论文结构", request_id)
             result = parse_pdf(
                 path,
                 output_dir,
@@ -681,7 +712,101 @@ class Library:
                 ocr_page=self.ocr_page,
                 vision_page=self.vision_analyze,
                 vision_model_id=vision_model_id,
+                vision_call_limit=vision_call_limit,
             )
+            if processing_mode == "vision" and not bool(result.quality_stats.get("publishable", False)):
+                now = utc_now()
+                stats = result.quality_stats
+                output_dir.mkdir(parents=True, exist_ok=True)
+                failure_manifest = output_dir / "failed-visual-revision.json"
+                failure_manifest.write_text(
+                    json.dumps(
+                        {
+                            "warnings": result.document.warnings,
+                            "quality": stats,
+                            "regions": [
+                                {
+                                    key: region.get(key)
+                                    for key in (
+                                        "region_key", "page", "kind", "sequence", "bbox", "status",
+                                        "model_id", "prompt_version", "cache_key", "cache_hit", "confidence",
+                                        "input_tokens", "output_tokens", "duration_ms", "error_kind", "error",
+                                    )
+                                }
+                                for region in result.visual_regions
+                            ],
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                with self.db.connect() as connection:
+                    connection.executemany(
+                        "INSERT INTO visual_regions(id, revision_id, paper_id, page, region_key, kind, sequence, "
+                        "bbox_json, image_hash, required, status, model_id, prompt_version, cache_key, artifact_path, "
+                        "confidence, input_tokens, output_tokens, duration_ms, attempt, error_kind, error, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        [
+                            (
+                                str(uuid.uuid4()), revision_id, paper_id, region["page"], region["region_key"],
+                                region["kind"], region["sequence"], json.dumps(region.get("bbox") or {}),
+                                region.get("image_hash", ""), 1 if region.get("required") else 0,
+                                region.get("status", "failed"), region.get("model_id", vision_model_id or ""),
+                                region.get("prompt_version", ""), region.get("cache_key", ""),
+                                region.get("artifact_path") or None, region.get("confidence"),
+                                region.get("input_tokens", 0), region.get("output_tokens", 0),
+                                region.get("duration_ms", 0), region.get("attempt", 1),
+                                region.get("error_kind"), region.get("error"), now, now,
+                            )
+                            for region in result.visual_regions
+                        ],
+                    )
+                    connection.execute(
+                        "INSERT INTO preprocess_quality(paper_id, source_hash, formula_issue_count, repaired_formula_count, "
+                        "figure_count, analyzed_figure_count, failed_figure_count, warnings_json, updated_at, "
+                        "recognized_page_count, cached_page_count, failed_page_count, uncertain_region_count, "
+                        "removed_header_footer_count, input_tokens, output_tokens, duration_ms, total_region_count, "
+                        "completed_region_count, failed_region_count, unknown_region_count, vision_model_id) "
+                        "VALUES (?, ?, 0, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT(paper_id) DO UPDATE SET source_hash=excluded.source_hash, warnings_json=excluded.warnings_json, "
+                        "updated_at=excluded.updated_at, recognized_page_count=excluded.recognized_page_count, "
+                        "cached_page_count=excluded.cached_page_count, failed_page_count=excluded.failed_page_count, "
+                        "uncertain_region_count=excluded.uncertain_region_count, removed_header_footer_count=excluded.removed_header_footer_count, "
+                        "input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens, duration_ms=excluded.duration_ms, "
+                        "total_region_count=excluded.total_region_count, completed_region_count=excluded.completed_region_count, "
+                        "failed_region_count=excluded.failed_region_count, unknown_region_count=excluded.unknown_region_count, "
+                        "vision_model_id=excluded.vision_model_id",
+                        (
+                            paper_id, sha256, len(result.document.figures),
+                            json.dumps(result.document.warnings, ensure_ascii=False), now,
+                            stats.get("recognizedPageCount", 0), stats.get("cachedPageCount", 0),
+                            stats.get("failedPageCount", result.document.page_count), stats.get("uncertainRegionCount", 0),
+                            stats.get("removedHeaderFooterCount", 0), stats.get("inputTokens", 0),
+                            stats.get("outputTokens", 0), stats.get("durationMs", 0),
+                            stats.get("totalRegionCount", 0), stats.get("completedRegionCount", 0),
+                            stats.get("failedRegionCount", 0), stats.get("unknownRegionCount", 0),
+                            stats.get("visionModelId") or vision_model_id,
+                        ),
+                    )
+                    connection.execute(
+                        "UPDATE document_revisions SET artifact_manifest_json = ? WHERE id = ?",
+                        (json.dumps({"failureManifest": str(failure_manifest), "quality": stats}, ensure_ascii=False), revision_id),
+                    )
+                    connection.execute(
+                        "UPDATE job_stages SET status = ?, progress = ?, artifact_json = ?, error = ?, finished_at = ?, updated_at = ? "
+                        "WHERE job_id = ? AND stage = 'vision_text'",
+                        (
+                            "failed",
+                            (stats.get("completedRegionCount", 0) / max(1, stats.get("totalRegionCount", 0))),
+                            json.dumps(stats, ensure_ascii=False),
+                            "正文区域不完整，未发布降级 Markdown", now, now, job_id,
+                        ),
+                    )
+                raise RuntimeError(
+                    f"区域化视觉重建未通过发布门：{stats.get('recognizedPageCount', 0)}/{result.document.page_count} 页成功，"
+                    f"{stats.get('failedRegionCount', 0)} 个失败区域，{stats.get('unknownRegionCount', 0)} 个超时状态未知区域"
+                )
             self._progress(callback, job_id, paper_id, JobStatus.CHECKING_FORMULAS, 0.62, "Checking formulas and visual artifacts", request_id)
             quality = self._preprocess_visual_artifacts(
                 paper_id,
@@ -753,6 +878,26 @@ class Library:
                             item.get("duration_ms", 0), item.get("error"), now, now,
                         )
                         for item in result.page_recognitions
+                    ],
+                )
+                connection.executemany(
+                    "INSERT INTO visual_regions(id, revision_id, paper_id, page, region_key, kind, sequence, "
+                    "bbox_json, image_hash, required, status, model_id, prompt_version, cache_key, artifact_path, "
+                    "confidence, input_tokens, output_tokens, duration_ms, attempt, error_kind, error, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (
+                            str(uuid.uuid4()), revision_id, paper_id, item["page"], item["region_key"],
+                            item["kind"], item["sequence"], json.dumps(item.get("bbox") or {}),
+                            item.get("image_hash", ""), 1 if item.get("required") else 0,
+                            item.get("status", "failed"), item.get("model_id", vision_model_id or ""),
+                            item.get("prompt_version", ""), item.get("cache_key", ""),
+                            item.get("artifact_path") or None, item.get("confidence"),
+                            item.get("input_tokens", 0), item.get("output_tokens", 0),
+                            item.get("duration_ms", 0), item.get("attempt", 1),
+                            item.get("error_kind"), item.get("error"), now, now,
+                        )
+                        for item in result.visual_regions
                     ],
                 )
                 connection.executemany(
@@ -910,7 +1055,9 @@ class Library:
                         json.dumps({
                             "metadataPath": str(metadata_path), "referencesPath": str(references_path),
                             "pageRecognitions": len(result.page_recognitions),
+                            "visualRegions": len(result.visual_regions),
                             "uncertainties": len(result.uncertainties),
+                            "quality": result.quality_stats,
                         }), now, revision_id,
                     ),
                 )
@@ -918,12 +1065,17 @@ class Library:
                 connection.execute(
                     "UPDATE preprocess_quality SET recognized_page_count = ?, cached_page_count = ?, "
                     "failed_page_count = ?, uncertain_region_count = ?, removed_header_footer_count = ?, "
-                    "input_tokens = ?, output_tokens = ?, duration_ms = ? WHERE paper_id = ?",
+                    "input_tokens = ?, output_tokens = ?, duration_ms = ?, total_region_count = ?, "
+                    "completed_region_count = ?, failed_region_count = ?, unknown_region_count = ?, "
+                    "vision_model_id = ? WHERE paper_id = ?",
                     (
                         stats.get("recognizedPageCount", 0), stats.get("cachedPageCount", 0),
                         stats.get("failedPageCount", 0), stats.get("uncertainRegionCount", 0),
                         stats.get("removedHeaderFooterCount", 0), stats.get("inputTokens", 0),
-                        stats.get("outputTokens", 0), stats.get("durationMs", 0), paper_id,
+                        stats.get("outputTokens", 0), stats.get("durationMs", 0),
+                        stats.get("totalRegionCount", 0), stats.get("completedRegionCount", 0),
+                        stats.get("failedRegionCount", 0), stats.get("unknownRegionCount", 0),
+                        stats.get("visionModelId") or vision_model_id, paper_id,
                     ),
                 )
                 connection.execute(
@@ -936,20 +1088,27 @@ class Library:
                         run_id,
                     ),
                 )
+                completed_regions = int(stats.get("completedRegionCount", 0))
+                total_regions = int(stats.get("totalRegionCount", 0))
+                if final_status is JobStatus.READY:
+                    job_message = f"视觉重建完成：{completed_regions}/{total_regions} 个区域"
+                else:
+                    job_message = f"部分完成：{completed_regions}/{total_regions} 个区域，{stats.get('failedRegionCount', 0)} 个失败"
                 connection.execute(
-                    "UPDATE jobs SET status = ?, progress = 1, message = 'Ready', updated_at = ?, finished_at = ? WHERE id = ?",
-                    (final_status.value, now, now, job_id),
+                    "UPDATE jobs SET status = ?, progress = 1, message = ?, updated_at = ?, finished_at = ? WHERE id = ?",
+                    (final_status.value, job_message, now, now, job_id),
                 )
                 connection.execute(
                     "UPDATE job_stages SET status = ?, progress = 1, artifact_json = ?, finished_at = ?, updated_at = ? "
                     "WHERE job_id = ? AND stage = 'index'",
                     (
-                        final_status.value,
+                        "partial" if final_status is JobStatus.PARTIAL else "completed",
                         json.dumps(
                             {
                                 "markdownPath": str(markdown_path),
                                 "documentPath": str(document_path),
                                 "warnings": result.document.warnings,
+                                **stats,
                             }
                         ),
                         now,
@@ -965,7 +1124,7 @@ class Library:
                         paper_id=paper_id,
                         status=final_status,
                         progress=1,
-                        message="Paper is ready" if final_status is JobStatus.READY else "Paper is partially ready",
+                        message=job_message,
                     )
                 )
         except CancelledError:
@@ -986,19 +1145,28 @@ class Library:
                 connection.execute(
                     "UPDATE job_stages SET status = ?, error = 'Cancelled', finished_at = ?, updated_at = ? "
                     "WHERE job_id = ? AND finished_at IS NULL",
-                    (JobStatus.CANCELLED.value, now, now, job_id),
+                    ("cancelled", now, now, job_id),
                 )
         except Exception as error:
             now = utc_now()
             message = f"{type(error).__name__}: {error}"
             with self.db.connect() as connection:
+                if previous and paper_before:
+                    connection.execute(
+                        "UPDATE papers SET status = ?, markdown_path = ?, document_path = ?, updated_at = ? WHERE id = ?",
+                        (
+                            paper_before["status"], paper_before["markdown_path"],
+                            paper_before["document_path"], now, paper_id,
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE papers SET status = ?, markdown_path = NULL, document_path = NULL, updated_at = ? WHERE id = ?",
+                        (JobStatus.FAILED.value, now, paper_id),
+                    )
                 connection.execute(
-                    "UPDATE papers SET status = ?, updated_at = ? WHERE id = ?",
-                    (JobStatus.FAILED.value, now, paper_id),
-                )
-                connection.execute(
-                    "UPDATE jobs SET status = ?, error = ?, message = 'Parse failed', updated_at = ?, finished_at = ? WHERE id = ?",
-                    (JobStatus.FAILED.value, message, now, now, job_id),
+                    "UPDATE jobs SET status = ?, error = ?, message = ?, updated_at = ?, finished_at = ? WHERE id = ?",
+                    (JobStatus.FAILED.value, message, message[:500], now, now, job_id),
                 )
                 connection.execute(
                     "UPDATE parse_runs SET status = ?, error = ?, finished_at = ? WHERE id = ?",
@@ -1011,7 +1179,7 @@ class Library:
                 connection.execute(
                     "UPDATE job_stages SET status = ?, error = ?, finished_at = ?, updated_at = ? "
                     "WHERE job_id = ? AND finished_at IS NULL",
-                    (JobStatus.FAILED.value, message, now, now, job_id),
+                    ("failed", message, now, now, job_id),
                 )
             if callback:
                 callback(
@@ -1780,7 +1948,10 @@ class Library:
         placeholders = ",".join("?" for _ in normalized)
         with self.db.connect() as connection:
             rows = connection.execute(
-                f"SELECT id, title, page_count FROM papers WHERE id IN ({placeholders}) ORDER BY title",
+                f"SELECT p.id, p.title, p.page_count, p.canonical_sha256, p.document_path, "
+                "pf.absolute_path AS source_path FROM papers p "
+                "LEFT JOIN paper_files pf ON pf.paper_id = p.id AND pf.is_missing = 0 "
+                f"WHERE p.id IN ({placeholders}) GROUP BY p.id ORDER BY p.title",
                 normalized,
             ).fetchall()
         try:
@@ -1788,9 +1959,31 @@ class Library:
         except Exception:
             config = None
         page_count = sum(max(0, int(row["page_count"] or 0)) for row in rows)
+        estimated_calls = 0
+        cached_regions = 0
+        model_id = str(config.get("modelId") or "") if config else ""
+        for row in rows:
+            document_path = Path(row["document_path"]) if row["document_path"] else None
+            source_path = Path(row["source_path"]) if row["source_path"] else None
+            if not model_id or not document_path or not document_path.is_file() or not source_path or not source_path.is_file():
+                estimated_calls += max(0, int(row["page_count"] or 0))
+                continue
+            try:
+                document = PaperDocument.model_validate_json(document_path.read_text(encoding="utf-8"))
+                cache_dir = self.internal_dir / "cache" / "vision" / row["canonical_sha256"]
+                regions = plan_visual_regions(
+                    source_path, document_path.parent, cache_dir,
+                    document.tables, document.figures,
+                )
+                estimate = estimate_visual_calls(regions, cache_dir, row["canonical_sha256"], model_id)
+                estimated_calls += estimate["uncached"]
+                cached_regions += estimate["cached"]
+            except (OSError, ValueError, json.JSONDecodeError):
+                estimated_calls += max(0, int(row["page_count"] or 0))
         return {
             "paperCount": len(rows), "pageCount": page_count,
-            "estimatedVisionCalls": page_count, "visionReady": bool(config),
+            "estimatedVisionCalls": estimated_calls, "cachedRegionCount": cached_regions,
+            "visionReady": bool(config),
             "visionModelId": config.get("modelId") if config else None,
             "papers": [{"id": row["id"], "title": row["title"], "pageCount": row["page_count"] or 0} for row in rows],
         }
@@ -1811,7 +2004,14 @@ class Library:
                     if row:
                         target = options_dir / f"{row['canonical_sha256']}.json"
                         temporary = target.with_suffix(".tmp")
-                        temporary.write_text(json.dumps({"processingMode": "vision", "visionConfirmed": True}), encoding="utf-8")
+                        temporary.write_text(
+                            json.dumps({
+                                "processingMode": "vision",
+                                "visionConfirmed": True,
+                                "maxVisionCalls": max(1, int(preview["estimatedVisionCalls"])),
+                            }),
+                            encoding="utf-8",
+                        )
                         temporary.replace(target)
         return [self.reparse_paper(item["id"], callback, request_id) for item in preview["papers"]]
 
@@ -2141,6 +2341,8 @@ class Library:
                 "repairedFormulaCount": 0, "figureCount": 0, "analyzedFigureCount": 0,
                 "failedFigureCount": 0, "recognizedPageCount": 0, "cachedPageCount": 0,
                 "failedPageCount": 0, "uncertainRegionCount": 0, "removedHeaderFooterCount": 0,
+                "totalRegionCount": 0, "completedRegionCount": 0, "failedRegionCount": 0,
+                "unknownRegionCount": 0, "visionModelId": None,
                 "usage": {"inputTokens": 0, "outputTokens": 0, "durationMs": 0},
                 "warnings": [], "updatedAt": None,
             }
@@ -2155,6 +2357,11 @@ class Library:
             "failedPageCount": row["failed_page_count"],
             "uncertainRegionCount": row["uncertain_region_count"],
             "removedHeaderFooterCount": row["removed_header_footer_count"],
+            "totalRegionCount": row["total_region_count"],
+            "completedRegionCount": row["completed_region_count"],
+            "failedRegionCount": row["failed_region_count"],
+            "unknownRegionCount": row["unknown_region_count"],
+            "visionModelId": row["vision_model_id"],
             "usage": {"inputTokens": row["input_tokens"], "outputTokens": row["output_tokens"], "durationMs": row["duration_ms"]},
             "warnings": json.loads(row["warnings_json"] or "[]"), "updatedAt": row["updated_at"],
         }

@@ -17,6 +17,8 @@
   --green-soft: #e8f3ed;
   --coral: #b94f3d;
   --coral-soft: #fbedea;
+  --red: #b42318;
+  --red-soft: #fef0ee;
   --blue: #2c6586;
   --blue-soft: #eaf2f7;
   --amber: #98711e;
@@ -187,7 +189,15 @@ button.activity-row:hover { background: var(--surface-soft); }
 .stage-chip i { width: 6px; height: 6px; background: var(--line-strong); border-radius: 50%; }
 .stage-chip.done i { background: var(--green); }
 .stage-chip.done { color: var(--ink); }
+.stage-chip.active i { background: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 16%, transparent); }
+.stage-chip.partial i { background: #d97706; }
+.stage-chip.failed i, .stage-chip.unknown i { background: var(--red); }
+.stage-chip.cancelled i { background: var(--faint); }
 .stage-chip small { grid-column: 2; color: var(--faint); }
+.job-region-summary { display: flex; flex-wrap: wrap; gap: 7px 14px; padding: 8px 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: calc(11px * var(--font-scale, 1)); }
+.job-region-summary span { display: inline-flex; align-items: baseline; gap: 3px; }
+.job-region-summary strong { color: var(--ink); }
+.job-region-summary .failed, .job-region-summary .unknown, .job-region-summary .failed strong, .job-region-summary .unknown strong { color: var(--red); }
 .job-error { margin: 0; padding: 8px 12px; color: var(--coral); background: var(--coral-soft); border-top: 1px solid #efd2cc; font-size: calc(9px * var(--font-scale, 1)); }
 
 .import-page, .settings-page { min-height: 0; flex: 1; padding: 24px clamp(18px, 4vw, 48px) 50px; overflow-y: auto; }

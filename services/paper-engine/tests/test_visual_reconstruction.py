@@ -31,9 +31,11 @@ def test_visual_pages_are_cached_without_duplicate_calls(tmp_path: Path, monkeyp
         calls.append(params)
         return {
             "description": json.dumps({
-                "markdown": "# Introduction\n\nFaithful visual text.",
+                "blocks": [
+                    {"type": "heading", "text": "Introduction", "level": 1, "confidence": 0.96},
+                    {"type": "paragraph", "text": "Faithful visual text.", "confidence": 0.96},
+                ],
                 "confidence": 0.96,
-                "uncertainties": [],
             }),
             "modelId": "vision-model",
             "usage": {"inputTokens": 10, "outputTokens": 12, "durationMs": 25},
@@ -60,6 +62,17 @@ def test_repeated_headers_page_numbers_and_false_numeric_headings_are_removed() 
     assert "# 15" not in joined
     assert "Body two" in joined
     assert removed >= 6
+
+
+def test_numbered_formulas_at_page_edges_are_never_removed_as_repeated_footers() -> None:
+    pages, removed = _remove_repeated_marginal_lines([
+        (1, "Repeated header\n\nBody one.\n\n$$x_1=y_1 \\tag{3}$$\n\n$$x_2=y_2 \\tag{4}$$"),
+        (2, "Repeated header\n\nBody two.\n\n$$x_3=y_3 \\tag{12}$$\n\n$$x_4=y_4 \\tag{13}$$"),
+    ])
+    joined = "\n".join(markdown for _, markdown in pages)
+    assert all(f"\\tag{{{number}}}" in joined for number in (3, 4, 12, 13))
+    assert "Repeated header" not in joined
+    assert removed == 2
 
 
 def test_full_page_raster_is_not_exported_as_a_figure(tmp_path: Path, monkeypatch) -> None:
@@ -124,14 +137,21 @@ def test_table_region_uses_targeted_visual_reconstruction(tmp_path: Path, monkey
 
     def recognize(params: dict) -> dict:
         calls.append(params)
-        if params["task"] == "table_reconstruct":
-            markdown = "| Dataset | Model | Score |\n| --- | --- | ---: |\n| MOSI | DSSR | 88.9 |\n| MOSEI | DSSR | 87.9 |"
+        if params["task"] == "table_chunk":
+            payload = {
+                "caption": "Table 2. Ablation results.",
+                "headers": ["Dataset", "Model", "Score"],
+                "rows": [["MOSI", "DSSR", "88.9"], ["MOSEI", "DSSR", "87.9"]],
+                "footnotes": [],
+                "confidence": 0.96,
+            }
         else:
-            markdown = "# Table 2. Ablation results\n\nDataset Model Score MOSI DSSR 88.9 MOSEI DSSR 87.9\n\n# 3. Experiments"
+            payload = {
+                "blocks": [{"type": "heading", "text": "3. Experiments", "level": 1, "confidence": 0.96}],
+                "confidence": 0.96,
+            }
         return {
-            "description": json.dumps(
-                {"markdown": markdown, "confidence": 0.96, "uncertainties": []}
-            ),
+            "description": json.dumps(payload),
             "modelId": "vision-model",
             "usage": {"inputTokens": 4, "outputTokens": 8, "durationMs": 10},
         }
@@ -148,7 +168,7 @@ def test_table_region_uses_targeted_visual_reconstruction(tmp_path: Path, monkey
         "vision-model",
     )
 
-    assert any(call["task"] == "table_reconstruct" for call in calls)
+    assert any(call["task"] == "table_chunk" for call in calls)
     assert "| Dataset | Model | Score |" in result.markdown
     assert (tmp_path / "output" / "tables" / "table-1.md").is_file()
     assert (tmp_path / "output" / "tables" / "table-1.csv").is_file()
@@ -163,6 +183,7 @@ def test_suspicious_formula_uses_region_crop_and_updates_markdown(
     page = document.new_page(width=612, height=792)
     page.insert_text((72, 72), "2. Method", fontsize=12)
     page.insert_text((150, 240), "L task = sum i x i", fontsize=14)
+    page.insert_text((287, 240), "(1)", fontsize=10)
     document.save(source)
     document.close()
     calls: list[dict] = []
@@ -170,34 +191,20 @@ def test_suspicious_formula_uses_region_crop_and_updates_markdown(
 
     def recognize(params: dict) -> dict:
         calls.append(params)
-        if params["task"] == "formula_repair":
+        if params["task"] == "formula_transcribe":
             with Image.open(params["imagePath"]) as crop:
                 crop_sizes.append(crop.size)
             payload = {
-                "repairedLatex": r"$$\mathcal{L}_{task}=\sum_i x_i$$",
+                "formulas": [{"number": 1, "latex": r"\mathcal{L}_{task}=\sum_i x_i", "confidence": 0.97}],
                 "confidence": 0.97,
-            }
-        elif params["task"] == "region_verify":
-            payload = {
-                "markdown": "# 2. Method\n\n{l_task = sum_i x_i}",
-                "confidence": 0.8,
-                "regions": [],
-                "uncertainties": [],
             }
         else:
             payload = {
-                "markdown": "# 2. Method\n\n{l_task = sum_i x_i}",
-                "confidence": 0.96,
-                "regions": [
-                    {
-                        "kind": "formula",
-                        "sourceText": "{l_task = sum_i x_i}",
-                        "caption": "",
-                        "bbox": {"left": 0.18, "top": 0.24, "right": 0.72, "bottom": 0.36},
-                        "confidence": 0.7,
-                    }
+                "blocks": [
+                    {"type": "heading", "text": "2. Method", "level": 1, "confidence": 0.96},
+                    {"type": "formula", "text": "broken", "number": 1, "confidence": 0.96},
                 ],
-                "uncertainties": [],
+                "confidence": 0.96,
             }
         return {
             "description": json.dumps(payload),
@@ -216,8 +223,8 @@ def test_suspicious_formula_uses_region_crop_and_updates_markdown(
         "vision-model",
     )
 
-    assert any(call["task"] == "formula_repair" for call in calls)
-    assert r"$$\mathcal{L}_{task}=\sum_i x_i$$" in result.markdown
+    assert any(call["task"] == "formula_transcribe" for call in calls)
+    assert r"\mathcal{L}_{task}=\sum_i x_i" in result.markdown
     assert crop_sizes
     assert crop_sizes[0][0] < 1700
     assert crop_sizes[0][1] < 2200

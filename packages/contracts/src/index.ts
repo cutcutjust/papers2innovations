@@ -147,12 +147,13 @@ export interface PaperSource {
 }
 
 export type PipelineStage = "hash" | "render" | "layout" | "vision_text" | "ocr" | "figures" | "tables" | "formulas" | "cleanup" | "verification" | "index";
+export type JobStageStatus = JobStatus | "pending" | "running" | "completed" | "partial" | "failed" | "unknown" | "cancelled";
 
 export interface JobStage {
   id: string;
   jobId: string;
   stage: PipelineStage;
-  status: JobStatus;
+  status: JobStageStatus;
   progress: number;
   attempt: number;
   artifact: Record<string, unknown>;
@@ -227,7 +228,7 @@ export interface PageRecognition {
   revisionId: string;
   paperId: string;
   page: number;
-  task: "page_transcribe" | "region_verify" | "formula_repair" | "table_reconstruct" | "figure_analysis";
+  task: "page_transcribe" | "region_verify" | "formula_repair" | "table_reconstruct" | "figure_analysis" | "body_transcribe" | "table_chunk" | "formula_transcribe" | "references_transcribe";
   modelId: string;
   promptVersion: string;
   status: "pending" | "completed" | "failed";
@@ -235,6 +236,55 @@ export interface PageRecognition {
   cacheHit: boolean;
   usage: { inputTokens: number; outputTokens: number; durationMs: number };
   error?: string;
+}
+
+export type VisualRegionKind = "body" | "table" | "formula" | "references";
+export type VisualRegionStatus = "pending" | "running" | "completed" | "partial" | "failed" | "unknown";
+export type VisionFailureKind = "connect" | "timeout_unknown" | "http" | "invalid_response" | "validation";
+
+export interface VisualRegion {
+  id: string;
+  revisionId: string;
+  paperId: string;
+  page: number;
+  regionKey: string;
+  kind: VisualRegionKind;
+  sequence: number;
+  bbox: PageBBox;
+  imageHash: string;
+  required: boolean;
+  status: VisualRegionStatus;
+  modelId: string;
+  promptVersion: string;
+  cacheKey: string;
+  artifactPath?: string;
+  confidence?: number;
+  usage: { inputTokens: number; outputTokens: number; durationMs: number };
+  attempt: number;
+  errorKind?: VisionFailureKind;
+  error?: string;
+}
+
+export interface StructuredDocumentBlock {
+  type: "heading" | "paragraph" | "list" | "quote" | "formula";
+  text: string;
+  level?: number;
+  bbox?: PageBBox;
+  confidence: number;
+}
+
+export interface StructuredTable {
+  caption: string;
+  headers: string[];
+  rows: string[][];
+  footnotes: string[];
+  confidence: number;
+}
+
+export interface StructuredReference {
+  number: number;
+  text: string;
+  confidence: number;
 }
 
 export interface DocumentUncertainty {
@@ -740,6 +790,11 @@ export interface PreprocessQualityReport {
   failedPageCount: number;
   uncertainRegionCount: number;
   removedHeaderFooterCount: number;
+  totalRegionCount: number;
+  completedRegionCount: number;
+  failedRegionCount: number;
+  unknownRegionCount: number;
+  visionModelId?: string;
   usage: { inputTokens: number; outputTokens: number; durationMs: number };
   warnings: string[];
   updatedAt: string;

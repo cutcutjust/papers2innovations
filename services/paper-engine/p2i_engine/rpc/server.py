@@ -80,7 +80,8 @@ class RpcServer:
         return self.host_call("host.vision_config", {}, timeout=10)
 
     def vision_analyze(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.host_call("host.vision_analyze", params, timeout=180)
+        task_timeout = max(30, min(300, int(params.get("timeoutSeconds", 180))))
+        return self.host_call("host.vision_analyze", params, timeout=task_timeout + 30)
 
     def dispatch(self, request: dict[str, Any]) -> Any:
         method = request.get("method")

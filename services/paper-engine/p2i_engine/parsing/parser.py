@@ -17,6 +17,7 @@ from typing import Callable, Any
 from pypdf import PdfReader
 
 from ..models import BoundingBox, EvidenceAnchor, OcrUsage, PaperDocument, PaperFigure, PaperSection, ParserInfo
+from .visual_regions import plan_visual_regions, reconstruct_visual_regions
 
 
 @dataclass
@@ -24,8 +25,9 @@ class ParseResult:
     document: PaperDocument
     markdown: str
     page_recognitions: list[dict[str, Any]] = field(default_factory=list)
+    visual_regions: list[dict[str, Any]] = field(default_factory=list)
     uncertainties: list[dict[str, Any]] = field(default_factory=list)
-    quality_stats: dict[str, int] = field(default_factory=dict)
+    quality_stats: dict[str, Any] = field(default_factory=dict)
 
 
 OcrPageCallback = Callable[[dict[str, Any]], dict[str, Any]]
@@ -1050,6 +1052,17 @@ def _marginal_line_key(line: str) -> str:
     return re.sub(r"\s+", " ", value)
 
 
+def _is_marginal_text_candidate(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped or len(stripped) > 160:
+        return False
+    return not (
+        "$" in stripped
+        or stripped.startswith(("|", "![", ">", "```", "<"))
+        or re.search(r"\[[^\]]+\]\([^)]+\)", stripped)
+    )
+
+
 def _remove_repeated_marginal_lines(pages: list[tuple[int, str]]) -> tuple[list[tuple[int, str]], int]:
     if len(pages) < 2:
         return pages, 0
@@ -1058,7 +1071,7 @@ def _remove_repeated_marginal_lines(pages: list[tuple[int, str]]) -> tuple[list[
     for page, markdown in pages:
         lines = [line for line in markdown.splitlines() if line.strip()]
         candidates = lines[:2] + lines[-2:]
-        keys = {_marginal_line_key(line) for line in candidates if len(line.strip()) <= 160}
+        keys = {_marginal_line_key(line) for line in candidates if _is_marginal_text_candidate(line)}
         candidates_by_page[page] = keys
         for key in keys:
             if key:
@@ -1075,7 +1088,9 @@ def _remove_repeated_marginal_lines(pages: list[tuple[int, str]]) -> tuple[list[
         for index, line in enumerate(lines):
             stripped = re.sub(r"^#{1,6}\s+", "", line.strip())
             page_number = bool(re.fullmatch(r"(?:page\s*)?\d{1,4}", stripped, re.I))
-            if index in marginal_indexes and (_marginal_line_key(line) in repeated or page_number):
+            if index in marginal_indexes and _is_marginal_text_candidate(line) and (
+                _marginal_line_key(line) in repeated or page_number
+            ):
                 removed += 1
                 continue
             if re.fullmatch(r"#{1,6}\s+\d{1,4}\s*", line.strip()):
@@ -1599,6 +1614,141 @@ def _apply_qwen_ocr(
     return result
 
 
+def _apply_region_visual_reconstruction(
+    result: ParseResult,
+    source: Path,
+    output_dir: Path,
+    cache_dir: Path,
+    paper_id: str,
+    sha256: str,
+    model_id: str,
+    vision_page: VisionPageCallback,
+    vision_call_limit: int | None = None,
+) -> ParseResult:
+    regions = plan_visual_regions(
+        source,
+        output_dir,
+        cache_dir,
+        result.document.tables,
+        result.document.figures,
+    )
+    if not any(region["kind"] in {"body", "references"} for region in regions):
+        raise RuntimeError("未能从 PDF 几何版面生成正文视觉区域")
+    reconstruction = reconstruct_visual_regions(
+        regions,
+        cache_dir,
+        output_dir,
+        paper_id,
+        result.document.title,
+        sha256,
+        model_id,
+        vision_page,
+        vision_call_limit,
+    )
+    figures_by_page: dict[int, list[PaperFigure]] = {}
+    for figure in result.document.figures:
+        if figure.page is not None:
+            figures_by_page.setdefault(figure.page, []).append(figure)
+    page_markdown = [
+        (
+            page,
+            _normalize_reference_layout(
+                _embed_figures(markdown, figures_by_page.get(page, []))
+            ),
+        )
+        for page, markdown in reconstruction["page_markdown"]
+    ]
+    page_markdown, removed = _remove_repeated_marginal_lines(page_markdown)
+    result.document.sections = _semantic_sections(page_markdown, paper_id)
+    result.markdown = "\n\n".join(section.markdown for section in result.document.sections)
+    result.visual_regions = reconstruction["regions"]
+    result.page_recognitions = []
+
+    successful_tables = {table["id"]: table for table in reconstruction["tables"]}
+    result.document.tables = [
+        successful_tables.get(str(table.get("id")), table)
+        for table in result.document.tables
+    ]
+    required_failures = [
+        region
+        for region in result.visual_regions
+        if region.get("required") and region.get("status") != "completed"
+    ]
+    optional_failures = [
+        region
+        for region in result.visual_regions
+        if not region.get("required") and region.get("status") != "completed"
+    ]
+    result.uncertainties = [
+        {
+            "page": int(region["page"]),
+            "kind": "table" if region["kind"] == "table" else "formula" if region["kind"] == "formula" else "text",
+            "bbox": region.get("bbox"),
+            "sourceText": str(region.get("source_text") or ""),
+            "candidateText": "",
+            "confidence": float(region.get("confidence") or 0.0),
+            "resolutionStatus": "unresolved",
+        }
+        for region in [*required_failures, *optional_failures]
+    ]
+    result.document.warnings = [
+        warning
+        for warning in result.document.warnings
+        if "pypdf fallback was used" not in warning
+    ]
+    result.document.partial = bool(optional_failures or required_failures)
+    if required_failures:
+        failed_pages = ", ".join(map(str, reconstruction["failed_pages"]))
+        result.document.warnings.append(f"正文视觉区域失败页面：{failed_pages}")
+    if optional_failures:
+        result.document.warnings.append(f"{len(optional_failures)} 个公式或表格区域使用原图降级")
+    result.quality_stats = {
+        "pipelineVersion": "visual-document-v3",
+        "publishable": bool(reconstruction["publishable"]),
+        "recognizedPageCount": int(reconstruction["successful_pages"]),
+        "cachedPageCount": len([region for region in result.visual_regions if region.get("cache_hit")]),
+        "failedPageCount": len(reconstruction["failed_pages"]),
+        "uncertainRegionCount": len(result.uncertainties),
+        "removedHeaderFooterCount": removed,
+        "totalRegionCount": len(result.visual_regions),
+        "completedRegionCount": len([region for region in result.visual_regions if region.get("status") == "completed"]),
+        "failedRegionCount": len([region for region in result.visual_regions if region.get("status") == "failed"]),
+        "unknownRegionCount": len([region for region in result.visual_regions if region.get("status") == "unknown"]),
+        "estimatedVisionCalls": int(reconstruction["estimated_calls"]),
+        "visionModelId": model_id,
+        "inputTokens": int(reconstruction["input_tokens"]),
+        "outputTokens": int(reconstruction["output_tokens"]),
+        "durationMs": int(reconstruction["duration_ms"]),
+    }
+    return result
+
+
+def _failed_visual_result(result: ParseResult, error: Exception, model_id: str) -> ParseResult:
+    result.document.sections = []
+    result.markdown = ""
+    result.document.partial = True
+    result.document.warnings = [f"区域化视觉重建失败：{type(error).__name__}: {error}"]
+    result.quality_stats = {
+        "pipelineVersion": "visual-document-v3",
+        "publishable": False,
+        "recognizedPageCount": 0,
+        "cachedPageCount": 0,
+        "failedPageCount": result.document.page_count,
+        "uncertainRegionCount": 0,
+        "removedHeaderFooterCount": 0,
+        "totalRegionCount": 0,
+        "completedRegionCount": 0,
+        "failedRegionCount": 0,
+        "unknownRegionCount": 0,
+        "estimatedVisionCalls": 0,
+        "visionModelId": model_id,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "durationMs": 0,
+    }
+    return result
+
+
 def parse_pdf(
     source: Path,
     output_dir: Path,
@@ -1608,6 +1758,7 @@ def parse_pdf(
     ocr_page: OcrPageCallback | None = None,
     vision_page: VisionPageCallback | None = None,
     vision_model_id: str | None = None,
+    vision_call_limit: int | None = None,
 ) -> ParseResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     docling_disabled = os.environ.get("P2I_DISABLE_DOCLING") == "1"
@@ -1622,13 +1773,12 @@ def parse_pdf(
         result.document.warnings.append(reason)
         if vision_page and vision_model_id and cache_dir:
             try:
-                return _apply_vision_reconstruction(
+                return _apply_region_visual_reconstruction(
                     result, source, output_dir, cache_dir.parents[1] / "vision" / sha256, paper_id, sha256,
-                    vision_model_id, vision_page,
+                    vision_model_id, vision_page, vision_call_limit,
                 )
             except Exception as error:
-                result.document.partial = True
-                result.document.warnings.append(f"视觉文档重建不可用: {type(error).__name__}: {error}")
+                return _failed_visual_result(result, error, vision_model_id)
         if ocr_page and cache_dir:
             try:
                 return _apply_qwen_ocr(result, source, cache_dir, paper_id, sha256, ocr_page)
@@ -1644,13 +1794,12 @@ def parse_pdf(
         result.document.warnings.append("Docling failed; pypdf fallback was used")
     if vision_page and vision_model_id and cache_dir:
         try:
-            return _apply_vision_reconstruction(
+            return _apply_region_visual_reconstruction(
                 result, source, output_dir, cache_dir.parents[1] / "vision" / sha256, paper_id, sha256,
-                vision_model_id, vision_page,
+                vision_model_id, vision_page, vision_call_limit,
             )
         except Exception as error:
-            result.document.partial = True
-            result.document.warnings.append(f"视觉文档重建不可用: {type(error).__name__}: {error}")
+            return _failed_visual_result(result, error, vision_model_id)
     if ocr_page and cache_dir:
         try:
             result = _apply_qwen_ocr(result, source, cache_dir, paper_id, sha256, ocr_page)

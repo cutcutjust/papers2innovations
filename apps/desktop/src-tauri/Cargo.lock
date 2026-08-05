@@ -3358,7 +3358,7 @@ dependencies = [
 
 [[package]]
 name = "papers2innovations"
-version = "0.1.34"
+version = "0.1.35"
 dependencies = [
  "base64 0.22.1",
  "futures-util",

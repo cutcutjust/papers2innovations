@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+import fitz
 from PIL import Image
 from pypdf import PdfWriter
 
@@ -39,9 +40,11 @@ def test_initializes_versioned_library_layout(tmp_path: Path) -> None:
 
     with sqlite3.connect(result["database"]) as connection:
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-        assert version == 16
+        assert version == 17
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        assert {"document_revisions", "page_recognitions", "document_uncertainties", "paper_engagement"} <= tables
+        assert {"document_revisions", "page_recognitions", "document_uncertainties", "paper_engagement", "visual_regions"} <= tables
+        quality_columns = {row[1] for row in connection.execute("PRAGMA table_info(preprocess_quality)")}
+        assert {"total_region_count", "completed_region_count", "failed_region_count", "unknown_region_count", "vision_model_id"} <= quality_columns
 
 
 def test_migration_0013_upgrades_existing_0012_context_without_data_loss(tmp_path: Path) -> None:
@@ -66,7 +69,7 @@ def test_migration_0013_upgrades_existing_0012_context_without_data_loss(tmp_pat
         )
     Database(database_path).migrate()
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 16
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 17
         assert connection.execute(
             "SELECT scope_id FROM context_scope_items WHERE context_item_id = 'context-1'"
         ).fetchone()[0] == "research:default"
@@ -895,6 +898,72 @@ def test_scan_parses_and_persists_generated_artifacts(tmp_path: Path) -> None:
     assert document["sections"][0]["title"] == "Document"
     with library.db.connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM page_maps").fetchone()[0] == 2
+
+
+def test_visual_region_publish_persists_auditable_regions(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("P2I_DISABLE_DOCLING", "1")
+    library = Library(
+        tmp_path,
+        vision_config=lambda: {"modelId": "vision-model"},
+        vision_analyze=lambda params: {
+            "description": json.dumps({
+                "blocks": [{"type": "paragraph", "text": "Reliable visual body.", "confidence": 0.98}],
+                "confidence": 0.98,
+            }),
+            "modelId": "vision-model",
+            "usage": {"inputTokens": 3, "outputTokens": 5, "durationMs": 8},
+        },
+    )
+    library.initialize()
+    source = library.papers_dir / "visual.pdf"
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    page.insert_text((72, 120), "A reliable scientific paragraph for visual reconstruction.", fontsize=11)
+    document.save(source)
+    document.close()
+    source_hash = library._sha256(source)
+    options = library.internal_dir / "import-options" / f"{source_hash}.json"
+    options.parent.mkdir(parents=True, exist_ok=True)
+    options.write_text(json.dumps({"processingMode": "vision", "visionConfirmed": True}), encoding="utf-8")
+
+    library.scan()
+    paper = library.list_papers()[0]
+
+    assert paper["status"] == "READY"
+    assert "Reliable visual body" in Path(paper["markdownPath"]).read_text(encoding="utf-8")
+    with library.db.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM visual_regions WHERE paper_id = ?", (paper["id"],)).fetchone()[0] >= 1
+        quality = connection.execute("SELECT total_region_count, completed_region_count FROM preprocess_quality WHERE paper_id = ?", (paper["id"],)).fetchone()
+        assert quality["total_region_count"] == quality["completed_region_count"] >= 1
+
+
+def test_failed_visual_reparse_preserves_previous_readable_revision(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("P2I_DISABLE_DOCLING", "1")
+    library = Library(tmp_path)
+    library.initialize()
+    source = library.papers_dir / "preserved.pdf"
+    make_pdf(source)
+    library.scan()
+    before = library.list_papers()[0]
+    before_markdown = Path(before["markdownPath"]).read_text(encoding="utf-8")
+    options = library.internal_dir / "import-options" / f"{library._sha256(source)}.json"
+    options.parent.mkdir(parents=True, exist_ok=True)
+    options.write_text(json.dumps({"processingMode": "vision", "visionConfirmed": True}), encoding="utf-8")
+    library.vision_config = lambda: {"modelId": "vision-model"}
+    library.vision_analyze = lambda _params: (_ for _ in ()).throw(RuntimeError("timeout_unknown: charged state unknown"))
+
+    result = library.reparse_paper(before["id"])
+    after = library.list_papers()[0]
+    jobs = library.list_jobs()
+
+    assert result["paperId"] == before["id"]
+    assert after["status"] == before["status"]
+    assert after["markdownPath"] == before["markdownPath"]
+    assert Path(after["markdownPath"]).read_text(encoding="utf-8") == before_markdown
+    assert jobs[0]["status"] == "FAILED"
+    with library.db.connect() as connection:
+        latest = connection.execute("SELECT status FROM document_revisions WHERE paper_id = ? ORDER BY created_at DESC LIMIT 1", (before["id"],)).fetchone()
+        assert latest["status"] == "failed"
 
 
 def test_duplicate_bytes_share_one_paper(tmp_path: Path) -> None:

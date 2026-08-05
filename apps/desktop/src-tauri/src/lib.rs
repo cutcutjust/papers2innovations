@@ -120,10 +120,34 @@ struct VisionRequest {
     source_text: String,
     #[serde(default = "default_vision_prompt_version")]
     prompt_version: String,
+    #[serde(default = "default_vision_timeout_seconds")]
+    timeout_seconds: u64,
+    #[serde(default)]
+    chunk: Option<u32>,
+    #[serde(default)]
+    chunk_count: Option<u32>,
+    #[serde(default)]
+    expected_columns: Option<u32>,
+    #[serde(default)]
+    formula_numbers: Vec<u32>,
 }
 
 fn default_vision_prompt_version() -> String {
     "figure-analysis-v1".into()
+}
+
+fn default_vision_timeout_seconds() -> u64 {
+    180
+}
+
+fn vision_request_error(error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        format!("timeout_unknown: 请求超时，费用状态未知；不会自动重试 ({error})")
+    } else if error.is_connect() {
+        format!("connect: 无法连接视觉模型服务 ({error})")
+    } else {
+        format!("invalid_response: 视觉模型请求失败 ({error})")
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -658,7 +682,24 @@ impl Engine {
             "webp" => "image/webp",
             _ => "image/png",
         };
-        let prompt = if request.task == "formula" || request.task == "formula_repair" {
+        let prompt = if request.task == "formula_transcribe" {
+            format!(
+                "你是科研论文公式转写器。逐个读取裁图中的编号公式，只返回严格 JSON，不要 Markdown 代码围栏：{{\"formulas\":[{{\"number\":1,\"latex\":\"...\",\"confidence\":0.0}}],\"confidence\":0.0}}。必须覆盖这些编号：{:?}。latex 不含 $ 定界符，必须保留上下标、分式、求和、矩阵和希腊字母；看不清时降低 confidence，不得猜测。本地文字草稿仅用于定位：{}",
+                request.formula_numbers, request.source_text
+            )
+        } else if request.task == "body_transcribe" {
+            "你是科研 PDF 区域转写器。图片是单个通栏或单栏正文区域，不是整页。忠实按阅读顺序返回结构化内容，只返回严格 JSON，不要 Markdown 代码围栏：{\"blocks\":[{\"type\":\"heading|paragraph|list|quote|formula\",\"text\":\"...\",\"level\":2,\"number\":1,\"confidence\":0.0}],\"confidence\":0.0}。连续视觉换行合并为自然段，修复行尾断词；只有真实章节标题使用 heading；页码、孤立编号、caption 和页眉页脚不得成为标题。公式用可渲染 LaTeX 且不含 $ 定界符。不得总结、翻译、补写，也不要输出图片或表格。看不清时保留最接近的原文并降低 confidence。\n\n本地文字草稿：\n".to_string() + &request.source_text
+        } else if request.task == "table_chunk" {
+            format!(
+                "你是科研表格逐格转写器。当前是表格第 {}/{} 个纵向分片，每个分片都重复了表头。只返回严格 JSON，不要 Markdown 代码围栏：{{\"caption\":\"\",\"headers\":[\"\"],\"rows\":[[\"\"]],\"footnotes\":[\"\"],\"confidence\":0.0}}。{}每行列数必须等于 headers；保留数字、小数点、正负号、百分比、单位、脚注、加粗含义和缺失值。不要把多列压成一段文字，不得猜测。现有草稿：{}",
+                request.chunk.unwrap_or(1),
+                request.chunk_count.unwrap_or(1),
+                request.expected_columns.map(|value| format!("本表必须严格输出 {value} 列。 ")).unwrap_or_default(),
+                request.source_text
+            )
+        } else if request.task == "references_transcribe" {
+            "你是科研论文参考文献转写器。图片是 References 的一个栏。逐条识别并合并条目内部换行，只返回严格 JSON，不要 Markdown 代码围栏：{\"entries\":[{\"number\":1,\"text\":\"作者、题名、出处、年份、页码\",\"confidence\":0.0}],\"confidence\":0.0}。保留连续编号、作者、题名、会议或期刊、年份和页码；不得总结、翻译、杜撰，不得把相邻条目合并。\n\n本地文字草稿：\n".to_string() + &request.source_text
+        } else if request.task == "formula" || request.task == "formula_repair" {
             format!(
                 "请检查页面图片中与以下损坏文本对应的数学公式，并恢复为正确 LaTeX：{}。只返回 JSON：{{\"repairedLatex\":\"...\",\"confidence\":0.0}}。repairedLatex 必须包含原公式的行内或块级定界符；看不清时 confidence 低于 0.8，不得猜测。",
                 request.source_text
@@ -685,10 +726,12 @@ impl Engine {
             )
         };
         let encoded = BASE64.encode(image);
+        let request_timeout = request.timeout_seconds.clamp(30, 300);
         let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(config.provider.timeout_seconds.max(30)))
+            .connect_timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(request_timeout))
             .build()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("connect: {error}"))?;
         let started = std::time::Instant::now();
         let (response, description_pointer) = if config.provider.format == "anthropic" {
             let body = json!({
@@ -699,16 +742,24 @@ impl Engine {
                     {"type":"text","text":prompt}
                 ]}]
             });
-            let response = client
-                .post(format!(
-                    "{}/messages",
-                    config.provider.base_url.trim_end_matches('/')
-                ))
-                .header("x-api-key", &config.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .json(&body)
-                .send()
-                .map_err(|error| error.to_string())?;
+            let endpoint = format!(
+                "{}/messages",
+                config.provider.base_url.trim_end_matches('/')
+            );
+            let send = || {
+                client
+                    .post(&endpoint)
+                    .header("x-api-key", &config.api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .json(&body)
+                    .send()
+            };
+            let response = match send() {
+                Err(error) if error.is_connect() => {
+                    send().map_err(|retry| vision_request_error(&retry))?
+                }
+                result => result.map_err(|error| vision_request_error(&error))?,
+            };
             (response, "/content/0/text")
         } else {
             let body = json!({
@@ -721,20 +772,28 @@ impl Engine {
                 "max_tokens": config.model.max_output_tokens.min(8192),
                 "stream": false
             });
-            let response = client
-                .post(format!(
-                    "{}/chat/completions",
-                    config.provider.base_url.trim_end_matches('/')
-                ))
-                .bearer_auth(&config.api_key)
-                .json(&body)
-                .send()
-                .map_err(|error| error.to_string())?;
+            let endpoint = format!(
+                "{}/chat/completions",
+                config.provider.base_url.trim_end_matches('/')
+            );
+            let send = || {
+                client
+                    .post(&endpoint)
+                    .bearer_auth(&config.api_key)
+                    .json(&body)
+                    .send()
+            };
+            let response = match send() {
+                Err(error) if error.is_connect() => {
+                    send().map_err(|retry| vision_request_error(&retry))?
+                }
+                result => result.map_err(|error| vision_request_error(&error))?,
+            };
             (response, "/choices/0/message/content")
         };
         let status = response.status();
         if !status.is_success() {
-            return Err(format!("图片解读接口返回 HTTP {status}"));
+            return Err(format!("http: 视觉模型接口返回 HTTP {status}"));
         }
         if let Some((app, request_id, model_name)) = activity {
             emit_host_activity(
@@ -749,11 +808,13 @@ impl Engine {
                 None,
             );
         }
-        let payload: Value = response.json().map_err(|error| error.to_string())?;
+        let payload: Value = response
+            .json()
+            .map_err(|error| format!("invalid_response: 无法解析视觉模型响应 ({error})"))?;
         let description = payload
             .pointer(description_pointer)
             .and_then(Value::as_str)
-            .ok_or("图片解读响应缺少文本内容")?;
+            .ok_or("invalid_response: 视觉模型响应缺少文本内容")?;
         Ok(json!({
             "description": description,
             "modelId": config.model.id,

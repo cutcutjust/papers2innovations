@@ -230,7 +230,7 @@ export async function retryFigureAnalysis(root: string, paperId: string, figureI
 }
 
 export async function getPreprocessStatus(root: string, paperId: string): Promise<PreprocessQualityReport> {
-  if (!nativeRuntime) return { paperId, sourceHash: "", formulaIssueCount: 0, repairedFormulaCount: 0, figureCount: 0, analyzedFigureCount: 0, failedFigureCount: 0, recognizedPageCount: 0, cachedPageCount: 0, failedPageCount: 0, uncertainRegionCount: 0, removedHeaderFooterCount: 0, usage: { inputTokens: 0, outputTokens: 0, durationMs: 0 }, warnings: [], updatedAt: new Date().toISOString() };
+  if (!nativeRuntime) return { paperId, sourceHash: "", formulaIssueCount: 0, repairedFormulaCount: 0, figureCount: 0, analyzedFigureCount: 0, failedFigureCount: 0, recognizedPageCount: 0, cachedPageCount: 0, failedPageCount: 0, uncertainRegionCount: 0, removedHeaderFooterCount: 0, totalRegionCount: 0, completedRegionCount: 0, failedRegionCount: 0, unknownRegionCount: 0, usage: { inputTokens: 0, outputTokens: 0, durationMs: 0 }, warnings: [], updatedAt: new Date().toISOString() };
   return rpc<PreprocessQualityReport>("paper.preprocess_status", { root, paperId });
 }
 
@@ -1167,16 +1167,20 @@ export async function listJobs(root: string): Promise<JobRecord[]> {
       error: paper.error,
       created_at: paper.updatedAt,
       updated_at: paper.updatedAt,
-      stages: ["hash", "layout", "ocr", "figures", "tables", "index"].map((stage, stageIndex) => ({
+      stages: ["hash", "layout", "ocr", "figures", "tables", "index"].map((stage, stageIndex, stages) => {
+        const completedCount = paper.status === "READY" ? stages.length : Math.min(stages.length - 1, Math.floor(paper.progress * stages.length));
+        const failedStage = paper.status === "FAILED" || paper.status === "PARTIAL" ? completedCount : -1;
+        const status: JobStage["status"] = stageIndex < completedCount ? "completed" : stageIndex === failedStage ? paper.status === "FAILED" ? "failed" : "partial" : stageIndex === completedCount ? "running" : "pending";
+        return {
         id: `${index}-${stage}`,
         jobId: `demo-job-${index}`,
         stage: stage as JobStage["stage"],
-        status: stageIndex / 6 < paper.progress ? "READY" : paper.status,
-        progress: stageIndex / 6 < paper.progress ? 1 : 0,
+        status,
+        progress: stageIndex < completedCount ? 1 : 0,
         attempt: 1,
         artifact: {},
         updatedAt: paper.updatedAt,
-      })),
+      }; }),
     }));
   }
   return rpc<JobRecord[]>("job.list", { root });

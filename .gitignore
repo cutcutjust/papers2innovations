@@ -5,6 +5,8 @@ build/
 .vite/
 .pytest_cache/
 .playwright-cli/
+tmp/
+.rustup/
 __pycache__/
 *.py[cod]
 *.egg-info/
