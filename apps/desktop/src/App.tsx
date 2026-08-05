@@ -22,7 +22,7 @@ import { ModelActivityCenter } from "./components/ModelActivityCenter";
 import { PaperImportDialog } from "./components/PaperImportDialog";
 import { FirstRunOnboarding } from "./components/FirstRunOnboarding";
 import { chooseLibrary, initializeLibrary, listCollections, listJobs, listPapers, nativeRuntime, onEngineProgress, resumeLibraryJobs, scanLibrary, setPaperFavorite, startLibraryWatcher } from "./lib/bridge";
-import { clearVisionProvider, configureVisionProvider, hydrateOcrCredential, hydrateProviderCredentials, loadWorkspaceSettingsSnapshot, saveWorkspaceSettingsSnapshot } from "./lib/credentials";
+import { hydrateOcrCredential, hydrateProviderCredentials, loadWorkspaceSettingsSnapshot, saveWorkspaceSettingsSnapshot, synchronizeOcrProvider, synchronizeVisionProvider } from "./lib/credentials";
 import { filterPapersByCollection } from "./lib/collectionTree";
 import { papersForLibraryScope } from "./lib/libraryScope";
 import { isPlaceholderProvider } from "./lib/providerConfig";
@@ -174,15 +174,17 @@ export function App() {
     if (!nativeRuntime || !settingsRecovered) return;
     const model = workspace.customModels.find((item) => item.id === workspace.visionAnalysisModelId);
     const provider = workspace.providers.find((item) => item.id === model?.providerId);
-    if (!model || !provider) {
-      void clearVisionProvider().catch(() => undefined);
-      return;
-    }
-    void hydrateProviderCredentials([provider])
-      .then(() => configureVisionProvider(provider, model))
+    void synchronizeVisionProvider(provider, model)
       .then(() => root ? resumeLibraryJobs(root) : undefined)
       .catch(() => undefined);
   }, [root, settingsRecovered, workspace.visionAnalysisModelId, workspace.customModels, workspace.providers]);
+
+  useEffect(() => {
+    if (!nativeRuntime || !settingsRecovered || !workspace.fullPageOcrModelId) return;
+    const model = workspace.customModels.find((item) => item.id === workspace.fullPageOcrModelId);
+    const provider = workspace.providers.find((item) => item.id === model?.providerId);
+    void synchronizeOcrProvider(provider, model, workspace.ocrConsent).catch(() => undefined);
+  }, [settingsRecovered, workspace.fullPageOcrModelId, workspace.ocrConsent, workspace.customModels, workspace.providers]);
 
   useEffect(() => {
     let cleanup: () => void = () => {};

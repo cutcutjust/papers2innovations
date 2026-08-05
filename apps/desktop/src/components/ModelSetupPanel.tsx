@@ -2,10 +2,10 @@ import { useMemo, useState } from "react";
 import { Check, Eye, EyeOff, FileText, Image as ImageIcon, LoaderCircle, ScanText, X } from "lucide-react";
 import type { ModelCapability, ModelConfig, ProviderConfig } from "@p2i/contracts";
 import {
-  clearOcrProvider,
-  configureOcrProvider,
   hydrateProviderCredentials,
   saveProviderCredential,
+  synchronizeOcrProvider,
+  synchronizeVisionProvider,
   testProviderConnection,
 } from "../lib/credentials";
 import { providerIdForModel } from "../lib/providerConfig";
@@ -100,6 +100,9 @@ export function ModelSetupPanel({ model, presetRole = "text", compact = false, o
       const connection = await testProviderConnection(nextProvider, nextModel);
       if (!connection.ok) throw new Error(`凭据已安全保存，但接口返回 HTTP ${connection.status}。请检查 Base URL、Model ID 或账户权限。`);
 
+      if (useForVision) await synchronizeVisionProvider(nextProvider, nextModel);
+      if (useForOcr) await synchronizeOcrProvider(nextProvider, nextModel, workspace.ocrConsent);
+
       workspace.addCustomModel(nextProvider, nextModel);
       if (useForText) {
         workspace.setDefaultTextModelId(id);
@@ -111,10 +114,9 @@ export function ModelSetupPanel({ model, presetRole = "text", compact = false, o
       if (useForVision) workspace.setVisionAnalysisModelId(id);
       else if (workspace.visionAnalysisModelId === id) workspace.setVisionAnalysisModelId("");
       if (useForOcr) {
-        await configureOcrProvider(nextProvider, nextModel, workspace.ocrConsent);
         workspace.setFullPageOcrModelId(id);
       } else if (workspace.fullPageOcrModelId === id) {
-        await clearOcrProvider();
+        await synchronizeOcrProvider();
         workspace.setFullPageOcrModelId("");
       }
       onStatus?.({ kind: "success", message: `${nextModel.displayName} 已连接并保存。` });

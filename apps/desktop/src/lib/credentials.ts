@@ -6,6 +6,7 @@ import { nativeRuntime } from "./bridge";
 import { sanitizeProviderConfig } from "./providerConfig";
 import { applyModelStreamEvent, beginModelActivity, completeModelActivity, failModelActivity } from "./modelActivity";
 import { isWorkspaceSettingsSnapshot, type WorkspaceSettingsSnapshot } from "./settingsSnapshot";
+import { SerialTaskQueue } from "./serialTaskQueue";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -15,6 +16,9 @@ let hydrationPromise: Promise<OcrCredentialSummary> | undefined;
 const providerSummaryCache = new Map<string, CredentialSummary>();
 const settingsSnapshotKey = "workspace-settings:v1";
 const credentialIndexKey = "provider-credential-index:v1";
+const visionRoleSync = new SerialTaskQueue();
+const ocrRoleSync = new SerialTaskQueue();
+const strongholdAccess = new SerialTaskQueue();
 
 async function openStore() {
   const vaultPath = await join(await appDataDir(), "p2i-vault.hold");
@@ -54,43 +58,50 @@ function summary(credential: OcrCredential): OcrCredentialSummary {
 
 export async function saveOcrCredential(credential: OcrCredential): Promise<OcrCredentialSummary> {
   if (!nativeRuntime) return summary(credential);
-  const { stronghold, store } = await openStore();
-  await store.insert("qwen-ocr", Array.from(encoder.encode(JSON.stringify(credential))));
-  await stronghold.save();
-  await invoke("credential_set", {
-    input: {
-      apiKey: credential.apiKey,
-      workspaceId: credential.workspaceId || null,
-      baseUrl: credential.baseUrl || null,
-      consent: credential.consent,
-    },
+  return strongholdAccess.run(async () => {
+    const { stronghold, store } = await openStore();
+    try {
+      await store.insert("qwen-ocr", Array.from(encoder.encode(JSON.stringify(credential))));
+      await stronghold.save();
+      await invoke("credential_set", {
+        input: {
+          apiKey: credential.apiKey,
+          workspaceId: credential.workspaceId || null,
+          baseUrl: credential.baseUrl || null,
+          consent: credential.consent,
+        },
+      });
+      cachedSummary = summary(credential);
+      return cachedSummary;
+    } finally {
+      await stronghold.unload();
+    }
   });
-  await stronghold.unload();
-  cachedSummary = summary(credential);
-  return cachedSummary;
 }
 
 async function hydrateFromStronghold(): Promise<OcrCredentialSummary> {
   if (!nativeRuntime) {
     return { configured: false, workspaceId: "", baseUrl: "", consent: false };
   }
-  const { stronghold, store } = await openStore();
-  const bytes = await store.get("qwen-ocr");
-  if (!bytes) {
-    await stronghold.unload();
-    return { configured: false, workspaceId: "", baseUrl: "", consent: false };
-  }
-  const credential = JSON.parse(decoder.decode(bytes)) as OcrCredential;
-  await invoke("credential_set", {
-    input: {
-      apiKey: credential.apiKey,
-      workspaceId: credential.workspaceId || null,
-      baseUrl: credential.baseUrl || null,
-      consent: credential.consent,
-    },
+  return strongholdAccess.run(async () => {
+    const { stronghold, store } = await openStore();
+    try {
+      const bytes = await store.get("qwen-ocr");
+      if (!bytes) return { configured: false, workspaceId: "", baseUrl: "", consent: false };
+      const credential = JSON.parse(decoder.decode(bytes)) as OcrCredential;
+      await invoke("credential_set", {
+        input: {
+          apiKey: credential.apiKey,
+          workspaceId: credential.workspaceId || null,
+          baseUrl: credential.baseUrl || null,
+          consent: credential.consent,
+        },
+      });
+      return summary(credential);
+    } finally {
+      await stronghold.unload();
+    }
   });
-  await stronghold.unload();
-  return summary(credential);
 }
 
 export async function hydrateOcrCredential(): Promise<OcrCredentialSummary> {
@@ -110,12 +121,17 @@ export async function hydrateOcrCredential(): Promise<OcrCredentialSummary> {
 
 export async function deleteOcrCredential(): Promise<void> {
   if (!nativeRuntime) return;
-  const { stronghold, store } = await openStore();
-  await store.remove("qwen-ocr");
-  await stronghold.save();
-  await stronghold.unload();
-  await invoke("credential_delete");
-  cachedSummary = { configured: false, workspaceId: "", baseUrl: "", consent: false };
+  await strongholdAccess.run(async () => {
+    const { stronghold, store } = await openStore();
+    try {
+      await store.remove("qwen-ocr");
+      await stronghold.save();
+      await invoke("credential_delete");
+      cachedSummary = { configured: false, workspaceId: "", baseUrl: "", consent: false };
+    } finally {
+      await stronghold.unload();
+    }
+  });
 }
 
 export async function testQwenConnection(): Promise<{
@@ -204,17 +220,19 @@ export async function saveProviderCredential(provider: ProviderConfig, apiKey: s
     providerSummaryCache.set(provider.credentialId, result);
     return result;
   }
-  const { stronghold, store } = await openStore();
-  try {
-    await store.insert(providerStoreKey(provider.credentialId), Array.from(encoder.encode(apiKey)));
-    const index = await readCredentialIndex(store);
-    index[providerRecoveryId(provider)] = provider.credentialId;
-    await store.insert(credentialIndexKey, Array.from(encoder.encode(JSON.stringify(index))));
-    await stronghold.save();
-    await invoke("provider_credential_set", { credentialId: provider.credentialId, apiKey });
-  } finally {
-    await stronghold.unload();
-  }
+  await strongholdAccess.run(async () => {
+    const { stronghold, store } = await openStore();
+    try {
+      await store.insert(providerStoreKey(provider.credentialId), Array.from(encoder.encode(apiKey)));
+      const index = await readCredentialIndex(store);
+      index[providerRecoveryId(provider)] = provider.credentialId;
+      await store.insert(credentialIndexKey, Array.from(encoder.encode(JSON.stringify(index))));
+      await stronghold.save();
+      await invoke("provider_credential_set", { credentialId: provider.credentialId, apiKey });
+    } finally {
+      await stronghold.unload();
+    }
+  });
   providerSummaryCache.set(provider.credentialId, result);
   return result;
 }
@@ -224,81 +242,117 @@ export async function hydrateProviderCredentials(providers: ProviderConfig[]): P
     return providers.map((provider) => providerSummaryCache.get(provider.credentialId) ?? { credentialId: provider.credentialId, configured: false });
   }
   if (providers.length === 0) return [];
-  const { stronghold, store } = await openStore();
-  try {
-    const summaries: CredentialSummary[] = [];
-    const index = await readCredentialIndex(store);
-    const previousProviders = await historicalProviders(store);
-    let vaultChanged = false;
-    for (const provider of providers) {
-      const recoveryId = providerRecoveryId(provider);
-      const priorMatches = previousProviders
-        .filter((candidate) => providerRecoveryId(candidate) === recoveryId)
-        .flatMap((candidate) => [candidate.credentialId, candidate.id]);
-      const candidateIds = [...new Set([
-        provider.credentialId,
-        provider.id,
-        index[recoveryId],
-        recoveryId,
-        ...priorMatches,
-      ].filter((value): value is string => Boolean(value)))];
-      let configured = false;
-      for (const candidateId of candidateIds) {
-        const bytes = await store.get(providerStoreKey(candidateId));
-        if (!bytes) continue;
-        const apiKey = decoder.decode(bytes);
-        await invoke("provider_credential_set", { credentialId: provider.credentialId, apiKey });
-        if (candidateId !== provider.credentialId) {
-          await store.insert(providerStoreKey(provider.credentialId), Array.from(bytes));
-          vaultChanged = true;
-        }
-        configured = true;
-        break;
-      }
-      if (!configured) {
+  return strongholdAccess.run(async () => {
+    const { stronghold, store } = await openStore();
+    try {
+      const summaries: CredentialSummary[] = [];
+      const index = await readCredentialIndex(store);
+      const previousProviders = await historicalProviders(store);
+      let vaultChanged = false;
+      for (const provider of providers) {
+        const recoveryId = providerRecoveryId(provider);
+        const priorMatches = previousProviders
+          .filter((candidate) => providerRecoveryId(candidate) === recoveryId)
+          .flatMap((candidate) => [candidate.credentialId, candidate.id]);
+        const candidateIds = [...new Set([
+          provider.credentialId,
+          provider.id,
+          index[recoveryId],
+          recoveryId,
+          ...priorMatches,
+        ].filter((value): value is string => Boolean(value)))];
+        let configured = false;
         for (const candidateId of candidateIds) {
-          const restored = await invoke<boolean>("provider_credential_restore", {
-            credentialId: candidateId,
-            targetCredentialId: provider.credentialId,
-          }).catch(() => false);
-          if (restored) {
-            configured = true;
-            break;
+          const bytes = await store.get(providerStoreKey(candidateId));
+          if (!bytes) continue;
+          const apiKey = decoder.decode(bytes);
+          await invoke("provider_credential_set", { credentialId: provider.credentialId, apiKey });
+          if (candidateId !== provider.credentialId) {
+            await store.insert(providerStoreKey(provider.credentialId), Array.from(bytes));
+            vaultChanged = true;
+          }
+          configured = true;
+          break;
+        }
+        if (!configured) {
+          for (const candidateId of candidateIds) {
+            const restored = await invoke<boolean>("provider_credential_restore", {
+              credentialId: candidateId,
+              targetCredentialId: provider.credentialId,
+            }).catch(() => false);
+            if (restored) {
+              configured = true;
+              break;
+            }
           }
         }
+        if (configured && index[recoveryId] !== provider.credentialId) {
+          index[recoveryId] = provider.credentialId;
+          vaultChanged = true;
+        }
+        const item = { credentialId: provider.credentialId, configured };
+        providerSummaryCache.set(provider.credentialId, item);
+        summaries.push(item);
       }
-      if (configured && index[recoveryId] !== provider.credentialId) {
-        index[recoveryId] = provider.credentialId;
-        vaultChanged = true;
+      if (vaultChanged) {
+        await store.insert(credentialIndexKey, Array.from(encoder.encode(JSON.stringify(index))));
+        await stronghold.save();
       }
-      const item = { credentialId: provider.credentialId, configured };
-      providerSummaryCache.set(provider.credentialId, item);
-      summaries.push(item);
+      return summaries;
+    } finally {
+      await stronghold.unload();
     }
-    if (vaultChanged) {
-      await store.insert(credentialIndexKey, Array.from(encoder.encode(JSON.stringify(index))));
-      await stronghold.save();
+  });
+}
+
+export async function synchronizeVisionProvider(provider?: ProviderConfig, model?: ModelConfig): Promise<boolean> {
+  return visionRoleSync.run(async () => {
+    if (!provider || !model) {
+      await clearVisionProvider();
+      return false;
     }
-    return summaries;
-  } finally {
-    await stronghold.unload();
-  }
+    const [credential] = await hydrateProviderCredentials([provider]);
+    if (!credential?.configured) {
+      await clearVisionProvider();
+      throw new Error(`${model.displayName} 的 API Key 未能从 Stronghold 恢复，请在模型设置中重新保存密钥。`);
+    }
+    await configureVisionProvider(provider, model);
+    return true;
+  });
+}
+
+export async function synchronizeOcrProvider(provider?: ProviderConfig, model?: ModelConfig, consent = false): Promise<boolean> {
+  return ocrRoleSync.run(async () => {
+    if (!provider || !model) {
+      await clearOcrProvider();
+      return false;
+    }
+    const [credential] = await hydrateProviderCredentials([provider]);
+    if (!credential?.configured) {
+      await clearOcrProvider();
+      throw new Error(`${model.displayName} 的 API Key 未能从 Stronghold 恢复，请在模型设置中重新保存密钥。`);
+    }
+    await configureOcrProvider(provider, model, consent);
+    return true;
+  });
 }
 
 export async function deleteProviderCredential(credentialId: string): Promise<void> {
   providerSummaryCache.delete(credentialId);
   if (!nativeRuntime) return;
-  const { stronghold, store } = await openStore();
-  try {
-    await store.remove(providerStoreKey(credentialId));
-    const index = await readCredentialIndex(store);
-    const nextIndex = Object.fromEntries(Object.entries(index).filter(([, value]) => value !== credentialId));
-    await store.insert(credentialIndexKey, Array.from(encoder.encode(JSON.stringify(nextIndex))));
-    await stronghold.save();
-    await invoke("provider_credential_delete", { credentialId });
-  } finally {
-    await stronghold.unload();
-  }
+  await strongholdAccess.run(async () => {
+    const { stronghold, store } = await openStore();
+    try {
+      await store.remove(providerStoreKey(credentialId));
+      const index = await readCredentialIndex(store);
+      const nextIndex = Object.fromEntries(Object.entries(index).filter(([, value]) => value !== credentialId));
+      await store.insert(credentialIndexKey, Array.from(encoder.encode(JSON.stringify(nextIndex))));
+      await stronghold.save();
+      await invoke("provider_credential_delete", { credentialId });
+    } finally {
+      await stronghold.unload();
+    }
+  });
 }
 
 export async function testProviderConnection(provider: ProviderConfig, model: ModelConfig): Promise<{ ok: boolean; status: number }> {
@@ -319,24 +373,28 @@ export async function testProviderConnection(provider: ProviderConfig, model: Mo
 
 export async function loadWorkspaceSettingsSnapshot(): Promise<WorkspaceSettingsSnapshot | null> {
   if (!nativeRuntime) return null;
-  const { stronghold, store } = await openStore();
-  try {
-    const bytes = await store.get(settingsSnapshotKey);
-    if (!bytes) return null;
-    const value: unknown = JSON.parse(decoder.decode(bytes));
-    return isWorkspaceSettingsSnapshot(value) ? value : null;
-  } finally {
-    await stronghold.unload();
-  }
+  return strongholdAccess.run(async () => {
+    const { stronghold, store } = await openStore();
+    try {
+      const bytes = await store.get(settingsSnapshotKey);
+      if (!bytes) return null;
+      const value: unknown = JSON.parse(decoder.decode(bytes));
+      return isWorkspaceSettingsSnapshot(value) ? value : null;
+    } finally {
+      await stronghold.unload();
+    }
+  });
 }
 
 export async function saveWorkspaceSettingsSnapshot(snapshot: WorkspaceSettingsSnapshot): Promise<void> {
   if (!nativeRuntime) return;
-  const { stronghold, store } = await openStore();
-  try {
-    await store.insert(settingsSnapshotKey, Array.from(encoder.encode(JSON.stringify(snapshot))));
-    await stronghold.save();
-  } finally {
-    await stronghold.unload();
-  }
+  await strongholdAccess.run(async () => {
+    const { stronghold, store } = await openStore();
+    try {
+      await store.insert(settingsSnapshotKey, Array.from(encoder.encode(JSON.stringify(snapshot))));
+      await stronghold.save();
+    } finally {
+      await stronghold.unload();
+    }
+  });
 }

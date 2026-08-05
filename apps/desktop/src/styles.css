@@ -1477,3 +1477,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 @media (max-width: 520px) {
   .first-run-brand strong { display: none; }.first-run-stage h1 { font-size: calc(22px * var(--font-scale, 1)); }.first-run-actions, .first-run-footer-actions { align-items: stretch; flex-direction: column; }.first-run-actions button, .first-run-footer-actions button { width: 100%; justify-content: center; }.recommended-library { align-items: flex-start; }.recommended-library code { max-width: 230px; }.onboarding-model-grid article { padding: 14px; }.onboarding-optional-import { align-items: stretch; flex-wrap: wrap; }.onboarding-optional-import button { width: 100%; justify-content: center; }.model-role-grid { padding: 0 12px 12px; }.shared-model-setup .model-editor-footer { align-items: stretch; }.empty-library-welcome { min-height: 420px; }.model-readiness-banner > span:not(.readiness-alert) { flex: 1; justify-content: center; }.model-readiness-banner button { width: 100%; justify-content: center; }
 }
+
+.import-model-required-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.import-model-required-actions button { margin: 0; white-space: nowrap; }
+@media (max-width: 620px) {
+  .import-model-required-actions { width: 100%; padding-left: 25px; justify-content: flex-start; }
+  .import-model-required-actions button { margin: 0; }
+}

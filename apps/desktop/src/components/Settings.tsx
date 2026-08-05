@@ -18,11 +18,10 @@ import {
 } from "lucide-react";
 import type { CredentialSummary, ModelConfig } from "@p2i/contracts";
 import {
-  clearOcrProvider,
-  configureOcrProvider,
   deleteProviderCredential,
   hydrateOcrCredential,
   hydrateProviderCredentials,
+  synchronizeOcrProvider,
   testProviderConnection,
   testQwenConnection,
 } from "../lib/credentials";
@@ -95,7 +94,7 @@ export function Settings() {
       const model = customModels.find((item) => item.id === fullPageOcrModelId);
       const provider = providers.find((item) => item.id === model?.providerId);
       if (model && provider && summaryMap[provider.credentialId]?.configured) {
-        await configureOcrProvider(provider, model, ocrConsent);
+        await synchronizeOcrProvider(provider, model, ocrConsent);
       } else if (legacyOcr.configured) {
         setStatus({ kind: "info", message: "检测到已加密保存的 OCR 凭据，请在下方为 OCR 指定一个模型。" });
       }
@@ -130,7 +129,7 @@ export function Settings() {
     void run(`remove-${modelId}`, async () => {
       const provider = providers.find((item) => item.id === model.providerId);
       const providerUseCount = customModels.filter((item) => item.providerId === provider?.id).length;
-      if (modelId === fullPageOcrModelId) await clearOcrProvider();
+      if (modelId === fullPageOcrModelId) await synchronizeOcrProvider();
       if (provider && providerUseCount <= 1) await deleteProviderCredential(provider.credentialId);
       removeCustomModel(modelId);
       setProviderSummaries((current) => {
@@ -163,7 +162,7 @@ export function Settings() {
 
   const assignOcrModel = (modelId: string) => run("assign-ocr", async () => {
     if (!modelId) {
-      await clearOcrProvider();
+      await synchronizeOcrProvider();
       setFullPageOcrModelId("");
       setStatus({ kind: "info", message: "全文 OCR 已关闭。" });
       return;
@@ -172,7 +171,7 @@ export function Settings() {
     const provider = providers.find((item) => item.id === model?.providerId);
     if (!model || !provider) throw new Error("OCR 模型配置不可用。");
     if (!providerSummaries[provider.credentialId]?.configured) throw new Error("请先为该模型保存 API Key，再将其用于 OCR。");
-    await configureOcrProvider(provider, model, ocrConsent);
+    await synchronizeOcrProvider(provider, model, ocrConsent);
     setFullPageOcrModelId(modelId);
     setStatus({ kind: "success", message: `${model.displayName} 已用于全文 OCR。` });
   });
@@ -180,7 +179,7 @@ export function Settings() {
   const changeOcrConsent = (enabled: boolean) => run("ocr-consent", async () => {
     const model = customModels.find((item) => item.id === fullPageOcrModelId);
     const provider = providers.find((item) => item.id === model?.providerId);
-    if (model && provider) await configureOcrProvider(provider, model, enabled);
+    if (model && provider) await synchronizeOcrProvider(provider, model, enabled);
     setOcrConsent(enabled);
     setStatus({ kind: enabled ? "success" : "info", message: enabled ? "已允许向指定 OCR 模型发送 PDF 渲染页。" : "已禁止上传 PDF 页面。" });
   });
@@ -190,7 +189,7 @@ export function Settings() {
     const provider = providers.find((item) => item.id === model?.providerId);
     if (!model || !provider) throw new Error("请先选择全文 OCR 模型。");
     if (!ocrConsent) throw new Error("测试 OCR 前请先允许上传 PDF 页面。" );
-    await configureOcrProvider(provider, model, true);
+    await synchronizeOcrProvider(provider, model, true);
     const result = await testQwenConnection();
     if (result.requiresWorkspace) throw new Error("此账户需要使用专属业务空间的 Base URL。" );
     if (!result.ok) throw new Error(`${model.displayName} OCR 测试返回 HTTP ${result.status}。`);
