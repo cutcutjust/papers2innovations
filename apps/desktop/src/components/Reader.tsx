@@ -11,7 +11,7 @@ import remarkMath from "remark-math";
 import { activateContextCompression, addPaperToContext, addSelectionToContext, assetUrl, clearReaderConversation, deleteReaderAnalysis, deleteReaderAnnotation, deleteReaderChatTurn, deleteScopedContextItem, deleteTranslation, getContextCompression, getContextDraft, getReaderConversation, listDocumentUncertainties, listFigureAnalyses, listPromptTemplates, listReaderAnalyses, listReaderAnnotations, listTranslations, nativeRuntime, readContextItem, readDocument, readMarkdown, removePaperFromContext, resetContextScope, retryFigureAnalysis, saveContextCompression, saveReaderAnalysis, saveReaderAnnotation, saveReaderChatTurn, saveTranslation, startModelStream, updatePaperReading, updateReaderChatTurn, upsertScopedContextItem, type ModelStreamHandle } from "../lib/bridge";
 import { hydrateProviderCredentials } from "../lib/credentials";
 import { buildReaderSections, resolveMarkdownAssetPath, type ReaderDisplaySection, type ReaderDocumentBlock } from "../lib/documentBlocks";
-import { normalizeMarkdownMath } from "../lib/markdownMath";
+import { createDisplayMathPlugin, normalizeMarkdownMath } from "../lib/markdownMath";
 import { CONTEXT_COMPRESSION_PROMPT_VERSION, contextCompressionBudgetError, contextCompressionMessages } from "../lib/contextCompression";
 import { contrastRatio, parseStructuredTranslation, projectTranslationSegmentsAcrossBlocks, splitTranslationChunks, structuredTranslationPrompt, translationTermParts, type TranslationBlockProjection } from "../lib/readerTranslation";
 import { createReaderAnnotationPlugin, domRangeFromSourceRange, readerTranslationKey, sentenceRangeAtOffset, sourceOffsetFromDomPoint, sourceRangeFromDomRange, type ReaderTranslationRange } from "../lib/readerAnnotations";
@@ -129,8 +129,9 @@ function ReaderTable({ children, node: _node, ...props }: ComponentPropsWithoutR
 }
 
 function MarkdownBlock({ value, markdownPath, figureAnalysisFor, onToggleFigure }: { value: string; markdownPath?: string; figureAnalysisFor?: (source?: string) => FigureAnalysis | undefined; onToggleFigure?: (source?: string) => void }) {
+  const normalized = normalizeMarkdownMath(value);
   return <ReactMarkdown
-    remarkPlugins={[remarkGfm, remarkMath]}
+    remarkPlugins={[remarkGfm, remarkMath, createDisplayMathPlugin(normalized)]}
     rehypePlugins={[rehypeKatex]}
     components={{
       table: ReaderTable,
@@ -141,7 +142,7 @@ function MarkdownBlock({ value, markdownPath, figureAnalysisFor, onToggleFigure 
         return <span className="markdown-figure-inline"><img className="markdown-paper-figure" src={rendered} alt={alt ?? "Extracted paper figure"} loading="lazy" />{onToggleFigure && <button className={`figure-ai-button ${analysis?.status ?? "pending"}`} onClick={() => onToggleFigure(src)}><Sparkles size={13} /> {analysis?.status === "completed" ? "AI 图解" : analysis?.status === "failed" ? "重试图解" : "图解待处理"}</button>}{analysis?.description && analysis.id.endsWith(":expanded") && <div className="figure-ai-description"><MarkdownBlock value={analysis.description} /></div>}</span>;
       },
     }}
-  >{normalizeMarkdownMath(value)}</ReactMarkdown>;
+  >{normalized}</ReactMarkdown>;
 }
 
 function BilingualBlock({ block, state, records, annotations, activeTranslationKeys, annotationsVisible, markdownPath, figureAnalysisFor, onToggleFigure, onToggleTranslation, onOpenAnnotation, onOpenTerm, onLeaveTerm, onSentenceContextMenu }: { block: ReaderBlock; state?: TranslationState; records: ProjectedTranslationRecord[]; annotations: ReaderAnnotation[]; activeTranslationKeys: ReadonlySet<string>; annotationsVisible: boolean; markdownPath?: string; figureAnalysisFor?: (source?: string) => FigureAnalysis | undefined; onToggleFigure?: (source?: string) => void; onToggleTranslation: (key: string) => void; onOpenAnnotation: (kind: "translation" | "chat", relatedId: string | undefined, annotationIds: string[], rect: DOMRect) => void; onOpenTerm: (term: TranslationTerm, sentence: string, language: "source" | "translated", rect: DOMRect, pinned: boolean) => void; onLeaveTerm: () => void; onSentenceContextMenu: (block: ReaderBlock, event: ReactMouseEvent<HTMLElement>) => void }) {
@@ -217,7 +218,8 @@ function BilingualBlock({ block, state, records, annotations, activeTranslationK
       window.removeEventListener("resize", measure);
     };
   }, [activeTranslationKeys, annotations, annotationsVisible, annotationPlugin]);
-  return <div ref={sourceRef} data-reader-block-id={block.id} className="reader-source range-annotated-source" onContextMenu={(event) => onSentenceContextMenu(block, event)}><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath, annotationPlugin]} rehypePlugins={[rehypeKatex]} components={{
+  const normalizedBlock = normalizeMarkdownMath(block.text);
+  return <div ref={sourceRef} data-reader-block-id={block.id} className="reader-source range-annotated-source" onContextMenu={(event) => onSentenceContextMenu(block, event)}><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath, createDisplayMathPlugin(normalizedBlock), annotationPlugin]} rehypePlugins={[rehypeKatex]} components={{
     table: ReaderTable,
     span: ({ children, ...props }) => {
       const attributes = props as Record<string, unknown>;
@@ -244,7 +246,7 @@ function BilingualBlock({ block, state, records, annotations, activeTranslationK
       const analysis = figureAnalysisFor?.(src);
       return <span className="markdown-figure-inline"><img className="markdown-paper-figure" src={rendered} alt={alt ?? "Extracted paper figure"} loading="lazy" />{onToggleFigure && <button className={`figure-ai-button ${analysis?.status ?? "pending"}`} onClick={() => onToggleFigure(src)}><Sparkles size={13} /> {analysis?.status === "completed" ? "AI 图解" : analysis?.status === "failed" ? "重试图解" : "图解待处理"}</button>}{analysis?.description && analysis.id.endsWith(":expanded") && <div className="figure-ai-description"><MarkdownBlock value={analysis.description} /></div>}</span>;
     },
-  }}>{normalizeMarkdownMath(block.text)}</ReactMarkdown>{annotationsVisible && rails.length > 0 && <div className="reader-annotation-rails" aria-label="正文标注">{rails.map((rail) => <button key={rail.id} type="button" className={`reader-annotation-rail ${rail.kind}`} style={{ left: rail.left, top: rail.top, width: rail.width }} title={rail.kind === "translation" ? "点击切换中英文；右键管理译文" : "点击查看论文问答或解释"} aria-label={rail.kind === "translation" ? "切换该句中英文" : "查看该处论文问答或解释"} onMouseDown={(event) => event.preventDefault()} onContextMenu={(event) => { if (rail.kind !== "translation") return; event.preventDefault(); event.stopPropagation(); onOpenAnnotation("translation", rail.translationId, [], event.currentTarget.getBoundingClientRect()); }} onClick={(event) => { event.stopPropagation(); if (rail.kind === "translation" && rail.translationKey) onToggleTranslation(rail.translationKey); else onOpenAnnotation("chat", rail.relatedId, rail.annotationIds, event.currentTarget.getBoundingClientRect()); }} />)}</div>}</div>;
+  }}>{normalizedBlock}</ReactMarkdown>{annotationsVisible && rails.length > 0 && <div className="reader-annotation-rails" aria-label="正文标注">{rails.map((rail) => <button key={rail.id} type="button" className={`reader-annotation-rail ${rail.kind}`} style={{ left: rail.left, top: rail.top, width: rail.width }} title={rail.kind === "translation" ? "点击切换中英文；右键管理译文" : "点击查看论文问答或解释"} aria-label={rail.kind === "translation" ? "切换该句中英文" : "查看该处论文问答或解释"} onMouseDown={(event) => event.preventDefault()} onContextMenu={(event) => { if (rail.kind !== "translation") return; event.preventDefault(); event.stopPropagation(); onOpenAnnotation("translation", rail.translationId, [], event.currentTarget.getBoundingClientRect()); }} onClick={(event) => { event.stopPropagation(); if (rail.kind === "translation" && rail.translationKey) onToggleTranslation(rail.translationKey); else onOpenAnnotation("chat", rail.relatedId, rail.annotationIds, event.currentTarget.getBoundingClientRect()); }} />)}</div>}</div>;
 }
 
 export function Reader({ paper, root }: { paper?: LibraryPaper; root: string }) {

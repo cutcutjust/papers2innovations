@@ -394,7 +394,7 @@ def _render_blocks(payload: dict[str, Any], formulas: dict[int, str] | None = No
                 raise ValueError(f"公式 {number or ''} 未通过 LaTeX 结构校验")
             latex = str(latex).strip().strip("$")
             tag = f" \\tag{{{int(number)}}}" if str(number).isdigit() and "\\tag" not in latex else ""
-            rendered.append(f"$${latex}{tag}$$")
+            rendered.append(f"$$\n{latex}{tag}\n$$")
         else:
             rendered.append(re.sub(r"\s*\n\s*", " ", text))
     if not rendered:
@@ -843,7 +843,7 @@ def reconstruct_visual_regions(
                 continue
             tagged = re.search(rf"\\tag\{{\s*{int(number)}\s*\}}", existing)
             if not tagged:
-                missing.append(f"$${latex} \\tag{{{int(number)}}}$$")
+                missing.append(f"$$\n{latex} \\tag{{{int(number)}}}\n$$")
         if missing:
             page_parts.setdefault(item["page"], []).append((item["sequence"], "\n\n".join(missing)))
 

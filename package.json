@@ -1,7 +1,7 @@
 {
   "name": "papers2innovations",
   "private": true,
-  "version": "0.1.35",
+  "version": "0.1.36",
   "workspaces": [
     "apps/desktop",
     "packages/*"

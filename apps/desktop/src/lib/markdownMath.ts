@@ -1,6 +1,18 @@
 const FENCED_CODE = /^ {0,3}(`{3,}|~{3,})[^\n]*(?:\r?\n|$)[\s\S]*?^ {0,3}\1[ \t]*(?=\r?$)/gm;
 const INLINE_CODE = /(`+)([^`\n]*?)\1/g;
 
+type MarkdownPosition = {
+  start?: { offset?: number };
+  end?: { offset?: number };
+};
+
+type MarkdownNode = {
+  type: string;
+  value?: string;
+  children?: MarkdownNode[];
+  position?: MarkdownPosition;
+};
+
 function normalizeTextMath(value: string): string {
   return value
     // Keep replacement lengths stable so Reader source offsets remain valid.
@@ -30,4 +42,24 @@ export function normalizeMarkdownMath(value: string): string {
     cursor = index + match[0].length;
   }
   return output + normalizeInlineCodeAware(value.slice(cursor));
+}
+
+/** Promote a paragraph containing one single-line $$...$$ node to display math. */
+export function createDisplayMathPlugin(source: string) {
+  return function displayMathPlugin() {
+    return (tree: MarkdownNode) => {
+      if (!tree.children) return;
+      tree.children = tree.children.map((node) => {
+        if (node.type !== "paragraph" || node.children?.length !== 1) return node;
+        const inline = node.children[0];
+        if (inline.type !== "inlineMath") return node;
+        const start = node.position?.start?.offset;
+        const end = node.position?.end?.offset;
+        if (!Number.isInteger(start) || !Number.isInteger(end)) return node;
+        const original = source.slice(start, end).trim();
+        if (!/^\$\$[\s\S]*\$\$$/.test(original)) return node;
+        return { type: "math", value: inline.value ?? "", position: node.position };
+      });
+    };
+  };
 }

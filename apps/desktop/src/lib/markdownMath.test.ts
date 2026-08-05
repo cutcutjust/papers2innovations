@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { normalizeMarkdownMath } from "./markdownMath";
+import type { Root } from "mdast";
+import { unified } from "unified";
+import remarkParse from "remark-parse";
+import remarkMath from "remark-math";
+import { createDisplayMathPlugin, normalizeMarkdownMath } from "./markdownMath";
 
 describe("AI Markdown math normalization", () => {
   it("converts model-style inline and display LaTeX delimiters", () => {
@@ -27,5 +31,28 @@ $$
 \sum_i x_i
 $$`;
     expect(normalizeMarkdownMath(source)).toBe(source);
+  });
+
+  it("promotes a single-line double-dollar equation to display math", async () => {
+    const source = String.raw`$$\beta = 1 - \frac{d(z_i, c_i)}{\max_k d(z_k, c_k)} \tag{5}$$`;
+    const processor = unified()
+      .use(remarkParse)
+      .use(remarkMath)
+      .use(createDisplayMathPlugin(source));
+    const tree = await processor.run(processor.parse(source)) as Root;
+
+    expect(tree.children).toHaveLength(1);
+    expect(tree.children[0]).toMatchObject({ type: "math" });
+  });
+
+  it("leaves ordinary single-dollar inline math unchanged", async () => {
+    const source = String.raw`$x_i$`;
+    const processor = unified()
+      .use(remarkParse)
+      .use(remarkMath)
+      .use(createDisplayMathPlugin(source));
+    const tree = await processor.run(processor.parse(source)) as Root;
+
+    expect(tree.children[0]).toMatchObject({ type: "paragraph" });
   });
 });
