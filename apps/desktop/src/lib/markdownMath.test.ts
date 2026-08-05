@@ -3,6 +3,8 @@ import type { Root } from "mdast";
 import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkMath from "remark-math";
+import remarkRehype from "remark-rehype";
+import rehypeKatex from "rehype-katex";
 import { createDisplayMathPlugin, normalizeMarkdownMath } from "./markdownMath";
 
 describe("AI Markdown math normalization", () => {
@@ -42,7 +44,21 @@ $$`;
     const tree = await processor.run(processor.parse(source)) as Root;
 
     expect(tree.children).toHaveLength(1);
-    expect(tree.children[0]).toMatchObject({ type: "math" });
+    expect(tree.children[0]).toMatchObject({
+      type: "math",
+      data: { hName: "pre" },
+    });
+
+    const renderedProcessor = unified()
+      .use(remarkParse)
+      .use(remarkMath)
+      .use(createDisplayMathPlugin(source))
+      .use(remarkRehype)
+      .use(rehypeKatex);
+    const rendered = await renderedProcessor.run(renderedProcessor.parse(source));
+    const serialized = JSON.stringify(rendered);
+    expect(serialized).toContain("katex-display");
+    expect(serialized).not.toContain("katex-error");
   });
 
   it("leaves ordinary single-dollar inline math unchanged", async () => {

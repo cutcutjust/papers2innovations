@@ -1,17 +1,8 @@
+import type { Root, RootContent } from "mdast";
+import type { Plugin } from "unified";
+
 const FENCED_CODE = /^ {0,3}(`{3,}|~{3,})[^\n]*(?:\r?\n|$)[\s\S]*?^ {0,3}\1[ \t]*(?=\r?$)/gm;
 const INLINE_CODE = /(`+)([^`\n]*?)\1/g;
-
-type MarkdownPosition = {
-  start?: { offset?: number };
-  end?: { offset?: number };
-};
-
-type MarkdownNode = {
-  type: string;
-  value?: string;
-  children?: MarkdownNode[];
-  position?: MarkdownPosition;
-};
 
 function normalizeTextMath(value: string): string {
   return value
@@ -45,11 +36,10 @@ export function normalizeMarkdownMath(value: string): string {
 }
 
 /** Promote a paragraph containing one single-line $$...$$ node to display math. */
-export function createDisplayMathPlugin(source: string) {
+export function createDisplayMathPlugin(source: string): Plugin<[], Root> {
   return function displayMathPlugin() {
-    return (tree: MarkdownNode) => {
-      if (!tree.children) return;
-      tree.children = tree.children.map((node) => {
+    return (tree: Root) => {
+      tree.children = tree.children.map((node): RootContent => {
         if (node.type !== "paragraph" || node.children?.length !== 1) return node;
         const inline = node.children[0];
         if (inline.type !== "inlineMath") return node;
@@ -58,7 +48,21 @@ export function createDisplayMathPlugin(source: string) {
         if (!Number.isInteger(start) || !Number.isInteger(end)) return node;
         const original = source.slice(start, end).trim();
         if (!/^\$\$[\s\S]*\$\$$/.test(original)) return node;
-        return { type: "math", value: inline.value ?? "", position: node.position };
+        const value = inline.value ?? "";
+        return {
+          type: "math",
+          value,
+          position: node.position,
+          data: {
+            hName: "pre",
+            hChildren: [{
+              type: "element",
+              tagName: "code",
+              properties: { className: ["language-math", "math-display"] },
+              children: [{ type: "text", value }],
+            }],
+          },
+        } as RootContent;
       });
     };
   };
